@@ -1,0 +1,565 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HPS Data Mart
+      * PROGRAM:     HP203 - DataMart BGF: Build Daily Production
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     01/28/02
+      *
+      * FUNCTION:    This file in the Data Mart is 1) cleared/built for a 'history' run or
+      *              2) records are deleted/written for a 'current' run.
+      *
+      *              Only BGF farms have daily production data.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 03/26/02  LeAnne Fedor
+      *           Added 'production type' to Datamart file.
+      *
+      * 09/18/02  LeAnne Fedor
+      *           Removed program code for 2 fields (they will be 0 until removed):
+      *                beginning piglet inventory
+      *                ending piglet inventory
+      *           Added fields:
+      *                arrived sows
+      *                transferred out open gilts
+      *                transferred out open sows
+      *           Changed text on fields:
+      *                transferred in gilts   is now   transferred in bred gilts
+      *                transferred in sows    is now   transferred in bred sows
+      *
+      * 10/24/02  LeAnne Fedor
+      *           Added fields:
+      *               doa head on transfers out
+      *               koa head on transfers out
+      *               scheduled head on scheduled transfers out to wean-to-finish groups
+      *
+      * 12/26/02  LeAnne Fedor
+      *           To accommodate History/Current processing, I 1) changed the primary file to
+      *           be a logical keyed by 'week-ending date' and 2) added an open query
+      *           selection in the CL that selects the records for 'history' vs 'current'
+      *           processing.
+      *
+      * 10/23/03  LeAnne Fedor
+      *           Added fields:
+      *               gilt total stillborns
+      *               gilt total mummies
+      *               15-16 day weaned sows
+      *               17+ day weaned sows
+      *               euthanized gilts
+      *               euthanized sows
+      *           Changed text on fields:
+      *               from: gilts dead     to:  gilts dead naturally
+      *               from: sows dead      to:  sows dead naturally
+      *           Changed the calculation of Datamart field called 'Sows Weaned' to include
+      *            all 3 'wean' fields: early, 15-16 days, 17+ days.
+      *
+      * 02/03/05  LeAnne Fedor
+      *           Added field: Transferred in Open Gilts
+      *
+      * 03/21/05  Barb Gutierrez
+      *           Added logic to retrieve culled head and culled pounds
+      *           per request COG032.
+      *
+      * 06/06/05  LeAnne Fedor
+      *           We were encountering extensive IO's on HSL084C. We added
+      *           Received Date as a key field and changed the logic to READE on
+      *           Farm/Date instead of just Farm.
+      *
+      * 07/05/05  LeAnne Fedor
+      *           Beginning Piglet Inventory and Ending Piglet Inventory were already
+      *           in the Datamart BGF Daily Production file; but, we were not populating
+      *           them. We now have added logic to populate these fields.
+      *
+      * 08/23/05  LeAnne Fedor
+      *           Added field: Man Hours
+      *
+      * 04/27/06  LeAnne Fedor
+      *           Changed the "NC" (not-complete sales movement) logic. We
+      *           now handle NC like "FP" (fully paid) instead of like
+      *           "SH" (shipped).
+      *
+      * 06/15/06  LeAnne Ramsey
+      *           Recompile only. New field "Avg Gilt Weight @ 28 Weeks" added
+      *           to BGF Weekly Production file.
+      *
+      * 08/04/08  LeAnne Ramsey
+      *           Fields temporarily left in file--but set to zero:
+      *                           BPIOGLHD - Transferred in Open Gilts
+      *                           BPOOGLHD - Gilts Transferred Out Open
+      *                           BP17WNLT - 17+ Day Weaned Sows
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp018    if   e           k disk
+      *  Farm site
+      *
+      *
+     Fhsl034d   if   e           k disk
+      *  Hog group
+      *
+      *
+     Fhsl074h   if   e           k disk
+      *  Transfer movement header  (key fields overridden in CLP)
+      *
+      *
+     Fhsl074j   if   e           k disk    rename(mhrec:mhrecj)
+      *  Transfer movement header
+      *
+      *
+     Fhsp075    if   e           k disk
+      *  Transfer movement detail
+      *
+      *
+     Fhsl082c   if   e           k disk
+      *  BGF daily production     (records selected by open query)
+      *
+      *
+     Fhsl084c   if   e           k disk
+      *  Sales movement header
+      *
+      *
+     Fhsp085    if   e           k disk
+      *  Sales movement detail
+      *
+      *
+     Fhplb082b  if   e           k disk    rename(bdrec:bdrecb) prefix(p2)
+      *  DataMart BGF: Daily Production
+      *
+      *
+     Fhsl092b   if   e           k disk
+      *  BGF weekly production
+      *
+      *
+     Fhppb082   o    e             disk    rename(bdrec:bdrec1) prefix(p1)
+      *  DataMart BGF: Daily Production
+      *
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Workfields
+      *
+     D wkalphawk       s              2
+     D wkhd            s                   like(mdqlhd)
+     D wkavlb          s              7  2
+      *
+      * Parms
+      *
+     D xxccyymmdd      s                   like(bddpdt)
+     D xxname          s              9
+     D xxabbrev        s              4
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Read each record in the HPS BGF Daily Production file.
+      * (records were selected in an open query for 'history' or 'current')
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsl082c                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Move dates from CCYYMMDD format to ISO date field
+      *
+     C                   move      bdwedt        p1bdwedt
+     C                   move      bddpdt        p1bddpdt
+      *
+      *
+      * Retrieve 'production type' associated with farm site.
+      *
+     C                   exsr      $ptcd
+      *
+      * Retrieve the day of the week abbreviation and concatenate with week number
+      *
+     C                   exsr      $wkday
+      *
+      * Populate fields that map directly file-to-file.
+      *
+     C                   exsr      $directmap
+      *
+      * Retrieve the DOA and KOA head on transfer movements out of this farm for
+      * this day.
+     C                   exsr      $tranout
+      *
+      * Retrieve the head received and sales out of this farm for this week.
+      *
+     C                   exsr      $sales
+      *
+      * Retrieve the head scheduled out on transfer movements into wean-to-finish
+      * groups on this day.
+      *
+     C                   exsr      $schedtran
+      *
+      * Calculate fields based on 'other' fields.
+      *
+     C                   exsr      $calc
+      *
+      * Write record
+     C                   write     bdrec1
+     C                   clear                   bdrec1
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+     C                   seton                                        lr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Retrieve 'production type' associated with farm stie
+      *-----------------------------------------------------------------------------------------
+      *
+     C     $ptcd         begsr
+      *
+     C     bdfscd        chain     hsp018                             92
+     C                   if        *in92 = *off
+     C                   move      fsptcd        p1bdptcd
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Setup fields that are a direct map from the HPS file
+      *-----------------------------------------------------------------------------------------
+      *
+     C     $directmap    begsr
+      *
+     C                   z-add     bdfscd        p1bdfscd
+      *
+     C                   z-add     bdcdyr        p1bdcdyr
+     C                   z-add     bdcdwk        p1bdcdwk
+     C                   z-add     bdpicdt       p1bdpicdt
+      *
+     C                   z-add     bdwnsv        p1bdwnsv
+     C                   z-add     bdlwnsv       p1bdlwnsv
+     C                   z-add     bdrtsv        p1bdrtsv
+     C                   z-add     bdglsv        p1bdglsv
+      *
+     C                   z-add     bdopglhd      p1bdopglhd
+     C                   z-add     bdopsohd      p1bdopsohd
+      *
+     C                   z-add     bdabhd        p1bdabhd
+     C                   z-add     bdglabhd      p1bdglabhd
+     C                   z-add     bdnipqt       p1bdnipqt
+      *
+     C                   z-add     bdgllt        p1bdgllt
+     C                   z-add     bdglbahd      p1bdglbahd
+     C                   z-add     bdglsbhd      p1bdglsbhd
+     C                   z-add     bdglmmhd      p1bdglmmhd
+     C                   z-add     bdtolt        p1bdtolt
+     C                   z-add     bdbahd        p1bdbahd
+     C                   z-add     bdsbhd        p1bdsbhd
+     C                   z-add     bdmmhd        p1bdmmhd
+      *
+     C                   z-add     bdtolshd      p1bdtolshd
+      *
+     C                   z-add     bdewnlt       p1bdewnlt
+     C                   z-add     bdwnlt        p1bdwnlt
+     C                   eval      p1bdtownlt = bdewnlt + bdwnlt
+     C                   z-add     bdtownhd      p1bdtownhd
+     C                   z-add     bdadwn        p1bdadwn
+      *
+      *
+     C                   z-add     bdarglhd      p1bdarglhd
+     C                   z-add     bdibglhd      p1bdtiglhd
+     C                   z-add     bdslglhd      p1bdslglhd
+     C                   z-add     bdddglhd      p1bdddglhd
+     C                   z-add     bdeuglhd      p1bdeuglhd
+     C                   z-add     bdobglhd      p1bdtoglhd
+      *
+     C                   z-add     bdarsohd      p1bdarsohd
+     C                   z-add     bdibsohd      p1bdtisohd
+     C                   z-add     bdslsohd      p1bdslsohd
+     C                   z-add     bdddsohd      p1bdddsohd
+     C                   z-add     bdeusohd      p1bdeusohd
+     C                   z-add     bdobsohd      p1bdtosohd
+     C                   z-add     bdoosohd      p1bdoosohd
+      *
+     C                   z-add     bdarbohd      p1bdarbohd
+     C                   z-add     bdslbohd      p1bdslbohd
+     C                   z-add     bdddbohd      p1bdddbohd
+      *
+     C                   z-add     bdmanhr       p1bdmanhr
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------
+      * Retrieve the day of the week abbreviation and concatenate with week number
+      *-----------------------------------------------------------------------------
+      *
+     C     $wkday        begsr
+      *
+      * Retrieve day of week abbreviation
+      *
+     C                   call      'HP8005'
+     C                   parm      bddpdt        xxccyymmdd
+     C                   parm      *blank        xxname
+     C                   parm      *blank        xxabbrev
+      *
+      * Concatenate the week number and the day appbrevation into a single field.
+      *
+     C                   move      bdcdwk        wkalphawk
+      *
+     C                   eval      p1bdwkday = wkalphawk + '-' + xxabbrev
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Retrieve the head received on transfers out of this farm this week
+      *-----------------------------------------------------------------------------------------
+      *
+     C     $tranout      begsr
+      *
+      * Read all transfer movement headers out of this farm for this day.
+      * Read the detail records.    Accumulate values when:
+      *       a) the origin group IS NOT a GDU group and
+      *       b) the destination phase is 'nursery' or
+      *       c) the destination phase is 'grow finish' or 'BGF' and
+      *          the 'average received pounds' is 20 pounds or less
+      *
+      * NOTE: The header file is truly keyed with 'shipped date'; but, we override
+      *       the key list with 'received date' in the CL.
+      *
+     C     key01         setll     hsl074h
+      *
+     C                   dou       *in91 = *on                                  Do header
+     C     key01         reade     hsl074h                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C     mhmvsn        setll     hsp075
+     C                   dou       *in93 = *on                                  Do detail
+     C     mhmvsn        reade     hsp075                                 93
+     C                   if        *in93 = *off                                 If record
+      *
+      * Determine if origin group is GDU.
+      *
+     C     mdorsn        chain     hsl034d                            92
+     C                   if        *in92 = *off and hggtcd <> 'G'               If not GDU
+      *
+      * Calculate average received pounds when the destination phase is
+      * Grow Finish or BGF.
+      *
+     C                   z-add     0             wkavlb
+     C                   if        mhdnpp = 'GF   ' or mhdnpp = 'BGF  '         If grow finish
+     C     mdrjhd        add       mdqlhd        wkhd
+     C                   if        wkhd <> 0
+     C                   eval(h)   wkavlb = (mdqllb + mdrjlb) / wkhd
+     C                   endif
+     C                   endif                                                  If grow finish
+      *
+     C                   if        (mhdnpp = 'GF   ' and wkavlb <= 20) or       If OK
+     C                             (mhdnpp = 'BGF  ' and wkavlb <= 20) or
+     C                              mhdnpp = 'NUR  '
+     C                   add       mddoahd       p1bddoahd
+     C                   add       mdkoahd       p1bdkoahd
+     C                   endif                                                  If OK
+      *
+     C                   endif                                                  If not GDU
+     C                   endif                                                  If record
+     C                   enddo                                                  Do detail
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do header
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Read sales looking for Cull Sales out for a Farm/Date
+      *-----------------------------------------------------------------------------------------
+      *
+      * Read all sales movement header records out for a farm/date.
+      * If it is a Cull Sale, process.
+      *
+     C     $sales        begsr
+      *
+     C     key02         setll     hsl084c
+      *
+     C                   dou       *in91 = *on                                  Do header
+     C     key02         reade     hsl084c                                91
+     C                   if        *in91 = *off and                             If not EOF
+     C                             shstcd = 'CULLS'
+      *
+     C                   exsr      $culls
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do header
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Cull sales
+      *-----------------------------------------------------------------------------------------
+      *
+     C     $culls        begsr
+      *
+      * Read sales detail for the movement
+      *
+     C     shmvsn        setll     hsp085
+      *
+     C                   dou       *in93 = *on                                  Do cull detail
+     C     shmvsn        reade     hsp085                                 93
+     C                   if        *in93 = *off                                 If record
+      *
+     C                   select
+     C                   when      shmscd = 'SH'
+     C                   add       sgshhd        p1bdcuhd
+     C                   add       sgshlb        p1bdculb
+     C                   other
+     C                   add       sglvhd        p1bdcuhd
+     C                   add       sglvlb        p1bdculb
+     C                   endsl
+      *
+     C                   endif                                                  If record
+     C                   enddo                                                  Do cull detail
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Retrieve the head scheduled out on transfers into wean-to-finish groups for this week
+      *-----------------------------------------------------------------------------------------
+      *
+     C     $schedtran    begsr
+      *
+      * Read all scheduled transfer movement headers out of this farm for this day.
+      * Read the detail records.    Accumulate values when:
+      *       a) the destination group is a 'wean-to-finish' group
+      *
+     C     key01         setll     hsl074j
+      *
+     C                   dou       *in91 = *on                                  Do header
+     C     key01         reade     hsl074j                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C     mhmvsn        setll     hsp075
+     C                   dou       *in93 = *on                                  Do detail
+     C     mhmvsn        reade     hsp075                                 93
+     C                   if        *in93 = *off                                 If record
+      *
+      * Determine if destination group is a wean-to-finish group
+      *
+     C     mddnsn        chain     hsl034d                            92
+     C                   if        *in92 = *off and hggtcd = 'W'                If wean-to-finish
+     C                   add       mdschd        p1bdschd
+     C                   endif                                                  If wean-to-finish
+      *
+     C                   endif                                                  If record
+     C                   enddo                                                  Do detail
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do header
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculate fields
+      *---------------------------------------------------------------
+      *
+     C     $calc         begsr
+      *
+      *
+      * Beginning Piglet Inventory
+      *
+      * Beginning Piglet Inventory is conditionally populated from Ending Piglet Inventory
+      *   If you are processing a 'Sunday' record,
+      *      retrieve the most recent record for this farm prior to this week
+      *      from the HPS BGF Weekly Production file and use that Ending Piglet Inventory
+      *   Else
+      *      retrieve the most recent record for this farm prior to this day
+      *      from the Datamart BGF Daily Production file and use that Ending Piglet Inventory
+      *
+     C                   select
+     C                   when      xxabbrev = 'Sun '
+     C     key03         setll     hsl092b
+     C     p1bdfscd      readpe    hsl092b                                92
+     C                   if        *in92 = *off
+     C                   z-add     bpenplhd      p1bdbgplhd
+     C                   endif
+     C                   other
+      *
+     C     key01         setll     hplb082b
+     C     p1bdfscd      readpe    hplb082b                               92
+     C                   if        *in92 = *off
+     C                   z-add     p2bdenplhd    p1bdbgplhd
+     C                   endif
+     C                   endsl
+      *
+      *
+      * Ending Piglet Inventory (aka: Calculated Daily Ending Piglet Inventory)
+      *
+      *   Calc:      beginning piglet inventory
+      *           +  total born alive
+      *           -  total prewean losses
+      *           -  total pigs weaned
+      *
+     C                   eval      p1bdenplhd = p1bdbgplhd
+     C                                        + p1bdbahd
+     C                                        - p1bdtolshd
+     C                                        - p1bdtownhd
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C     key01         klist
+     C                   kfld                    p1bdfscd
+     C                   kfld                    bddpdt
+      *
+     C     key02         klist
+     C                   kfld                    bdfscd
+     C                   kfld                    shrcdt
+      *
+     C     key03         klist
+     C                   kfld                    p1bdfscd
+     C                   kfld                    bdwedt
+      *
+     C                   endsr
+      /eject

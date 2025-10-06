@@ -1,0 +1,588 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     Margin: Product Splits
+      * PROGRAMMER:  LeAnne Ramsey
+      * DATE:        10/05/06
+      *
+      * Function: Retrieve the Product Split records and update the Margin Detail file.
+      *
+      /eject
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/11/06  LeAnne Ramsey
+      *           Added logic to populate new fields in TFP014:
+      *              ADPSFL-Product Split Flag
+      *              ADPSEFDT-Product Split Effective Date
+      *              ADSTAR-Star/Asterisk
+      *
+      * 10/31/06  LeAnne Ramsey
+      *           Changed the following to be "direct map" instead of calculated:
+      *              Produced margin per produced pound
+      *              Sold margin per sold pound
+      *              Sold margin per sold start weight
+      *
+      * 11/09/06  LeAnne Ramsey
+      *           Added "period" dates to the Margin file and changed LDA positions.
+      *
+      * 02/15/07  LeAnne Ramsey
+      *           Added "other cost" logic to populate or new "other cost" field.
+      *
+      * 04/16/07  LeAnne Ramsey
+      *           We switched the following flag fields:
+      *             1) Exclude from Mix Flag    is now Mix Flag
+      *             2) Exclude from Volume Flag is now Volume Flag
+      *           Before this change Y=Yes meant EXCLUDE the product from processing
+      *           After this change  Y=Yes means INCLUDE the product in processing
+      *
+      * 06/22/07  LeAnne Ramsey
+      *           We added new fields to the Margin Adjustment Detail file for the
+      *           new Co-Owned logic:
+      *                 Item type code
+      *                 Co-owned Flag
+      *                 Producing Company
+      *                 TF Percent Owned
+      *                 SBF CoOwned Transfer Product Cost Amount
+      *
+      * 03/23/12  LeAnne Ramsey (E2017)
+      *           Damon wants the CVC HAM Items (Item Structure 400) to appear/process
+      *           in Section 1 of TF615-Volume Adjustment Backup Report so that their
+      *           Start LBS are included in the Converted Products Yielded Weights on
+      *           TF616-Volume Adjustment Report.  To do this, I had to override the
+      *           Include in Volume Flag to Yes for the CVC Items that were created as
+      *           splits from the NVA Ham records.
+      *           The Volume Flag is associated with Item Structure Type/Group/Class.
+      *           BUT, Damon wants all of the 400 NVA Items to stay in Section 3;
+      *           only the CVCs created from the NVA Splits should move to Section 1.
+      *           So, he cannot change the Include in Volume flag for the entire
+      *           Type/Group/Class. AND, the logic does not allow him to create 2 separate
+      *           entries for a Type/Group/Class in the Margin Adj Group Detail file
+      *           ....which would allow him to have both an Include and Exclude grouping.
+      *
+      *           So, just like we falsify the Item's Type/Group/Class when we write the
+      *           CVC split record to TFP014, we will now also override the Include in
+      *           Volume flag to Yes to force the CVC splits for HAMS to process/print in
+      *           Section 1 of the Volume Backup Report...instead of in Section 2 where
+      *           they currently print.
+      *
+      * 09/05/12  LeAnne Ramsey (E2243)
+      *           I added a new field to TFP014 for Skirt Meat stuff:
+      *                         ADSMSFL-Skirt Meat Split Flag
+      *           So, I added a line of code here to populate it.
+      *
+      * 03/24/14  LeAnne Ramsey (E3053)
+      *           Damon has a new Item 2124; it is an NV/NVA/700 MixSubgroup "A" item.
+      *           He is creating a Product Split (thru TF445) to split a percent of 2124 to:
+      *                   TF Class Group: CV
+      *                TF Classification: CVB
+      *              Item Structure Type: 600
+      *           But, he wants the CV/CVB/600 record that we write to TFP014 to have a
+      *           "Mix Group=blank'. If it doesn't, it goes to a new/separate page when
+      *           it prints on TF617-Mix Adjustment Report.
+      *           So, I am going to hardcode a 'Mix Group = blank' when the split is from
+      *           NV/NVA/700.
+      *
+      * 05/03/19  Brad Baden    E14945
+      *           Added "other cost" logic to calculate the split amount values for the
+      *           "other cost amount" field if the creation of the TFL014A record and
+      *           and the update of the associated TFP014 record.
+      *
+      * 02/09/22  Danny Nguyen   - DO2484 - WI479 STF Variance Reporting
+      *           DBFC on TFP014 file. Added the following fields:
+      *             ADXPULB  - STF PRODUCED LBS
+      *             ADXPUSLB - STF PRODUCED START WEIGHT
+      *             ADXYPC   - STF STD YIELD %
+      *             ADXPMPPC - STF PUMP %
+      *             ADXSLLB  - STF SOLD LBS
+      *             ADXSLSLB - STF SOLD START WEIGHT
+      *           Populate ADXPULB & ADXPUSLB fields & update in TFP014 file in the
+      *           $calcs subroutine.
+      *
+      * 10/10/22  R Centonze   W105621 - Increase price fields to handle > 999.99
+      *         COPY @@SPU1MG TO  @@SPU1MG10 SIZE 10.6  -> FIELD TFP014.ADSPU1MG
+      *         COPY @@TPU1MG TO  @@TPU1MG10 SIZE 10.6  -> FIELD TFP014.ADTPU1MG
+      *         COPY @@SSL1MG TO  @@SSL1MG10 SIZE 10.6  -> FIELD TFP014.ADSSL1MG
+      *         COPY @@SSL2MG TO  @@SSL2MG10 SIZE 10.6  -> FIELD TFP014.ADSSL2MG
+      *         COPY @@TSL1MG TO  @@TSL1MG10 SIZE 10.6  -> FIELD TFP014.ADTSL1MG
+      *         COPY @@TSL2MG TO  @@TSL2MG10 SIZE 10.6  -> FIELD TFP014.ADTSL2MG
+      * 05/07/24  Santosh Patil P310149 - Field length is increased in TFP014 &
+      *          function is recompiled only.
+      *         @@SSLMGAM 11.2 to 13.2  -> TFP014.ADSSLMGAM
+      *
+      /eject
+      ***********************************************************************************
+      * FILE SPECIFICATIONS
+      ***********************************************************************************
+      *
+     Ftfl045a   if   e           k disk
+      *  Product splits (logical selects only Active records)
+      *
+      *
+     Ftfp014    uf   e           k disk
+      *  Product margin adjustment transaction detail
+      *
+      *
+     Ftfl014a   uf a e           k disk    rename(adrec:adreca) prefix(p1)
+      *  Product margin adjustment transaction detail
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Work fields
+      *
+     D wkrate          s              9  6
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      *  Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwedt                29     36  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *************************************************************************************
+      * Mainline
+      *************************************************************************************
+      *
+      * Process each Active record in the Product Split file with an Effective
+      * Date on/before this Week-Ending Date.
+      *
+     C     *loval        setll     tfl045a
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      tfl045a                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             psefdt <= ldwedt
+      *
+      * If there is a Margin Adjustment Detail record for the Product/Week,
+      * continue processing.
+      *
+     C     key01         chain     tfp014                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   exsr      $wrt014
+      *
+     C                   move      yes           adpsfl
+     C                   move      '*'           adstar
+     C                   z-add     psefdt        adpsefdt
+     C                   update    adrec
+     C                   endif                                                  If hit
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * EOF processing
+      *
+     C                   seton                                        lr
+      /eject
+      *-------------------------------------------------------------------------------------------
+      * Populate fields that are a Direct Map
+      *-------------------------------------------------------------------------------------------
+      *
+     C     $directmap    begsr
+      *
+      * Populate fields that are a direct map from the Margin Adjustment Detail record
+      *
+     C                   z-add     adyr          p1adyr
+     C                   z-add     adwk          p1adwk
+     C                   z-add     adpe          p1adpe
+     C                   z-add     adwbdt        p1adwbdt
+     C                   z-add     adwedt        p1adwedt
+     C                   z-add     adpbdt        p1adpbdt
+     C                   z-add     adpedt        p1adpedt
+      *
+     C                   move      aditycd       p1aditycd
+     C                   z-add     adprcd        p1adprcd
+     C                   z-add     adisgrcd      p1adisgrcd
+     C                   z-add     adisclcd      p1adisclcd
+     C                   move      admixgrp      p1admixgrp
+     C                   move      adglsub       p1adglsub
+      * CoOwned Values
+     C                   move      adcoownfl     p1adcoownfl
+     C                   move      adprdcmp      p1adprdcmp
+     C                   z-add     adtownpc      p1adtownpc
+      * Flags
+     C                   move      adrmfl        p1adrmfl
+     C                   move      admixfl       p1admixfl
+     C                   move      adpefl        p1adpefl
+     C                   move      adstar        p1adstar
+     C                   move      adsmsfl       p1adsmsfl
+      * Percents
+     C                   z-add     adpumppc      p1adpumppc
+     C                   z-add     adypc         p1adypc
+      * Per Pound Costs
+     C                   z-add     admco         p1admco
+     C                   z-add     adico         p1adico
+     C                   z-add     adkco         p1adkco
+     C                   z-add     adlco         p1adlco
+     C                   z-add     adoco         p1adoco
+     C                   z-add     adpco         p1adpco
+      *
+      * Produced margin per produced pound
+      *
+     C                   z-add     adspu1mg      p1adspu1mg
+     C                   z-add     adtpu1mg      p1adtpu1mg
+      *
+      * Sold margin per sold pound
+      *
+     C                   z-add     adssl1mg      p1adssl1mg
+     C                   z-add     adtsl1mg      p1adtsl1mg
+      *
+      * Sold margin per sold start weight
+      *
+     C                   z-add     adssl2mg      p1adssl2mg
+     C                   z-add     adtsl2mg      p1adtsl2mg
+      *
+      * Converted Raw Material Flag (E2017)
+      *  In March 2012, Damon G. realized that the CONVERTED Ham Items
+      *  should be printing in Section 1 instead of Section 3 on the
+      *  TF615-Volume Adjustment Backup Report. This is controlled by the
+      *  Include in Volume flag. SO, we will continue to move in the Flag
+      *  value from TFP014. BUT, for converted HAMS, we will now override to Yes.
+      *
+     C                   move      advolfl       p1advolfl
+     C                   if        pstfcgcd = 'CV' and
+     C                             pstfclcd = 'CVC' and
+     C                             psistycd = 400
+     C                   move      yes           p1advolfl
+     C                   endif
+      *
+      * Mix Subgroup on Product Splits from NV/NVA/700 (E3053)
+      *  In March 2014, Damon G. split an NV/NVA/700 Item (Item 2124). NV/NVA/700 is
+      *  one of the few Margin Adjustment Groups (PPAOREP) that has a Mix Subgroup (A, B, C).
+      *  He wants the Mix Subgroup to be blank on the record we are setting up below...
+      *  otherwise, it prints in the Mix Subgroup "A" section on TF617-Mix Adj Report.
+      *  In this instance, he is splitting to CVB/600 which does not even have a Mix
+      *  Subgorup. I'm just hardcoding for now....if it becomes a problem, I'll do
+      *  something else later.
+      *
+     C                   if        adtfcgcd = 'NV' and
+     C                             adtfclcd = 'NVA' and
+     C                             adistycd = 700
+     C                   move      *blank        p1admixgrp
+     C                   endif
+      *
+      * Populate fields that come directly from the Product Split record
+      *
+     C                   move      pstfcgcd      p1adtfcgcd
+     C                   move      pstfclcd      p1adtfclcd
+     C                   z-add     psistycd      p1adistycd
+     C                   z-add     psefdt        p1adpsefdt
+      *
+     C                   move      yes           p1adpsfl
+     C                   move      '*'           p1adstar
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------------
+      * Make Calculations
+      *-------------------------------------------------------------------------------------------
+      *
+     C     $calcs        begsr
+      *
+      * Get Split Percent into a "rate" field.
+      *
+     C                   eval      wkrate = psspltpc / 100
+      *
+      *--------------------------------------
+      * SEABOARD
+      *--------------------------------------
+      *
+      * SBF production scheduled pounds
+      *
+     C     adspslb       mult      wkrate        p1adspslb
+     C     adspslb       sub       p1adspslb     adspslb
+      *
+      * SBF produced pounds
+      *
+     C     adspulb       mult      wkrate        p1adspulb
+     C     adspulb       sub       p1adspulb     adspulb
+      *
+      * SBF produced value amount
+      *
+     C     adspuam       mult      wkrate        p1adspuam
+     C     adspuam       sub       p1adspuam     adspuam
+      *
+      * SBF coOwned transfer product cost amount
+      *
+     C     adstrpam      mult      wkrate        p1adstrpam
+     C     adstrpam      sub       p1adstrpam    adstrpam
+      *
+      * SBF produced start weight
+      *
+     C     adspuslb      mult      wkrate        p1adspuslb
+     C     adspuslb      sub       p1adspuslb    adspuslb
+      *
+      * SBF produced meat cost amount
+      *
+     C     adspumam      mult      wkrate        p1adspumam
+     C     adspumam      sub       p1adspumam    adspumam
+      *
+      * SBF produced meat labor cost amount
+      *
+     C     adspulam      mult      wkrate        p1adspulam
+     C     adspulam      sub       p1adspulam    adspulam
+      *
+      * SBF produced packaging cost amount
+      *
+     C     adspukam      mult      wkrate        p1adspukam
+     C     adspukam      sub       p1adspukam    adspukam
+      *
+      * SBF produced ingredient cost amount
+      *
+     C     adspuiam      mult      wkrate        p1adspuiam
+     C     adspuiam      sub       p1adspuiam    adspuiam
+      *
+      * SBF produced other cost amount    5/03/19 JBB E14945
+      *
+     C     adspuoam      mult      wkrate        p1adspuoam
+     C     adspuoam      sub       p1adspuoam    adspuoam
+      *
+      * SBF produced product cost amount
+      *
+     C     adspupam      mult      wkrate        p1adspupam
+     C     adspupam      sub       p1adspupam    adspupam
+      *
+      * SBF produced margin amount
+      *
+     C     adspumgam     mult      wkrate        p1adspumgam
+     C     adspumgam     sub       p1adspumgam   adspumgam
+      *
+      * SBF sold pounds
+      *
+     C     adssllb       mult      wkrate        p1adssllb
+     C     adssllb       sub       p1adssllb     adssllb
+      *
+      * SBF net product revenue amount
+      *
+     C     adsnpram      mult      wkrate        p1adsnpram
+     C     adsnpram      sub       p1adsnpram    adsnpram
+      *
+      * SBF sold start weight
+      *
+     C     adsslslb      mult      wkrate        p1adsslslb
+     C     adsslslb      sub       p1adsslslb    adsslslb
+      *
+      * SBF sold meat cost amount
+      *
+     C     adsslmam      mult      wkrate        p1adsslmam
+     C     adsslmam      sub       p1adsslmam    adsslmam
+      *
+      * SBF sold labor cost amount
+      *
+     C     adssllam      mult      wkrate        p1adssllam
+     C     adssllam      sub       p1adssllam    adssllam
+      *
+      * SBF sold packaging cost amount
+      *
+     C     adsslkam      mult      wkrate        p1adsslkam
+     C     adsslkam      sub       p1adsslkam    adsslkam
+      *
+      * SBF sold ingredient cost amount
+      *
+     C     adssliam      mult      wkrate        p1adssliam
+     C     adssliam      sub       p1adssliam    adssliam
+      *
+      * SBF sold other cost amount        E14945
+      *
+     C     adssloam      mult      wkrate        p1adssloam
+     C     adssloam      sub       p1adssloam    adssloam
+      *
+      * SBF sold product cost amount
+      *
+     C     adsslpam      mult      wkrate        p1adsslpam
+     C     adsslpam      sub       p1adsslpam    adsslpam
+      *
+      * SBF sold margin amount
+      *
+     C     adsslmgam     mult      wkrate        p1adsslmgam
+     C     adsslmgam     sub       p1adsslmgam   adsslmgam
+      *
+      *
+      *--------------------------------------
+      * TRIUMPH
+      *--------------------------------------
+      *
+      * TF production scheduled pounds
+      *
+     C     adtpslb       mult      wkrate        p1adtpslb
+     C     adtpslb       sub       p1adtpslb     adtpslb
+      *
+      * TF  produced pounds
+      *
+     C     adtpulb       mult      wkrate        p1adtpulb
+     C     adtpulb       sub       p1adtpulb     adtpulb
+      *
+      * TF  produced value amount
+      *
+     C     adtpuam       mult      wkrate        p1adtpuam
+     C     adtpuam       sub       p1adtpuam     adtpuam
+      *
+      * TF  produced start weight
+      *
+     C     adtpuslb      mult      wkrate        p1adtpuslb
+     C     adtpuslb      sub       p1adtpuslb    adtpuslb
+      *
+      * TF  produced meat cost amount
+      *
+     C     adtpumam      mult      wkrate        p1adtpumam
+     C     adtpumam      sub       p1adtpumam    adtpumam
+      *
+      * TF  produced meat labor cost amount
+      *
+     C     adtpulam      mult      wkrate        p1adtpulam
+     C     adtpulam      sub       p1adtpulam    adtpulam
+      *
+      * TF  produced packaging cost amount
+      *
+     C     adtpukam      mult      wkrate        p1adtpukam
+     C     adtpukam      sub       p1adtpukam    adtpukam
+      *
+      * TF  produced ingredient cost amount
+      *
+     C     adtpuiam      mult      wkrate        p1adtpuiam
+     C     adtpuiam      sub       p1adtpuiam    adtpuiam
+      *
+      * TF  produced other cost amount     5/03/19 JBB E14945
+      *
+     C     adtpuoam      mult      wkrate        p1adtpuoam
+     C     adtpuoam      sub       p1adtpuoam    adtpuoam
+      *
+      * TF  produced product cost amount
+      *
+     C     adtpupam      mult      wkrate        p1adtpupam
+     C     adtpupam      sub       p1adtpupam    adtpupam
+      *
+      * TF  produced margin amount
+      *
+     C     adtpumgam     mult      wkrate        p1adtpumgam
+     C     adtpumgam     sub       p1adtpumgam   adtpumgam
+      *
+      * TF  sold pounds
+      *
+     C     adtsllb       mult      wkrate        p1adtsllb
+     C     adtsllb       sub       p1adtsllb     adtsllb
+      *
+      * TF  net product revenue amount
+      *
+     C     adtnpram      mult      wkrate        p1adtnpram
+     C     adtnpram      sub       p1adtnpram    adtnpram
+      *
+      * TF  sold start weight
+      *
+     C     adtslslb      mult      wkrate        p1adtslslb
+     C     adtslslb      sub       p1adtslslb    adtslslb
+      *
+      * TF  sold meat cost amount
+      *
+     C     adtslmam      mult      wkrate        p1adtslmam
+     C     adtslmam      sub       p1adtslmam    adtslmam
+      *
+      * TF  sold labor cost amount
+      *
+     C     adtsllam      mult      wkrate        p1adtsllam
+     C     adtsllam      sub       p1adtsllam    adtsllam
+      *
+      * TF  sold packaging cost amount
+      *
+     C     adtslkam      mult      wkrate        p1adtslkam
+     C     adtslkam      sub       p1adtslkam    adtslkam
+      *
+      * TF  sold ingredient cost amount
+      *
+     C     adtsliam      mult      wkrate        p1adtsliam
+     C     adtsliam      sub       p1adtsliam    adtsliam
+      *
+      * TF  sold other cost amount        E14945
+      *
+     C     adtsloam      mult      wkrate        p1adtsloam
+     C     adtsloam      sub       p1adtsloam    adtsloam
+      *
+      * TF  sold product cost amount
+      *
+     C     adtslpam      mult      wkrate        p1adtslpam
+     C     adtslpam      sub       p1adtslpam    adtslpam
+      *
+      * TF  sold margin amount
+      *
+     C     adtslmgam     mult      wkrate        p1adtslmgam
+     C     adtslmgam     sub       p1adtslmgam   adtslmgam
+      *
+      *--------------------------------------
+2484  * SEABOARD TRIUMPH FOODS
+  |   *--------------------------------------
+  |   *
+  |   * STF Produced Pounds
+  |   *
+  |  C     adxpulb       mult      wkrate        p1adxpulb
+  |  C     adxpulb       sub       p1adxpulb     adxpulb
+  |   *
+  |   * STF Produced Start Weight
+  |   *
+  |  C     adxpuslb      mult      wkrate        p1adxpuslb
+2484 C     adxpuslb      sub       p1adxpuslb    adxpuslb
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------------
+      * Write a Margin Adjustment Detail recrod
+      *-------------------------------------------------------------------------------------------
+      *
+     C     $wrt014       begsr
+      *
+     C                   exsr      $directmap
+     C                   exsr      $calcs
+      *
+     C                   write     adreca
+     C                   clear                   adreca
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------------
+      * Initialization subroutine
+      *-------------------------------------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C     key01         klist
+     C                   kfld                    psprcd
+     C                   kfld                    ldyr
+     C                   kfld                    ldwk
+      *
+     C                   endsr
+      /eject

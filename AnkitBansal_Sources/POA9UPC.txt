@@ -1,0 +1,273 @@
+/*********************************************************************/
+/*                                                                   */
+/*  PROGRAM   - POA9UPC                                              */
+/*  SYSTEM    - ACCOUNTS RECEIVABLE                                  */
+/*  USER NAME - A/R MANAGER                                          */
+/*                                                                   */
+/*  FUNCTION:  THIS CL CREATES WORKFILES AND THEN USES A SEQUEL      */
+/*             STATEMENT TO SEND A FILE TO THE NETWORK DRIVE.        */
+/*             THE RESULT IS EMAILED TO THE REQUESTED ADDRESS        */
+/*                                                                   */
+/*  Parameters:                                                      */
+/*  Usage   Field       Field Description                            */
+/*  -----   ---------   ------------------------------------------   */
+/*    O     &RETURN     Return code                                  */
+/*    B     &COMPNYN    Company number                               */
+/*    B     &ARCSTNO    A/R customer number                          */
+/*          &PARENTPS   - PARENT CUSTOMER NUMBER                    */
+/*    B     &ASOFDAT    As of date                                   */
+/*    B     &PRTZR      Print zero balances                          */
+/*    B     &RPTTYP     Report type (BLANK)                          */
+/*    B     &SLSRT      Sales route                                  */
+/*    B     &ARCSTN     A/R customer name                            */
+/*    I     &CRTENH     Create Enhanced Aging Report Flag            */
+/*    B     &SLSRTN     Sales route name                             */
+/*    I     &AGECODE    AGING CODE                                   */
+/*    I     &PARENT     PARENT CUSTOMER                              */
+/*                                                                   */
+/*********************************************************************/
+/* MODIFICATIONS:                                                    */
+/* 09/29/99  LEANNE FEDOR                                            */
+/*           ADDED PARENT CUSTOMER NAME AND NUMBER TO FILE PER       */
+/*           DENNIS HUMMEL.                                          */
+/* 06/30/00 P DROGE    CHANGED TO CREATE EXCEL FORMAT FILE INSTEAD   */
+/*                     OF LOTUS.                                     */
+/* 02/27/02 R CENTONZE ADDED &INCLCB(INCLUDE CHARGEBACK)PARM DFT 'N' */
+/* 11/08/02 R CENTONZE ADDED &PARENT PARM TO AR300                   */
+/* 12/20/05 ADDED SUFFIX PARMS AND ARL301A LF                        */
+/* 12/05/06 LJB PK0039 ADDED A/R AGING CODE TO PASS TO AR300         */
+/*          ALSO, ADDED AN EMAIL PARM SO THE USER CAN HAVE THE       */
+/*          REPORT SENT WHERE HE WANTS IT.                           */
+/*          INCLUDE CHARGEBACKS FLAG AS AN INPUT PARM.               */
+/* 06/18/09 LJB E00341 1. REDEFINE AGE CODE                          */
+/*          2. REPLACE ARP305 WITH PNFMCPP AND ADD THE LOGICALS      */
+/*          IN THE CREATE TO QTEMP.                                  */
+/*          3. REMOVE THE FTP FOR DENNIS HUMMEL, HE NO LONGER        */
+/*          WORKS HERE AND NO ONE IS USING IT.                       */
+/*          4. REPLACE CRTDUPOBJL WITH CRTDUPOBJ                     */
+/* 06/11/12 R CENTONZE COPYF CABBREP TO CABBREPX TO GET COUNTRY  */
+/*                     FOR THE AR CUST. USE CABBREP FOR PARENT CUST COUNTRY */
+/* 06/24/16 JBB E5262 - Add Include Rebill flag to parameters and    */
+/*                      sequel statement processing                  */
+/* 10/05/21 DN  W84562 - Added '&CRTENH' as input parm to create the */
+/*          Export Enhanced Aging Report (ARP301MEX.xls) which is a  */
+/*          replicate of SEQUEL 'ARP301' but with additional fields. */
+/*          Report will only be creatd from JS 'ARAGEMEX'. Do NOT    */
+/*          send report 'PNFMCPPA' if Enhanced Aging Report selected.*/
+/* 02/16/24 Santosh P Task:SR3000252  CM Project: O300252            */
+/*          1. New parameter &INCLNB is added.                       */
+/*          2. It is passed as parameter to AR300.                   */
+/*          3. Adding Parent Customer Logic(EricL)                   */
+/*********************************************************************/
+
+/* O300252 - START */
+/*           PGM        PARM(&RETURN &COMPNYN &ARCSTNO &ASOFDAT +
+                          &INCLCB &INCLRB &RPTTYP &PRTZR &SLSRT +
+                          &ARCSTN &SLSRTN &CRTENH &AGECODE &EMAIL &PARENT)  */
+
+             PGM        PARM(&RETURN &COMPNYN &ARCSTNO &ASOFDAT +
+                          &INCLCB &INCLRB &RPTTYP &PRTZR &SLSRT +
+                          &ARCSTN &SLSRTN &CRTENH &INCLNB &AGECODE +
+                          &EMAIL &PARENT)
+/* O300252 - END */
+
+/* Declare Variables                                                */
+
+             DCL  VAR(&RETURN)  TYPE(*CHAR) LEN(7)
+             DCL  VAR(&COMPNYN) TYPE(*DEC)
+             DCL  VAR(&COMP)    TYPE(*DEC)  LEN(3 0)
+             DCL  VAR(&ARCSTNO) TYPE(*DEC)
+             DCL  VAR(&ARCUS)   TYPE(*DEC)  LEN(7 0)
+             DCL  VAR(&ARCSTN)  TYPE(*CHAR) LEN(30)
+             DCL  VAR(&PARENT) TYPE(*DEC) LEN(7 0) VALUE(0)
+             DCL  VAR(&ASOFDAT) TYPE(*DEC)
+             DCL  VAR(&ASDATE)  TYPE(*DEC)  LEN(7 0)
+             DCL  VAR(&PRTZR)   TYPE(*CHAR) LEN(1)
+             DCL  VAR(&INCLCB) TYPE(*CHAR) LEN(1)
+             DCL  VAR(&INCLRB) TYPE(*CHAR) LEN(1)      /* E5262 */
+             DCL  VAR(&RPTTYP)  TYPE(*CHAR) LEN(1)
+             DCL  VAR(&SLSRT)   TYPE(*CHAR) LEN(3)
+             DCL  VAR(&SLSRTN)  TYPE(*CHAR) LEN(30)
+             DCL  VAR(&CRTENH) TYPE(*CHAR) LEN(1)      /* W84562 */
+             DCL  VAR(&AGECODE) TYPE(*CHAR) LEN(6)
+             DCL  VAR(&EMAIL)   TYPE(*CHAR) LEN(50)
+             DCL  VAR(&EMAILFMT) TYPE(*CHAR) LEN(5)
+             DCL  VAR(&EMLMSG1) TYPE(*CHAR) LEN(80)    /* W84562 */
+             DCL  VAR(&EMLMSG2) TYPE(*CHAR) LEN(80)    /* W84562 */
+             DCL  VAR(&EMLMSG3) TYPE(*CHAR) LEN(80)    /* W84562 */
+             DCL  VAR(&DATA) TYPE(*CHAR) LEN(10)       /* W84562 */
+             DCL  VAR(&DATAH) TYPE(*CHAR) LEN(10)      /* W84562 */
+
+             DCL    &SUFFIX1   *CHAR    (2)            /*  SUFFIX 1 */
+             DCL    &SUFFIX2   *CHAR    (2)            /*  SUFFIX 2 */
+             DCL    &SUFFIX3   *CHAR    (2)            /*  SUFFIX 3 */
+             DCL    &SUFFIX4   *CHAR    (2)            /*  SUFFIX 4 */
+             DCL    &SUFFIX5   *CHAR    (2)            /*  SUFFIX 5 */
+
+             DCL  VAR(&ALREADY)  TYPE(*CHAR) LEN(1)
+             DCL  VAR(&DOCUMENT) TYPE(*CHAR) LEN(10)
+             DCL  VAR(&PCFILE)   TYPE(*CHAR) LEN(32)
+             DCL  VAR(&INCLNB) TYPE(*CHAR) LEN(1)      /* O300252 */
+
+/* INITIALIZE VARIABLES */
+
+             CHGVAR VAR(&RPTTYP) VALUE(' ')
+             CHGVAR VAR(&RETURN) VALUE(' ')
+             CHGVAR VAR(&COMP)   VALUE(&COMPNYN)
+             CHGVAR VAR(&ASDATE) VALUE(&ASOFDAT)
+             CHGVAR VAR(&ARCUS)  VALUE(&ARCSTNO)
+/********************************************************************/
+/* CREATE WORKFILES                                                 */
+/*     USE THE COMMAND CUSTOMIZED BY JOHN ERICSON. THIS COMMAND     */
+/*     WILL ELIMINATE HARDCODING OF LIBRARIES. THE CUSTOMIZED       */
+/*     COMMAND IS CRTDUPOBJL FOR 'CREATE DUPLICATE OBJECT FROM      */
+/*     LIBRARY'.                                                    */
+/********************************************************************/
+/* CUSTOMER HEADINGS WORKFILE                                       */
+
+             CRTDUPOBJL OBJ(ARP300) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(ARL300A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(ARL300B) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/* INVOICE DETAIL WORKFILE                                          */
+
+             CRTDUPOBJL OBJ(ARP301) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(ARL301A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/* CUSTOMER TOTALS WORKFILE                                         */
+
+             CRTDUPOBJL OBJ(ARP302) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(ARL302A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(ARL302B) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/* REPORT TOTALS WORKFILE                                           */
+
+             CRTDUPOBJL OBJ(ARP303) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/* CUSTOMER FILE FOR COUNTRY CODE                                   */
+
+             CPYF       FROMFILE(*LIBL/CABBREP) +
+                          TOFILE(QTEMP/CABBREPX) MBROPT(*ADD) +
+                          CRTFILE(*YES)
+
+/* SALES ROUTE TOTALS WORKFILE                                      */
+
+             CRTDUPOBJL OBJ(ARP304) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJ  OBJ(PNFMCPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PNFMCPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PNFMCPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+
+/*  RUN PROGRAM TO BUILD WORKFILES                                   */
+/* O300252 - START */
+/*           CALL       PGM(AR300) PARM(&COMP &ASDATE &ARCUS &PARENT +
+                          &SLSRT &PRTZR &RPTTYP &INCLCB &INCLRB +
+                          &SUFFIX1 &SUFFIX2 &SUFFIX3 &SUFFIX4 +
+                          &SUFFIX5 &AGECODE)                         */
+             CALL       PGM(AR300) PARM((&COMP) (&ASDATE) (&ARCUS) +
+                          (&PARENT) (&SLSRT) (&PRTZR) (&RPTTYP) +
+                          (&INCLCB) (&INCLRB) (&SUFFIX1) (&SUFFIX2) +
+                          (&SUFFIX3) (&SUFFIX4) (&SUFFIX5) +
+                          (&AGECODE) (&INCLNB))
+/* O300252 - END */
+
+/* BUILD CUSTOMER SUMMARY WORKFILE                                   */
+             CALL       PGM(AR302) PARM(&COMP)
+
+/* DOWNLOAD 2 REPORTS TO THE REQUESTING EMAIL ADDRESS                */
+/* Add SEQUEL Library to List                                        */
+             CHGVAR VAR(&ALREADY) VALUE('N')
+             ADDLIBLE LIB(SEQUEL) POSITION(*LAST)
+             MONMSG MSGID(CPF2103) EXEC(DO)       /* already in libl */
+                CHGVAR VAR(&ALREADY) VALUE('Y')
+             ENDDO
+
+/* PROD OR TEST ENVIRONMENT? */
+             CALL       PGM(CAQXXFR) PARM(' ' &DATA &DATAH)
+
+             CHGVAR     VAR(&EMLMSG1) VALUE('Daily A/R Aging +
+                          Download file')
+             CHGVAR     VAR(&EMLMSG2) VALUE('Weekly A/R Aging +
+                          Download file - Mexico')
+             CHGVAR     VAR(&EMLMSG3) VALUE('Daily A/R Aging +
+                          Customer Watch Download file')
+
+    /* SET 'TEST' VERBIAGE IN EMAIL MESSAGE */
+             IF         COND(&DATA *NE 'PRKFLIB') THEN(DO)
+             CHGVAR     VAR(&EMLMSG1) VALUE(&EMLMSG1 *BCAT ' - TEST')
+             CHGVAR     VAR(&EMLMSG2) VALUE(&EMLMSG2 *BCAT ' - TEST')
+             CHGVAR     VAR(&EMLMSG3) VALUE(&EMLMSG3 *BCAT ' - TEST')
+             ENDDO
+
+
+/* EMAIL THE REPORT TO THE REQUESTED EMAIL ADDRESS                  */
+/* W84562 - Check If 'Create Enhanced Aging Report' is Selected. If +
+            Yes Then Call ARP301MEX else ARP301.                    */
+/* W84562    IF         COND(&EMAIL *NE '                       ') +
+                          THEN(EXECUTE VIEW(ARP301) PCFMT(*XLS) +
+                          RECIPIENT(&EMAIL) EMLMSG('Daily A/R Aging +
+                          Download file'))                           */
+             IF         COND(&EMAIL *NE '                       ' +
+                          *AND &CRTENH *NE 'Y') THEN(EXECUTE +
+                          VIEW(ARP301) PCFMT(*XLS) +
+                          RECIPIENT(&EMAIL) EMLMSG(&EMLMSG1))
+             IF         COND(&EMAIL *NE '                       ' +
+                          *AND &CRTENH *EQ 'Y') THEN(EXECUTE +
+                          VIEW(ARP301MEX) PCFMT(*XLSX) +
+                          RECIPIENT(&EMAIL) EMLMSG(&EMLMSG2))
+
+/* W84562 - Send in Email Message as Variable.                       */
+/* W84652    IF         COND(&EMAIL *NE '                       ') +
+                          THEN(EXECUTE VIEW(PNFMCPPA) PCFMT(*XLS) +
+                          RECIPIENT(&EMAIL) EMLMSG('Daily A/R +
+                          Customer Watch download file'))            */
+    /* W84652 - If Enhanced Aging Report, Then Do NOT Send This Report! */
+             IF         COND(&EMAIL *NE '                       ' +
+                          *AND &CRTENH *NE 'Y') THEN(EXECUTE +
+                          VIEW(PNFMCPPA) PCFMT(*XLS) +
+                          RECIPIENT(&EMAIL) EMLMSG(&EMLMSG3))
+
+/* Remove SEQUEL Library from List                                   */
+             IF COND(&ALREADY *EQ 'N') THEN(DO)
+                RMVLIBLE   LIB(SEQUEL)
+             ENDDO
+
+/*  THE FOLLOWING DLTF'S WERE ADDED BECAUSE THIS CL IS CALLED TWICE */
+/*  IF THE FILES ARE NOT DELETED, THE INFORMATION IN THE FILES      */
+/*  IS DUPLICATED, THEREFORE APPEARING TWICE.                       */
+
+             DLTF       FILE(QTEMP/ARL300A)
+             DLTF       FILE(QTEMP/ARL300B)
+             DLTF       FILE(QTEMP/ARP300)
+             DLTF       FILE(QTEMP/ARL301A)
+             DLTF       FILE(QTEMP/ARP301)
+             DLTF       FILE(QTEMP/ARL302A)
+             DLTF       FILE(QTEMP/ARL302B)
+             DLTF       FILE(QTEMP/ARP302)
+             DLTF       FILE(QTEMP/ARP303)
+             DLTF       FILE(QTEMP/ARP304)
+             DLTF       FILE(QTEMP/PNFMCPL0)
+             DLTF       FILE(QTEMP/PNFMCPL1)
+             DLTF       FILE(QTEMP/PNFMCPP )
+             DLTF       FILE(QTEMP/CABBREPX )
+
+             ENDPGM

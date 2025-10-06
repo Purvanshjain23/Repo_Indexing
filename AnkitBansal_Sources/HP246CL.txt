@@ -1,0 +1,216 @@
+/***************************************************************** */
+/*  PROGRAM NUMBER --> HP246CL                                     */
+/*  PROGRAM NAME ----> DOWNLOAD: MARKET SELECTOR WORKSHEET         */
+/*  PROGRAMMER ------> LEANNE FEDOR                                */
+/*  DATE ------------> 05/29/01                                    */
+/*                                                                 */
+/*  FUNCTION --------> WE PLAN TO RUN THIS CL NIGHTLY TO EXTRACT   */
+/*                     DATA FROM HPS AND BUILD FILES THAT WILL     */
+/*                     BE DOWNLOADED.                              */
+/*                                                                 */
+/*                     THIS WAS REQUESTED BY BRAD HAMILTON AND     */
+/*                     ALICE BROWNFIELD.                           */
+/*                                                                 */
+/***************************************************************** */
+/*  MODIFIED:                                                      */
+/*  03/07/02  LEANNE FEDOR                                         */
+/*            ADDED 2 NEW FILES: GROUP SIRE LINES                  */
+/*                               BGF FARM SIRE LINES               */
+/*                                                                 */
+/*  11/05/02  LEANNE FEDOR                                         */
+/*            CHANGED LOGIC FOR INCLUDING CLOSED GROUPS FROM       */
+/*            THOSE THAT CLOSED IN THE LAST 40 WEEKS TO THOSE THAT */
+/*            CLOSED IN THE LAST 52 WEEKS.                         */
+/*******************************************************************/
+
+             PGM
+
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(130)
+
+/* CREATE ALPHA AND NUMERIC FIELDS FOR SYSTEM DATE WHICH IS IN CCYYMMDD FORMAT*/
+
+             DCL        VAR(&DTSYS) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&DTSYS08) TYPE(*DEC) LEN(8 0)
+
+
+/* CREATE ALPHA AND NUMERIC FIELDS FOR A DATE THAT IS 364 DAYS PRIOR TO THE   */
+/* SYSTEM DATE.  THIS DATE WILL ALSO BE IN CCYYMMDD FORMAT                    */
+
+             DCL        VAR(&DTPAST) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&DTPAST08) TYPE(*DEC) LEN(8 0)
+
+/* FTP VARIABLES */
+
+             DCL        VAR(&DOCUMENT) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PCFILE) TYPE(*CHAR) LEN(32)
+             DCL        VAR(&SEL) TYPE(*CHAR) LEN(132)
+             DCL        VAR(&ALREADY) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&GOTTOOL) TYPE(*CHAR) LEN(1)
+
+
+/*-------------------------------------------------------------------*/
+/* ADD TAA TOOL LIBRARY SO THAT YOU CAN USE THE DATE COMMANDS        */
+/*-------------------------------------------------------------------*/
+
+             CHGVAR VAR(&GOTTOOL) VALUE('N')
+             ADDLIBLE   LIB(TAATOOL) POSITION(*LAST)
+             MONMSG     MSGID(CPF2103) EXEC(DO) /* already in libl */
+                CHGVAR VAR(&GOTTOOL) VALUE('Y')
+             ENDDO
+
+/*-------------------------------------------------------------------*/
+/* RETRIEVE SYSTEM DATE AND CONVERT TO NUMERIC 8,0 DATE FIELD        */
+/*-------------------------------------------------------------------*/
+
+             RTVDAT     CCYYMMDD(&DTSYS)
+             CHGVAR     VAR(&DTSYS08) VALUE(&DTSYS)
+
+/*-------------------------------------------------------------------*/
+/* SUBTRACT 52 WEEKS (364 DAYS) FROM THE SYSTEM DATE AND CHANGE THE  */
+/* DATE TO THE NUMERIC VARIABLE SO THAT THE DATE CAN BE USED FOR     */
+/* COMPARISONS ON CLOSED GROUPS. THE USERS WANT TO ONLY EXTRACT      */
+/* CLOSED GROUPS THAT CLOSED IN THE LAST 52 WEEKS.                   */
+/*-------------------------------------------------------------------*/
+
+             ADDDAT2    DAYS(-364) NEWDAT(&DTPAST) NEWDATFMT(*YYMD)
+             CHGVAR     VAR(&DTPAST08) VALUE(&DTPAST)
+
+/* REMOVE THE TAA-TOOL LIBRARY FROM LIBRARY LIST */
+
+             IF COND(&GOTTOOL *EQ 'N') THEN(DO)
+                RMVLIBLE   LIB(TAATOOL)
+             ENDDO
+
+/*-------------------------------------------------------------------*/
+/* SETUP QUERY FOR HOG GROUPS                                        */
+/*-------------------------------------------------------------------*/
+
+/*  ALWAYS OMIT BGF GROUPS...SELECT ONLY NURSERY AND GROW FINISH     */
+
+             CHGVAR     VAR(%SST(&QDATA 1 18)) VALUE('HGPPCD *NE +
+                          "BGF  "')
+
+/*  ALWAYS OMIT HOG GROUPS WITH A STATUS OF VOIDED               */
+
+             CHGVAR     VAR(%SST(&QDATA 20 20)) VALUE('*AND HGGSCD +
+                          *NE "VD"')
+
+/*  ALWAYS OMIT HOG GROUPS WITH AN OPEN DATE OF ZERO             */
+
+             CHGVAR     VAR(%SST(&QDATA 41 20)) VALUE('*AND    HGOPDT +
+                          *NE 0')
+
+/*  SO, YOU WILL BE GETTING OPEN, DISPOSED AND CLOSED GROUPS.       */
+/*  TO LIMIT THE CLOSED GROUPS, SELECT ONLY GROUPS THAT HAVE        */
+/*  CLOSED IN THE LAST 52 WEEKS                                     */
+
+             CHGVAR     VAR(%SST(&QDATA 62 16)) VALUE('*AND (HGCLDT +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 79 8)) VALUE(00000000)
+             CHGVAR     VAR(%SST(&QDATA 88 14)) VALUE('*OR HGCLDT +
+                          *GE')
+             CHGVAR     VAR(%SST(&QDATA 103 8)) VALUE(&DTPAST08)
+             CHGVAR     VAR(%SST(&QDATA 111 1)) VALUE(')')
+
+
+/* RUN QUERY OVER THE HOG GROUP FILE                                 */
+
+             OVRDBF     FILE(HSP034) SHARE(*YES)
+             OPNQRYF    FILE((HSP034)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+
+
+/*-------------------------------------------------------------------*/
+/* BUILD MARKET SELECTOR EXTRACT FILE                                */
+/*-------------------------------------------------------------------*/
+
+             CLRPFM     FILE(HSP246)
+             CALL       PGM(HP246) PARM(&DTSYS08)
+
+/*-------------------------------------------------------------------*/
+/* BUILD MARKET SELECTOR--GROUP SIRE LINES FILE                      */
+/*-------------------------------------------------------------------*/
+
+             CLRPFM     FILE(HSP247)
+             CALL       PGM(HP247)
+
+/*-------------------------------------------------------------------*/
+/* BUILD MARKET SELECTOR--BGF FARM SIRE LINES FILE                   */
+/*-------------------------------------------------------------------*/
+
+             CLRPFM     FILE(HSP248)
+             CALL       PGM(HP248)
+
+
+/*-------------------------------------------------------------------*/
+/* DELETE FILE OVERRIDES                                             */
+/*-------------------------------------------------------------------*/
+             CLOF       OPNID(HSP034)
+             DLTOVR     FILE(*ALL)
+
+
+/*-------------------------------------------------------------------*/
+/* DOWNLOAD EXTRACT FILES TO PORK SERVER                             */
+/*-------------------------------------------------------------------*/
+
+/* ADD SEQUEL LIBRARY TO LIBRARY LIST */
+
+             CHGVAR VAR(&ALREADY) VALUE('N')
+             ADDLIBLE   LIB(SEQUEL) POSITION(*LAST)
+             MONMSG     MSGID(CPF2103) EXEC(DO) /* already in libl */
+                CHGVAR VAR(&ALREADY) VALUE('Y')
+             ENDDO
+
+ /* USE AN SQL STATEMENT TO EXPORT THE FIRST FILE           */
+ /* THEN FTP IT TO THE PORK SERVER                          */
+
+             CHGVAR VAR(&SEL) VALUE('SELECT * FROM HSP246')
+
+             EXECUTE    SQL(&SEL) MBROPT(*REPLACE) NBRRCDS(*ALL) +
+                          TOFLR('GUY.IS') TODOC('HSP246') +
+                          PCFMT(*XLS) REPLACE(*YES) TEXT('MARKET +
+                          SELECTOR WORKSHEET')
+
+             CHGVAR     VAR(&DOCUMENT) VALUE('HSP246')
+             CHGVAR     VAR(&PCFILE) VALUE('HSP246.XLS')
+             CALL       PGM(FTPPRKSRVR) PARM(&DOCUMENT &PCFILE)
+
+
+ /* USE AN SQL STATEMENT TO EXPORT THE GROUP SIRE LINES FILE*/
+ /* THEN FTP IT TO THE PORK SERVER                          */
+
+             CHGVAR VAR(&SEL) VALUE('SELECT * FROM HSP247')
+
+             EXECUTE    SQL(&SEL) MBROPT(*REPLACE) NBRRCDS(*ALL) +
+                          TOFLR('GUY.IS') TODOC('HSP247') +
+                          PCFMT(*XLS) REPLACE(*YES) TEXT('GROUP +
+                          SIRE LINES')
+
+             CHGVAR     VAR(&DOCUMENT) VALUE('HSP247')
+             CHGVAR     VAR(&PCFILE) VALUE('HSP247.XLS')
+             CALL       PGM(FTPPRKSRVR) PARM(&DOCUMENT &PCFILE)
+
+
+ /* USE AN SQL STATEMENT TO EXPORT THE BGF FARM SIRE LINES FILE  */
+ /* THEN FTP IT TO THE PORK SERVER                               */
+
+             CHGVAR VAR(&SEL) VALUE('SELECT * FROM HSP248')
+
+             EXECUTE    SQL(&SEL) MBROPT(*REPLACE) NBRRCDS(*ALL) +
+                          TOFLR('GUY.IS') TODOC('HSP248') +
+                          PCFMT(*XLS) REPLACE(*YES) TEXT('BGF FARM +
+                          SIRE LINES')
+
+             CHGVAR     VAR(&DOCUMENT) VALUE('HSP248')
+             CHGVAR     VAR(&PCFILE) VALUE('HSP248.XLS')
+             CALL       PGM(FTPPRKSRVR) PARM(&DOCUMENT &PCFILE)
+
+
+/* REMOVE SEQUEL LIBRARY FROM LIBRARY LIST */
+
+             IF COND(&ALREADY *EQ 'N') THEN(DO)
+                RMVLIBLE   LIB(SEQUEL)
+             ENDDO
+
+             ENDPGM
+

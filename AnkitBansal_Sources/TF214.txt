@@ -1,0 +1,284 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF214 - Weekly Revenue Close: Create Invoice Charge for
+      *                      Claim Expenses
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     03/31/05
+      *
+      * Function:    This program writes a single Invoice Charge record for Claim
+      *              Expenses when:
+      *                1) there are no errors from the edit
+      *                2) it is a Final run
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 08/25/06  LeAnne Ramsey
+      *           We are now using a new LF over the AR Claim Expense file. It selects/
+      *           we process only records that:
+      *            1) Have a TFS Process Status of Open
+      *            2) Have an Expense Status of Actual
+      *
+      * 09/15/06  LeAnne Ramsey
+      *           We no longer "flip" the sign on the Invoice Charge Amount.
+      *
+      * 12/05/06  LeAnne Ramsey
+      *           A new customer (Gordon Food Service) is demanding that all product be
+      *           shipped to them from the Triumph (St. Joe) location. This has required
+      *           the Synon Systems to have both an Accounting Company and a Shipping
+      *           Company. For the TF system, we always want to use the Accounting Company.
+      *           So, our new logic ferrets out the "accounting company" to use for our
+      *           logic.
+      *
+      * 10/01/07  LeAnne Ramsey
+      *           We will not post 'claim expense' until the associated 'claim'
+      *           is "complete".
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Ftfp005    if   e           k disk
+      *    Charge codes
+      *
+      *
+     Fomhstpoa  if   e           k disk
+      *    Sales history
+      *
+      *
+     Fppa1cpl5  uf   e           k disk
+      *  AR Claim expense
+      *
+      *
+     Fpdmkcpl1  if   e           k disk
+      *    AR claim
+      *
+      *
+     Ftfp021    o    e           k disk
+      *  Invoice charges
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+      *
+      *
+      * Workfields
+      *
+     D wkcono          s              3  0
+     D wkam            s                   like(icicam)
+     D wkicam          s                   like(icicam)
+     D wkrate          s              9  6
+      *
+      *
+      * Parms
+      *
+     D xxicsn          s                   like(icicsn)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      *---------------------------------------------------------------
+      *  Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldyr                   1      4  0
+     D  ldwk                   5      6  0
+     D  ldwbdt                 7     14  0
+     D  ldsynwbdt             15     21  0
+     D  ldwedt                22     29  0
+     D  ldsynwedt             30     36  0
+      *
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************************************8
+      * Mainline
+      ****************************************************************************************8
+      *
+      * Read all records in the AR Claim Expense file. This LF selects records that:
+      *   1) Have a TFS Process Status of Open
+      *   2) Have an Expense Status of Actual
+      *
+     C     *loval        setll     ppa1cpl5
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      ppa1cpl5                               90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Retrieve the AR Claim record for this Claim Number.
+      * If the AR Claim is "complete", continue.
+      *
+     C     a1c0c7        chain     pdmkcpl1                           92
+     C                   if        *in92 = *off and mkcjsx = 'C'                If complete
+      *
+     C                   if        first = yes
+     C                   move      no            first
+     C                   endif
+      *
+      * You only accumulate dollars under 2 scenarios:
+      *   1) The Responsiblity is "Shared"
+      *          a) Turn 'Avg TF Responsibility Percent' into a "rate" by dividing by 100
+      *          b) Multiply this "rate" times the Expense Amount
+      *          c) Accumulate the result
+      *   2) The Responsiblity is "Company" AND the Claim Accounting Company is Triumph
+      *          Accumulate Expense Amount
+      *
+     C                   select
+     C                   when      a1txsx = 'S'
+     C                   eval      wkrate = mkf7pc / 100
+     C                   eval(h)   wkam = a1emvl * wkrate
+     C                   add       wkam          wkicam
+     C                   z-add     wkam          a1e1vl
+      *
+     C                   when      a1txsx = 'C'
+     C                   exsr      $cono
+     C                   if        wkcono = 960
+     C                   add       a1emvl        wkicam
+     C                   z-add     a1emvl        a1e1vl
+     C                   endif
+     C                   endsl
+      *
+      * Update Synon record in AR Claim Expense file:
+      *    1) Move 'Week-ending date' into TFS Batch Number
+      *    2) Move P=Posted to TFS Process Status
+      *    3) TFS Claim Expense Amount (Populated just above in Select logic)
+      *
+     C                   z-add     ldsynwedt     a1ysnx
+     C                   move      'P'           a1t5sx
+     C                   update    @a1cpg6
+      *
+     C                   endif                                                  If complete
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *-------------------
+      * EOF processing
+      *-------------------
+      *
+      * If you have some claim dollars,
+      *  1) write an Invoice Charge record
+      *
+     C                   if        wkicam <> 0
+     C                   exsr      $wrt021
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Determine the "Accounting" Company
+      *---------------------------------------------------------------
+      *
+     C     $cono         begsr
+      *
+      * The AR Claim record holds "Shipping" Company. We want "Accounting" Company
+      * for our logic.  So, we will attempt to retrieve a Sales History record
+      * for the Claim Order Number. If we don't find a record, we will use the
+      * "Shipping" Company from the AR Claim record.
+      *
+     C     mkalnx        chain     omhstpoa                           92
+     C                   if        *in92 = *off
+     C                   z-add     f4aic3        wkcono
+     C                   else
+     C                   z-add     mkbic3        wkcono
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write Invoice Charge record
+      *---------------------------------------------------------------
+      *
+     C     $wrt021       begsr
+      *
+      * Initialze Invoice Charge record.
+      *
+     C                   clear                   icrec
+      *
+      * Populate date field with the week-ending date from the LDA
+      *
+     C                   z-add     ldwedt        icicdt
+      *
+      * Populate Charge Amount
+      *
+     C                   z-add     wkicam        icicam
+      *
+      * Set the System-generated Flag to Yes
+      * Set the Invoice Status to Open
+      * Set the Units field to 1
+      *
+     C                   move      yes           icsysfl
+     C                   move      'O'           icinstcd
+     C                   z-add     1             icunit
+      *
+      *
+      * Hardcode the Charge Code value and then Retrieve the Charge Code info.
+      *
+     C                   move      'CLAIMPAY  '  iccccd
+     C     iccccd        chain     tfp005                             92
+     C                   if        *in92 = *off                                 If valid code
+     C                   move      ccinfl        icinfl
+     C                   move      ccsmcd        icsmcd
+     C                   endif                                                  If valid code
+      *
+      * Get the next system-assigned 'Invoice Charge Number'.
+      *
+     C                   call      'TF807'
+     C     icicsn        parm      0             xxicsn
+      *
+      *
+      * Write Invoice Charge record.
+      *
+     C                   write     icrec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      *
+     C                   endsr
+      /eject

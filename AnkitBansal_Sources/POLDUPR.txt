@@ -1,0 +1,231 @@
+/********************************************************************/
+/*  SYSTEM:     ORDER MANAGEMENT SYSTEM                             */
+/*  PROGRAM:    POLDUPR                                             */
+/*  TITLE:      POTENTIAL LATE DELIVERIES--DRIVER CL                */
+/*  PROGRAMMER: LEANNE FEDOR                                        */
+/*  DATE:       06/20/01                                            */
+/*                                                                  */
+/*  SYNOPSIS:                                                       */
+/*              WE PLAN TO KICK THIS OFF THE JOB SCHEDULER AT       */
+/*              6:00 A.M. EVERY WEEK-DAY MORNING.                   */
+/*                                                                  */
+/*              IT WILL PROCESS THE LOAD HEADER FILE EVERY 5        */
+/*              MINUTES CHECKING FOR POTENTIAL LATE DELIVERY LOADS. */
+/*                                                                  */
+/*              IT WILL CALL AN RPG PROGRAM TO READ THE ORDERS ON   */
+/*              THE LOAD AND SEND A MESSAGE TO THE APPROPRIATE      */
+/*              SALESMAN.                                           */
+/*                                                                  */
+/*  NOTE:                                                           */
+/*              YOU HAVE TO HAVE THE LIBRARY ESEND IN YOUR LIBRARY  */
+/*              LIST TO COMPILE THIS CL.                            */
+/********************************************************************/
+/* RMC 7/17/13  C2685 ADD ANOTHER LOOP FOR TRIUMPH SELECTING SJ1/SF1 */
+/* JBB 2/16/17  E9064 ADD ANOTHER LOOP FOR CO# 440 SELECTING ST1/STF */
+/********************************************************************/
+
+             PGM
+
+             DCL        VAR(&QDATA)  TYPE(*CHAR) LEN(168)
+             DCL        VAR(&ALREADY) TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&CURDAT)  TYPE(*CHAR) LEN(6)
+             DCL        VAR(&CURDATA) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&CURYYA)  TYPE(*CHAR) LEN(2)
+             DCL        VAR(&CURYY)   TYPE(*DEC)  LEN(2 0)
+             DCL        VAR(&COMP)    TYPE(*DEC)  LEN(3 0)
+
+             DCL        VAR(&ENDTIME) TYPE(*DEC) LEN(6 0)
+             DCL        VAR(&TIME) TYPE(*DEC) LEN(6 0)
+             DCL        VAR(&QTM) TYPE(*CHAR) LEN(6)
+
+
+ /******************************************************************/
+ /* DO ONE TIME WHEN THE JOB FIRST KICKS OFF FROM THE SCHEDULER    */
+ /******************************************************************/
+
+/* ADD ESEND LIBRARY TO LIBRARY LIST                                 */
+
+             CHGVAR     VAR(&ALREADY) VALUE('N')
+             ADDLIBLE   LIB(ESEND) POSITION(*LAST)
+             MONMSG     MSGID(CPF2103) EXEC(DO) /* already in libl */
+             CHGVAR     VAR(&ALREADY) VALUE('Y')
+             ENDDO
+
+ /* RETRIEVE SYSTEM DATE AND CONVERT IT TO SYNON DATE FORMAT       */
+
+             RTVSYSVAL  SYSVAL(QDATE) RTNVAR(&CURDAT)
+             CVTDAT     DATE(&CURDAT) TOVAR(&CURDAT) FROMFMT(*MDY) +
+                         TOFMT(*YMD) TOSEP(*NONE)
+             CHGVAR VAR(&CURYYA) VALUE(%SUBSTRING(&CURDAT 1 2))
+             CHGVAR VAR(&CURYY)  VALUE(&CURYYA)
+
+             IF (&CURYYA *LT '40') +
+                CHGVAR VAR(&CURDATA) VALUE('1' *CAT &CURDAT)
+             ELSE +
+                CHGVAR VAR(&CURDATA) VALUE('0' *CAT &CURDAT)
+
+
+ /******************************************************************/
+ /* THE FOLLOWING LOGIC IS REPEATED EVERY 5 MINUTES UNTIL THE END  */
+ /******************************************************************/
+
+ REPEAT:
+
+/*-------------------------------------------------------------------*/
+/* SETUP QUERY FOR LOAD HEADER                                       */
+/*-------------------------------------------------------------------*/
+
+ /* EXTRACT LOAD HEADER RECORDS THAT MEET THE FOLLOWING CRITERIA:     */
+ /*     1) DEADLINE DEPARTURE DATE = SYSTEM DATE                      */
+ /*     2) DEPARTURE TIME LESS SYSTEM TIME IS 1 HOUR OR LESS          */
+ /*        (THIS CHECK WILL BE DONE IN THE RPG PROGRAM)               */
+ /*     3) LATE DELIVERY E-MAIL FLAG = BLANK                          */
+ /*     4) BOL COMPLETE DATE = ZERO                                   */
+ /*     5) SHIPPING METHOD IS A) PREPAID TRUCK OR B) COLLECT TRUCK    */
+ /*        WITH TOTAL WEIGHT OVER 20,000 POUNDS                       */
+ /*     6) SHIPPED FROM WAREHOUSE = GP1 OR CF1                        */
+
+
+/* ONLY SELECT RECORDS WHERE THE DEADLINE DEPARTURE DATE EQUALS      */
+/* THE SYSTEM DATE                                                   */
+
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('FJKZDT +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 12 7)) VALUE(&CURDATA)
+
+
+/* ONLY SELECT RECORDS WHERE THE BOL COMPLETED DATE IS ZERO          */
+
+             CHGVAR     VAR(%SST(&QDATA 20 15)) VALUE('*AND FJJ7DT +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 36 1)) VALUE(0)
+
+
+/* ONLY SELECT RECORDS WHERE THE LATE DELIVERY E-MAIL FLAG IS BLANK  */
+
+             CHGVAR     VAR(%SST(&QDATA 38 19)) VALUE('*AND FJRRST +
+                          *EQ " "')
+
+/* ONLY SELECT RECORDS WHERE THE SHIPPING METHOD IS 1) PREPAID TRUCK  */
+/* OR 2) COLLECT TRUCK WITH TOTAL WEIGHT OVER 20,000 POUNDS           */
+
+             CHGVAR     VAR(%SST(&QDATA 58 17)) VALUE('*AND (FJQ2CD +
+                          *EQ ')
+             CHGVAR     VAR(%SST(&QDATA 75 4)) VALUE('"PT"')
+             CHGVAR     VAR(%SST(&QDATA 79 17)) VALUE(' *OR (FJQ2CD +
+                          *EQ ')
+             CHGVAR     VAR(%SST(&QDATA 96 4)) VALUE('"CT"')
+             CHGVAR     VAR(%SST(&QDATA 100 22)) VALUE(' *AND FJRPNB +
+                          *GT 20000')
+             CHGVAR     VAR(%SST(&QDATA 122 1)) VALUE(')')
+             CHGVAR     VAR(%SST(&QDATA 123 1)) VALUE(')')
+
+
+/* ONLY SELECT RECORDS WHERE THE SHIP FROM WAREHOUSE IS GP1 OR CF1   */
+
+             CHGVAR     VAR(%SST(&QDATA 125 17)) VALUE('*AND (FJVPCD +
+                          *EQ ')
+             CHGVAR     VAR(%SST(&QDATA 142 5)) VALUE('"GP1"')
+             CHGVAR     VAR(%SST(&QDATA 147 16)) VALUE(' *OR FJVPCD +
+                          *EQ ')
+             CHGVAR     VAR(%SST(&QDATA 163 5)) VALUE('"CF1"')
+             CHGVAR     VAR(%SST(&QDATA 168 1)) VALUE(')')
+
+
+             OVRDBF     FILE(OMFJCPL0) SHARE(*YES) /* Load Header */
+             OPNQRYF    FILE((OMFJCPL0)) QRYSLT(&QDATA) KEYFLD(*FILE)
+
+/*-------------------------------------------------------------------*/
+/* CALL RPG PROGRAM TO PROCESS LOAD ID RECORDS AND SEND E-MAILS        */
+/*-------------------------------------------------------------------*/
+
+             CHGVAR     VAR(&ENDTIME) VALUE(0)
+             CHGVAR     VAR(&COMP) VALUE(360)
+             CALL       PGM(POLFUPR) PARM(&ENDTIME &COMP)
+
+             CLOF       OPNID(OMFJCPL0)
+
+/*-------------------------------------------------------------------*/
+/*-------------------------------------------------------------------*/
+/* E9064 DO FOR SEABOARD TRIUMPH SELECTING FROM WAREHOUSE ST1 OR STF */
+/*-------------------------------------------------------------------*/
+
+             CHGVAR     VAR(%SST(&QDATA 125 17)) VALUE('*AND (FJVPCD +
+                          *EQ ')
+             CHGVAR     VAR(%SST(&QDATA 142 5)) VALUE('"ST1"')
+             CHGVAR     VAR(%SST(&QDATA 147 16)) VALUE(' *OR FJVPCD +
+                          *EQ ')
+             CHGVAR     VAR(%SST(&QDATA 163 5)) VALUE('"STF"')
+             CHGVAR     VAR(%SST(&QDATA 168 1)) VALUE(')')
+
+
+             OVRDBF     FILE(OMFJCPL0) SHARE(*YES) /* Load Header */
+             OPNQRYF    FILE((OMFJCPL0)) QRYSLT(&QDATA) KEYFLD(*FILE)
+
+/*-------------------------------------------------------------------*/
+/* CALL RPG PROGRAM TO PROCESS LOAD ID RECORDS AND SEND E-MAILS        */
+/*-------------------------------------------------------------------*/
+
+             CHGVAR     VAR(&ENDTIME) VALUE(0)
+             CHGVAR     VAR(&COMP) VALUE(440)
+             CALL       PGM(POLFUPR) PARM(&ENDTIME &COMP)
+
+             CLOF       OPNID(OMFJCPL0)
+
+/*-------------------------------------------------------------------*/
+/*-------------------------------------------------------------------*/
+/* C2685 DO FOR TRIUMPH SELECTING FROM WAREHOUSE SJ1 OR SF1   */
+/*-------------------------------------------------------------------*/
+
+             CHGVAR     VAR(%SST(&QDATA 125 17)) VALUE('*AND (FJVPCD +
+                          *EQ ')
+             CHGVAR     VAR(%SST(&QDATA 142 5)) VALUE('"SJ1"')
+             CHGVAR     VAR(%SST(&QDATA 147 16)) VALUE(' *OR FJVPCD +
+                          *EQ ')
+             CHGVAR     VAR(%SST(&QDATA 163 5)) VALUE('"SF1"')
+             CHGVAR     VAR(%SST(&QDATA 168 1)) VALUE(')')
+
+
+             OVRDBF     FILE(OMFJCPL0) SHARE(*YES) /* Load Header */
+             OPNQRYF    FILE((OMFJCPL0)) QRYSLT(&QDATA) KEYFLD(*FILE)
+
+/*-------------------------------------------------------------------*/
+/* CALL RPG PROGRAM TO PROCESS LOAD ID RECORDS AND SEND E-MAILS        */
+/*-------------------------------------------------------------------*/
+
+             CHGVAR     VAR(&ENDTIME) VALUE(0)
+             CHGVAR     VAR(&COMP) VALUE(960)
+             CALL       PGM(POLFUPR) PARM(&ENDTIME &COMP)
+
+             CLOF       OPNID(OMFJCPL0)
+
+             DLTOVR     FILE(*ALL)
+/*-------------------------------------------------------------------*/
+/*  DELAY FOR 5 MINUTES;  THEN, START THE PROCESSING OVER.  STOP       */
+/*  PROCESSING AT THE TIME DESIGNATED IN THE COMPANY VALUES FILE.      */
+/*  (THIS 'END TIME' IS RETRIEVED/PASSED IN THE RPGLE PROGRAM ABOVE.   */
+/*-------------------------------------------------------------------*/
+
+             RTVSYSVAL  SYSVAL(QTIME) RTNVAR(&QTM)
+             CHGVAR     VAR(&TIME) VALUE(&QTM)
+             IF         COND(&TIME *GE &ENDTIME) THEN(DO)
+             GOTO       CMDLBL(END)
+             ENDDO
+             DLYJOB     DLY(300)  /* Seconds */
+             GOTO       CMDLBL(REPEAT)
+
+ /******************************************************************/
+/*  END OF JOB PROCESSING                                          */
+ /******************************************************************/
+
+ END:
+
+/* REMOVE ESEND LIBRARY FROM LIBRARY LIST */
+
+             IF         COND(&ALREADY *EQ 'N') THEN(DO)
+             RMVLIBLE   LIB(ESEND)
+             ENDDO
+
+             ENDPGM
+

@@ -1,0 +1,434 @@
+/********************************************************************/
+/*                                                                  */
+/*  SYNOPSIS - CL PROGRAM FOR DOWNLOADING MANDATORY PRICE REPORING  */
+/*             PRIOR DAY REPORT FILES                               */
+/*             E00175 - NEW FOR FINAL MPR RULE  7.21.08            */
+/*                                                                  */
+/*  NOTE  ***** MUST BE COMPILED USER PROFILE(*OWNER)   *****       */
+/*                                                                  */
+/*  SYSTEM    - HOG PROCUREMENT AND EVALUATION                      */
+/*  DATE      - 01/24/00                                            */
+/*  DEVELOPER - PURVA DROGE                                         */
+/*                                                                  */
+/********************************************************************/
+/* MODIFICATIONS:                                                   */
+/* RMC 3/15/01  CALL SETHPELIB                                      */
+/* RMC  3/19/01  CHANGE PCFILE FORMAT TO NEW *COMMA FORMAT          */
+/* RMC  3/29/01  CHANGE PKE6CPP - SOME FIELDS OUTPUT NULL INSTEAD 0 */
+/* RMC  3/29/01  DONT SEND LS118C IF NO RCDS CREATED             */
+/* RMC  4/10/01  PRINT SQL RPT FOR FILES TO GUPPRT201            */
+/* RMC  4/12/01  PRINT SQL RPT FOR FILES TO PRKPRT04             */
+/* RMC  4/18/01  SETLIBLE IF NOT USER CLASS *PGMR                */
+/* PKD  5/16/02  STOPPED PRINTING THE REPORTS ON PRINTER         */
+/*               PRKPRT04.                                       */
+/* RMC  9/11/02  REMOVED SETHPELIB                               */
+/* PKD  9/30/05  CHANGED THE FTP PROGRAM CALLED. THE NEW PROGRAM */
+/*               USES THE PLANT ESTABLISHMENT NUMBER TO DETERMINE*/
+/*               THE FOLDER TO DOWNLOAD THE FILES INTO.          */
+/* RMC  11/18/5  PASS IN THE COMPANY AND JOBD FOR SETLIBL CMD  */
+/* RMC  01/04/6  PASS IN THE COMPANY TO PKWCXFR                */
+/* RMC  04/25/6  SQL TO ST JO PRINTER FOR 960                    */
+/* RMC  04/25/6  WHEN  E7UZPR IS ZERO, OUTPUT BLANKS-PKE7CPP     */
+/* RMC  05/17/6  CHG &DOC TO HAVE THE &PLTCO ALSO-1ST DIGIT OF COMPANY */
+/* RMC  06/05/6  SQL TO ST JO PRINTER FOR 960 TFPRT04            */
+/* RMC  06/19/8  CHG SQLS FOR PKE6CPP,PKE7CPP FOR NEW RULE,FTP TO NEW FOLDER +
+                 CHG &DOC TO HAVE THE FILENAM + 1ST 2 DIGITS OF COMPANY +
+                 DROP LAST 'P' IN PHYS FILE NAME SO IT LOOX LIKE-> PKE5CP36 */
+/* RMC  07/18/8  LIVE 7.21.08                                                +
+/* SLM  07/21/9  ADD DISTRIBUTION AND REWRITE THE BOTTOM SECTION             +
+/* SLM  08/25/9  CHANGES DUE TO ERROR ON BB AND JERRY DID NOT GET REPORT     +
+/*               UNTIL THE R WAS TAKEN TO MESSAGE                            +
+/* SLM  09/28/9  ADD THE HOLD *YES IF DIST NOT = BLANK             */
+/*               ADD HOLD (&HOLDSEL)                               */
+/* SLM  10/05/9  MADE CHANGES TO DISTLST                           */
+/* RMC R14015 05/15/19 CHANGED TO NEW SERVER - CODE HERE REPLACES FTPMPRPLT */
+/*             6/11/19 CHANGE &IDIR TO 47  LONG                             */
+/* RMC  09/18/20  IF MPR SORT LOSS IS 0, THEN PASS *BLANKS IN SQL PKE6CPP -- */
+ /*  REPLACE: CASE E6DPA1 WHEN 9 THEN "  " ELSE CHAR(E6UYPR) END NAME(UYPR), +*/
+ /*  WITH COMPOUND CASE STMT  -- WHD 69081                               */
+/*‚JM   05/15/25 SDN1295 - MPR Upgrade-Add new folder for Test env */
+/*‚JM   05/29/25 SDN1295 - MPR Upgrade-Add Company,program,run num */
+/*****************************************************************************/
+             PGM        PARM(&PLTCO &JOBD)
+
+/* WORK FIELDS */
+             DCL        VAR(&PLTEST) TYPE(*CHAR) LEN(5)   /*PLT ESTABLISHMENT#*/
+             DCL        VAR(&RPTDTE) TYPE(*DEC ) LEN(7 0) /*REPORTING DATE    */
+             DCL        VAR(&RPTDTEX) TYPE(*CHAR) LEN(7) /*REPORTING DATE    */
+             DCL        VAR(&RPTTME) TYPE(*DEC ) LEN(1 0) /*REPORTING TIME    */
+             DCL        VAR(&RPTTMEX) TYPE(*CHAR) LEN(1) /*REPORTING TIME    */
+             DCL        VAR(&RPTDAY) TYPE(*CHAR) LEN(1)   /*REPORTING DAY STS */
+             DCL        VAR(&LS118C) TYPE(*CHAR) LEN(1)   /*REPORTING DAY STS */
+             DCL        VAR(&YYMD)   TYPE(*CHAR) LEN(8)   /*YYYYMMDD          */
+             DCL        VAR(&YYYY)   TYPE(*CHAR) LEN(4)   /*YEAR              */
+             DCL        VAR(&MM)     TYPE(*CHAR) LEN(2)   /*MONTH             */
+             DCL        VAR(&DD)     TYPE(*CHAR) LEN(2)   /*DAY               */
+             DCL        VAR(&TIME)   TYPE(*CHAR) LEN(6)   /*SYSTEM TIME       */
+             DCL        VAR(&JOBD) TYPE(*CHAR) LEN(10)  /* JOBD FOR SETLIB  */
+             DCL        VAR(&PLTCO)  TYPE(*CHAR) LEN(3 )  /* PLANT COMPANY */
+             DCL        VAR(&PLTNO) TYPE(*CHAR) LEN(2) /* PLANT 1ST 2 DIGITS */
+             DCL        VAR(&COMP)  TYPE(*DEC) LEN(3 0)  /* PLANT COMPANY */
+             DCL        VAR(&NEWFLD) TYPE(*CHAR) LEN(1) VALUE('Y') +
+                          /* PUSH TO NEW FOLDER  */
+
+             DCL        VAR(&USRCLS) TYPE(*CHAR) LEN(10) /*  USER CLASS       */
+
+             DCL        VAR(&DOC)   TYPE(*CHAR) LEN(10)   /*DOCUMENT NAME     */
+             DCL        VAR(&PCFILE) TYPE(*CHAR) LEN(32) /*PC FILE           */
+                        /* FORMAT: LS118A_PPPPP_YYYYMMDDHHMMSS.MPR */
+
+             DCL        VAR(&RMTCMD) TYPE(*CHAR) LEN(256) /*REMOTE COMMAND*/
+
+             DCL        VAR(&SEL)   TYPE(*CHAR) LEN(800) /*SELECT STATEMENT  */
+             DCL        VAR(&DISTSCH) TYPE(*CHAR) LEN(30) /* SCHED +
+                          EMAIL DIST LIST */
+             DCL        VAR(&MPRPRINT) TYPE(*CHAR) LEN(10) /* JOBQ */
+             DCL        VAR(&HOLDSEL) TYPE(*CHAR) LEN(10) /* HOLD */
+
+/*‚JM   05/15/25 SDN1295 */
+/*           DCL        VAR(&DIR1) TYPE(*CHAR) LEN(36) */
+             DCL        VAR(&DIR1) TYPE(*CHAR) LEN(41)
+/*           DCL        VAR(&IDIR) TYPE(*CHAR) LEN(47) */
+             DCL        VAR(&IDIR) TYPE(*CHAR) LEN(52)
+             DCL        VAR(&SYSNAME) TYPE(*CHAR) LEN(10)
+/*‚JM   05/15/25 SDN1295 */
+/*‚JM   05/29/25 SDN1295 */
+             DCL        VAR(&PROGRAM) TYPE(*CHAR) LEN(7) +
+                          VALUE('PLL7UPC')
+             DCL        VAR(&COMPNAME) TYPE(*CHAR) LEN(30)
+             DCL        VAR(&RUNNUM) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&NEWMSG) TYPE(*CHAR) LEN(240)
+             DCL        VAR(&JOBDNAME) TYPE(*CHAR) LEN(10)
+/*‚JM   05/29/25 SDN1295 */
+             DCL        VAR(&DIR) TYPE(*CHAR) LEN(11)
+       /*    DCL        VAR(&IDIR) TYPE(*CHAR) LEN(50) */
+             DCL        VAR(&IDIRNM) TYPE(*CHAR) LEN(90)
+
+             CHGVAR     VAR(&COMP) VALUE(&PLTCO)
+ PLTNO:      CHGVAR     VAR(&PLTNO) VALUE(%SST(&PLTCO 1 2))
+/*-----------------------------------------------------------------*/
+/* INITILIZATION                                                   */
+/*-----------------------------------------------------------------*/
+             RTVUSRPRF  USRCLS(&USRCLS)
+
+  /* SET LIBL PER JOB DESC                               11/18/05       */
+
+   SETLIB:     SETLIBL    JOBD(&JOBD)
+/*‚JM   05/15/25 SDN1295 */
+             RTVNETA    SYSNAME(&SYSNAME)
+             IF         COND(&SYSNAME *EQ 'SBFDEV') THEN(DO)
+             SELECT
+             WHEN       COND(&PLTCO *EQ '360') THEN(CHGVAR +
+                          VAR(&JOBDNAME) VALUE('MPRGUPJD'))
+             WHEN       COND(&PLTCO *EQ '440') THEN(CHGVAR +
+                          VAR(&JOBDNAME) VALUE('MPRSTPJD'))
+             WHEN       COND(&PLTCO *EQ '960') THEN(CHGVAR +
+                          VAR(&JOBDNAME) VALUE('MPRTFPJD'))
+             OTHERWISE
+             ENDSELECT
+
+             CHKOBJ     OBJ(&JOBDNAME) OBJTYPE(*JOBD)
+             MONMSG     MSGID(CPF9801) EXEC(DO)
+             CHGVAR     VAR(&JOBDNAME) VALUE('MPRJOBD')
+             CHKOBJ     OBJ(&JOBDNAME) OBJTYPE(*JOBD)
+             MONMSG     MSGID(CPF9801) EXEC(DO)
+             CHGVAR     VAR(&JOBDNAME) VALUE('PRKPRDGUY')
+             ENDDO
+             ENDDO
+             SETLIBL    JOBD(&JOBDNAME)
+             RMVLIBLE   LIB(PRKFLIB)
+             MONMSG     MSGID(CPF0000)
+             CALL       PGM(PNH7XFR) PARM((' ') (&COMP) (&COMPNAME))
+             ENDDO
+/*‚JM   05/15/25 SDN1295 */
+
+/*-----------------------------------------------------------------*/
+/* MAINLINE                                                        */
+/*-----------------------------------------------------------------*/
+/*-----------------------------------------------------------------*/
+/*    BUILD FILES                                                 */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(PKWCXFR) PARM('' &COMP  &PLTEST &RPTDTE &RPTTME +
+                          &RPTDAY &LS118C)
+
+/*-----------------------------------------------------------------*/
+/*IF1  */    IF         COND(&RPTDAY *EQ 'Y') THEN(DO)
+             /* SET UP DATE AND TIME */
+             CHGVAR     VAR(&RPTDTEX) VALUE(&RPTDTE)
+             CHGVAR     VAR(&RPTTMEX) VALUE(&RPTTME)
+/*‚JM   05/29/25 SDN1295 */
+             CHGVAR     VAR(&RUNNUM) VALUE(&RPTTMEX)
+             CHGVAR     VAR(&NEWMSG) VALUE('This report was +
+                          generated from the TEST environment for +
+                          the SDN 1295 IBMi MPR Upgrade project.' +
+                          *CAT 'Program = ' *CAT &PROGRAM *CAT ' ,' +
+                          *CAT '  Company = ' *CAT %TRIM(&COMPNAME) +
+                          *CAT ' ,' *CAT 'Run Number = ' *CAT &RUNNUM)
+             IF         COND(&SYSNAME *NE 'SBFDEV') THEN(DO)
+             CHGVAR     VAR(&NEWMSG) VALUE(' ')
+             ENDDO
+/*‚JM   05/29/25 SDN1295 */
+             CVTDAT     DATE(&RPTDTEX) TOVAR(&YYMD) FROMFMT(*CYMD) +
+                          TOFMT(*YYMD) TOSEP(*NONE)
+             CHGVAR     VAR(&YYYY) VALUE(%sst(&YYMD 1 4))
+             CHGVAR     VAR(&MM)   VALUE(%sst(&YYMD 5 2))
+             CHGVAR     VAR(&DD)   VALUE(%sst(&YYMD 7 2))
+
+             RTVSYSVAL  SYSVAL(QTIME) RTNVAR(&TIME)
+
+  /******* SEND FILE A: LS118A MPR PRIOR DAY SCHEDULED (PKE5CPP)   *******/
+
+             CHGVAR     VAR(&DOC)  VALUE('PKE5CP' *CAT &PLTNO)
+
+             CHGVAR     VAR(&PCFILE) VALUE('ls118a_' *CAT &PLTEST +
+                          *CAT '_' *CAT &YYYY *CAT &MM *CAT &DD +
+                          *CAT &TIME *CAT '.MPR')
+
+             CHGVAR     VAR(&SEL) VALUE('SELECT +
+                          E5H8CD,CHAR(CVTDATE(E5ETDT,CYMD),USA) +
+                          LEN(10) NAME(RPTDTE), E5C2A1, E5C4A1, +
+                          E5C5A1, E5C6A1, E5C7A1, E5C8A1, E5C9A1, +
+                          E5DAA1, E5DBA1, E5DCA1, E5DDA1, E5DEA1, +
+                          E5DFA1, E5DGA1, E5DHA1 FROM PKE5CPP WHERE +
+                          E5H8CD="' *CAT &PLTEST *CAT '" AND +
+                          E5ETDT=' *CAT &RPTDTEX *BCAT 'AND +
+                          E5C2A1=' *CAT &RPTTMEX)
+
+GOTO NEW
+             EXECUTE    SQL(&SEL)                    +
+                          TOFLR(GUY.IS) +
+                          TODOC(&DOC) PCFMT(*COMMA) +
+                          REPLACE(*YES)
+
+             CALL       PGM(FTPMPRPLT) PARM(&PLTCO &DOC &PCFILE &NEWFLD)
+/*-----------------------------------------------------------------*/
+/* NEW PUSH TO SHARED FOLDER - NEW  05.15.19  R14015                    */
+/*-----------------------------------------------------------------*/
+NEW:         MKDIR      DIR('/QNTC/ENTKCPRDFIL1/')
+             MONMSG     MSGID(CPFA0A0)
+
+             CHGVAR     VAR(&DIR1) +
+                          VALUE('/QNTC/ENTKCPRDFIL1/FTP_HPE_PORK/MPR/')
+/*‚JM   05/15/25 SDN1295 */
+             CALLSUBR   SUBR(TESTFOLDER)
+/*‚JM   05/15/25 SDN1295 */
+             CHGVAR     VAR(&DIR) VALUE('UPLOADN' *TCAT &PLTCO +
+                          *CAT '/')
+
+             CHGVAR     VAR(&IDIR) VALUE(&DIR1 *CAT &DIR)
+             CHGVAR     VAR(&IDIRNM) VALUE(&IDIR *CAT &PCFILE)
+
+             EXECUTE    SQL(&SEL) PCFMT(*COMMA) +
+                          TOSTMF(&IDIRNM) REPLACE(*YES)
+   OLD:
+/*  GOTO ENDTEST      TEST ONLY */
+/*-----------------------------------------------------------------*/
+
+  /******* SEND FILE B: LS118B MPR PRIOR DAY SLAUGHTERED (PKE6CPP) *******/
+      /* RMC 6.19.08 REMOVE HI & LO NET PRICES:  E6UWPR, E6UXPR   */
+
+             CHGVAR     VAR(&DOC)  VALUE('PKE6CP' *CAT &PLTNO)
+
+             CHGVAR     VAR(&PCFILE) VALUE('ls118B_' *CAT &PLTEST +
+                          *CAT '_' *CAT &YYYY *CAT &MM *CAT &DD +
+                          *CAT &TIME *CAT '.MPR')
+             CHGVAR     VAR(&SEL) VALUE('SELECT +
+                          E6H8CD,CHAR(CVTDATE(E6ETDT,CYMD),USA) +
+                          LEN(10) NAME(RPTDTE), E6C2A1, E6IBCD, +
+                          E6DOA1, E6DPA1, +
+  CASE E6DQA1 WHEN 0 THEN " " ELSE CHAR(E6DQA1) END NAME(DQA1), +
+  CASE E6UUPR WHEN 0 THEN "  " ELSE CHAR(E6UUPR) END NAME(UUPR), +
+  CASE E6UVPR WHEN 0 THEN "  " ELSE CHAR(E6UVPR) END NAME(UVPR), +
+  CASE E6DRA1 WHEN 0 THEN "  " ELSE CHAR(E6DRA1) END NAME(DRA1), +
+  CASE E6DSA1 WHEN 0 THEN "  " ELSE CHAR(E6DSA1) END NAME(DSA1), +
+  CASE WHEN E6DPA1=9 THEN "  " ELSE CASE WHEN E6UYPR=0 THEN "  " ELSE  +
+  CHAR(E6UYPR) END END NAME(UYPR),  +
+  CASE E6DTA1 WHEN 0 THEN "  " ELSE CHAR(E6DTA1) END NAME(DTA1), +
+  CASE E6DUA1 WHEN 0 THEN "  " ELSE CHAR(E6DUA1) END NAME(DUA1), +
+                          E6DVA1 FROM PKE6CPP WHERE +
+                          E6H8CD="' *CAT &PLTEST *CAT '" AND +
+                          E6ETDT=' *CAT &RPTDTEX *BCAT 'AND +
+                          E6C2A1=' *CAT &RPTTMEX)
+
+ /*  CASE E6DPA1 WHEN 9 THEN "  " ELSE CHAR(E6UYPR) END NAME(UYPR), +  */
+
+GOTO NEW1
+             EXECUTE    SQL(&SEL)               +
+                          TOFLR(GUY.IS) +
+                          TODOC(&DOC) PCFMT(*COMMA) +
+                          REPLACE(*YES)
+
+             CALL       PGM(FTPMPRPLT) PARM(&PLTCO &DOC &PCFILE &NEWFLD)
+
+/*-----------------------------------------------------------------*/
+/* NEW PUSH TO SHARED FOLDER - NEW  12.06.18  R14015                    */
+/*-----------------------------------------------------------------*/
+NEW1:        MKDIR      DIR('/QNTC/ENTKCPRDFIL1/')
+             MONMSG     MSGID(CPFA0A0)
+
+             CHGVAR     VAR(&DIR1) +
+                          VALUE('/QNTC/ENTKCPRDFIL1/FTP_HPE_PORK/MPR/')
+/*‚JM   05/15/25 SDN1295 */
+             CALLSUBR   SUBR(TESTFOLDER)
+/*‚JM   05/15/25 SDN1295 */
+             CHGVAR     VAR(&DIR) VALUE('UPLOADN' *TCAT &PLTCO +
+                          *CAT '/')
+
+             CHGVAR     VAR(&IDIR) VALUE(&DIR1 *CAT &DIR)
+             CHGVAR     VAR(&IDIRNM) VALUE(&IDIR *CAT &PCFILE)
+
+             EXECUTE    SQL(&SEL) PCFMT(*COMMA) +
+                          TOSTMF(&IDIRNM) REPLACE(*YES)
+  OLD1:
+/*  GOTO ENDTEST      TEST ONLY */
+/*-----------------------------------------------------------------*/
+/***** SEND FILE C: LS118C MPR PRIOR DAY PURCHASED (PKE7CPP)   ****    ***/
+      /* RMC 6.19.08 ADDED STATE FIELD E7IDCD  TO END OF FILE */
+/* IF2 */
+  IF COND(&LS118C *EQ 'N') THEN(GOTO PRINT)
+
+             CHGVAR     VAR(&DOC)  VALUE('PKE7CP' *CAT &PLTNO)
+
+             CHGVAR     VAR(&PCFILE) VALUE('ls118C_' *CAT &PLTEST +
+                          *CAT '_' *CAT &YYYY *CAT &MM *CAT &DD +
+                          *CAT &TIME *CAT '.MPR')
+
+             CHGVAR     VAR(&SEL) VALUE('SELECT +
+                          E7H8CD,CHAR(CVTDATE(E7ETDT,CYMD),USA) +
+                          LEN(10) NAME(RPTDTE), E7C2A1,E7IBCD, +
+                          E7DWA1, E7DXA1, E7DYA1, E7DZA1, CASE +
+                          E7D0A1 WHEN 0 THEN "  " ELSE CHAR(E7D0A1) +
+                          END NAME(D0A1), CASE E7UZPR WHEN 0 THEN +
+                          "  " ELSE CHAR(E7UZPR) END NAME(UZPR),E7IDCD +
+                          FROM PKE7CPP WHERE E7H8CD="' *CAT &PLTEST +
+                          *CAT '" AND E7ETDT=' *CAT &RPTDTEX *BCAT +
+                          'AND E7C2A1=' *CAT &RPTTMEX)
+
+   GOTO NEW2
+
+       EXECUTE    SQL(&SEL) TOFLR(GUY.IS) TODOC(&DOC)     +
+                          PCFMT(*COMMA) REPLACE(*YES)
+
+             CALL       PGM(FTPMPRPLT) PARM(&PLTCO &DOC &PCFILE &NEWFLD)
+/*-----------------------------------------------------------------*/
+/* NEW PUSH TO SHARED FOLDER - NEW  12.06.18  R14015                    */
+/*-----------------------------------------------------------------*/
+ NEW2:       MKDIR      DIR('/QNTC/ENTKCPRDFIL1/')
+             MONMSG     MSGID(CPFA0A0)
+
+             CHGVAR     VAR(&DIR1) +
+                          VALUE('/QNTC/ENTKCPRDFIL1/FTP_HPE_PORK/MPR/')
+/*‚JM   05/15/25 SDN1295 */
+             CALLSUBR   SUBR(TESTFOLDER)
+/*‚JM   05/15/25 SDN1295 */
+             CHGVAR     VAR(&DIR) VALUE('UPLOADN' *TCAT &PLTCO +
+                          *CAT '/')
+
+             CHGVAR     VAR(&IDIR) VALUE(&DIR1 *CAT &DIR)
+             CHGVAR     VAR(&IDIRNM) VALUE(&IDIR *CAT &PCFILE)
+
+             EXECUTE    SQL(&SEL) PCFMT(*COMMA) +
+                          TOSTMF(&IDIRNM) REPLACE(*YES)
+  OLD2:
+/*  GOTO ENDTEST      TEST ONLY */
+/*-----------------------------------------------------------------*/
+
+/*-----------------------------------------------------------------*/
+/*  LIVE 7.21.08                                   */
+/*-----------------------------------------------------------------*/
+ PRINT:
+             CALL       PGM(POMTXFR) PARM(' ' &COMP 'MPRREPORT' +
+                          &DISTSCH)
+
+             CALL       PGM(POMTXFR) PARM(' ' &COMP 'MPRPRINT ' +
+                          &MPRPRINT)
+
+             IF         COND(&USRCLS *EQ '*PGMR') THEN(DO)
+             CHGVAR     VAR(&MPRPRINT) VALUE(ISPRT01)
+             ENDDO
+
+/*------------------------------------------------------------------*/
+/*- PRINT REPORT FOR USER ON PAPER          ------------------------*/
+/*------------------------------------------------------------------*/
+
+             CHGVAR     VAR(&HOLDSEL) VALUE(*NO)
+
+             IF         COND(&DISTSCH *NE +
+                          '                               ') THEN(DO)
+             CHGVAR     VAR(&HOLDSEL) VALUE(*YES)
+/*‚JM   05/29/25 SDN1295 */
+             REPORT     REPORT(SQPKE5CPPR) VIEW(SQPKE5CPPP) +
+                          HOLD(&HOLDSEL) SETVAR((&ETDT &RPTDTEX)) +
+                          RECIPIENT(&DISTSCH) EMLMSG(&NEWMSG) +
+                          OUTQ(&MPRPRINT)
+             REPORT     REPORT(SQPKE6CPPR) VIEW(SQPKE6CPPP) +
+                          HOLD(&HOLDSEL) SETVAR((&ETDT &RPTDTEX)) +
+                          RECIPIENT(&DISTSCH) EMLMSG(&NEWMSG) +
+                          OUTQ(&MPRPRINT)
+             REPORT     REPORT(SQPKE7CPPR) VIEW(SQPKE7CPPP) +
+                          HOLD(&HOLDSEL) SETVAR((&ETDT &RPTDTEX)) +
+                          RECIPIENT(&DISTSCH) EMLMSG(&NEWMSG) +
+                          OUTQ(&MPRPRINT)
+             GOTO ENDPGM
+/*           REPORT     REPORT(SQPKE5CPPR) VIEW(SQPKE5CPPP) +      */
+/*                        HOLD(&HOLDSEL) SETVAR((&ETDT &RPTDTEX)) +*/
+/*                        RECIPIENT(&DISTSCH) OUTQ(&MPRPRINT)      */
+/*           REPORT     REPORT(SQPKE6CPPR) VIEW(SQPKE6CPPP) +      */
+/*                        HOLD(&HOLDSEL) SETVAR((&ETDT &RPTDTEX)) +*/
+/*                        RECIPIENT(&DISTSCH) OUTQ(&MPRPRINT)      */
+/*           REPORT     REPORT(SQPKE7CPPR) VIEW(SQPKE7CPPP) +      */
+/*                        HOLD(&HOLDSEL) SETVAR((&ETDT &RPTDTEX)) +*/
+/*                        RECIPIENT(&DISTSCH) OUTQ(&MPRPRINT)      */
+             GOTO ENDPGM
+/*‚JM   05/29/25 SDN1295 */
+             ENDDO
+
+             IF         COND(&DISTSCH = +
+                          '                               ') THEN(DO)
+             CHGVAR     VAR(&HOLDSEL) VALUE(*NO)
+             REPORT     REPORT(SQPKE5CPPR) VIEW(SQPKE5CPPP) +
+                          HOLD(&HOLDSEL) SETVAR((&ETDT &RPTDTEX)) +
+                          OUTQ(&MPRPRINT)
+             REPORT     REPORT(SQPKE6CPPR) VIEW(SQPKE6CPPP) +
+                          HOLD(&HOLDSEL) SETVAR((&ETDT &RPTDTEX)) +
+                          OUTQ(&MPRPRINT)
+             REPORT     REPORT(SQPKE7CPPR) VIEW(SQPKE7CPPP) +
+                          HOLD(&HOLDSEL) SETVAR((&ETDT &RPTDTEX)) +
+                          OUTQ(&MPRPRINT)
+             GOTO ENDPGM
+             ENDDO
+
+/*------------------------------------------------------------------*/
+/*- PRINT REPORT FOR USER AND SEND EMAIL -- USE QPRINT2    ---------*/
+/*------------------------------------------------------------------*/
+
+/*--                                                               -*/
+/*--         OVRPRTF    FILE(SQLPRT1) OUTQ(QPRINT2) HOLD(*YES)     -*/
+/*--         REPORT     REPORT(SQPKE5CPPR) VIEW(SQPKE5CPPP) +      -*/
+/*--                      HOLD(*SAME) SETVAR((&ETDT &RPTDTEX)) +   -*/
+/*--                      RECIPIENT(&DISTSCH)                      -*/
+/*--         REPORT     REPORT(SQPKE6CPPR) VIEW(SQPKE6CPPP) +      -*/
+/*--                      HOLD(*SAME) SETVAR((&ETDT &RPTDTEX)) +   -*/
+/*--                      RECIPIENT(&DISTSCH)                      -*/
+/*--         REPORT     REPORT(SQPKE7CPPR) VIEW(SQPKE7CPPP) +      -*/
+/*--                      HOLD(*SAME) SETVAR((&ETDT &RPTDTEX)) +   -*/
+/*--                      RECIPIENT(&DISTSCH)                      -*/
+
+             ENDDO
+/*-----------------------------------------------------------------*/
+/* END PROGRAM                                                     */
+/*-----------------------------------------------------------------*/
+ ENDPGM:
+             DLTOVR     FILE(*ALL)
+/*‚JM   05/15/25 SDN1295 */
+             SUBR       SUBR(TESTFOLDER)
+             IF         COND(&SYSNAME *EQ 'SBFDEV') THEN(DO)
+             CHGVAR     VAR(&DIR1) +
+                          VALUE('/QNTC/ENTKCPRDFIL1/FTP_HPE_PORK/MPR_+
+                          TEST/')
+             ENDDO
+             ENDSUBR
+/*‚JM   05/15/25 SDN1295 */
+
+             ENDPGM

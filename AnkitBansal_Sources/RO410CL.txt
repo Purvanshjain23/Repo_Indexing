@@ -1,0 +1,375 @@
+/***************************************************************** */
+/*                                                                 */
+/*  SYSTEM:          RESOURCE OPTIMIZATION SYSTEM                  */
+/*  PROGRAM NUMBER:  RO410CL                                       */
+/*  PROGRAM NAME:    WEEKLY MEAT COST CALCULATION                  */
+/*  PROGRAMMER:      LEANNE RAMSEY                                 */
+/*  CREATE DATE:     12/07/06                                      */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFIED:                                                       */
+/*                                                                 */
+/* 07/22/08  LeAnne Ramsey                                         */
+/*           Moved the programs that update the TFP010 file to     */
+/*           this CL from TF415CL-Margin Adjustment Close.         */
+/*                                                                 */
+/* 07/24/08  LeAnne Ramsey                                         */
+/*           Temporarily removed the calls to TF206, TF242, TF243  */
+/*           to update the TFP010 file; then, reinstated them.     */
+/*                                                                 */
+/* 07/24/08  LeAnne Ramsey                                         */
+/*           Added call to RO246-NonByproduct Mix Shoulder Splits. */
+/*                                                                 */
+/* 07/30/08  LeAnne Ramsey                                         */
+/*           We are now calling TF243 from here and from the       */
+/*           Margin Close; so, switched to parms instead of the LDA*/
+/*                                                                 */
+/* 08/01/08  LeAnne Ramsey                                         */
+/*           Added a call to new program TF209-Update Item Standard*/
+/*           Cost for Overridden Items.                            */
+/*                                                                 */
+/* 08/06/08  LeAnne Ramsey                                         */
+/*           We will now update the Item Standard Cost file on     */
+/*           Preliminary runs too.  So, we can now print the       */
+/*           Missing Costs/Yield reports.  We will print the       */
+/*           report twice:                                         */
+/*            1) for Byproducts   (like it is doing now)           */
+/*            2) for Non-Byproducts                                */
+/*                                                                 */
+/* 08/30/08  LeAnne Ramsey                                         */
+/*           We are now creating ByProduct "VOLUME" records for TF.*/
+/*                                                                 */
+/* 11/05/08  LeAnne Ramsey                                         */
+/*           Added new progrm RO235 for Cap&Blade stuff.           */
+/*                                                                 */
+/* 11/21/08  LeAnne Ramsey                                         */
+/*           As part of synchronizing the LDAs between the         */
+/*           TFS Margin Adjustment Close and the Meat Costing,     */
+/*           the LDA positions were changed.                       */
+/*                                                                 */
+/*           Also, changed logic to call RO412CL instead of RO612. */
+/*                                                                 */
+/* 01/12/09  LeAnne Ramsey                                         */
+/*           For the new Weekly Yield Reporting, we call both the  */
+/*           Meat Costing and Margin Close CLs behind-the-scenes.  */
+/*           To control printing in the CLs, we have added a new   */
+/*           incoming parm. We pass in:                            */
+/*            1) a blank from the RO410 and TF415 submission       */
+/*               screens                                           */
+/*            2) an 'N' when the CL is called from Nathan's        */
+/*               Inventory Stock Closing. So, I guess "N" can      */
+/*               stand for 1) Nathan or 2) Not Normal              */
+/*                                                                 */
+/* 03/04/09  LeAnne Ramsey                                         */
+/*           Removed the call to RO228-Picnic Yields Special Calcs */
+/*                                                                 */
+/* 01/13/11  LeAnne Ramsey                                         */
+/*           Added a call to our latest/newest split program:      */
+/*           RO228-Byproduct--Split 26010 (CVB) to 28063 (BP5/CUSH)*/
+/*                                                                 */
+/* 02/07/11  LeAnne Ramsey (E1298)                                 */
+/*           We no longer call RO223-ByProduct Mix Exceptions for  */
+/*           SRLN/T72A. It was called right after RO225.           */
+/*           The program and the file it built (ROP124) are now    */
+/*           obsolete.                                             */
+/*                                                                 */
+/* 09/19/11  LeAnne Ramsey (E1748)                                 */
+/*           Damon G. is now handling Items 12721, 12730, 12740,   */
+/*           and 79810 by using a different SalesYld% in the BOM.  */
+/*           So, he has requested that we remove all of the        */
+/*           hardcoded logic for these 4 Items. So, we will no     */
+/*           longer have/need/call program RO229.                  */
+/*           It was being called immediately after program RO222.  */
+/*                                                                 */
+/* 11/07/22  S.L. Henry (110463)                                   */
+/*           Line 299.10 was overwriting the OUTQ.  Commented      */
+/*           299.10 and added the line following to make number .  */
+/*           of copies = 1.                                        */
+/* PIO 03/04/24 -  REPLACE OPNQRYF WITH OPNSQLF FOR PPAOREP FILE   */
+/*                 ADDED NEEDED OVRDBF AROUND THE COMMAND.         */
+/*                 CHANGE *AND TO AND, *EQ TO =, *GE TO >=, *LE TO */
+/*                 <=, *GT TO > IN &Q                              */
+/*                                                                 */
+/*******************************************************************/
+
+             PGM        PARM(&CLPARM)
+
+             DCL        VAR(&CLPARM)  TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&QDATA)   TYPE(*CHAR) LEN(90)
+
+             DCL        VAR(&HOLD)    TYPE(*CHAR) LEN(4)
+             DCL        VAR(&SAVE)    TYPE(*CHAR) LEN(4)
+             DCL        VAR(&COPY)    TYPE(*DEC) LEN(2)
+             DCL        VAR(&OUTQ)    TYPE(*CHAR) LEN(10)
+
+             DCL        VAR(&LDPFCD)  TYPE(*CHAR) LEN(1)
+             DCL        VAR(&LDCONO)  TYPE(*DEC)  LEN(3)
+
+             DCL        VAR(&LDWEDT)  TYPE(*DEC)  LEN(8)
+             DCL        VAR(&LDWESYN) TYPE(*DEC)  LEN(7)
+             DCL        VAR(&LDWEMDY) TYPE(*DEC)  LEN(6)
+
+             CHGVAR     VAR(&LDPFCD)  VALUE(%SST(*LDA 1 1))
+             CHGVAR     VAR(&LDCONO)  VALUE(%SST(*LDA 82 3))
+
+             CHGVAR     VAR(&LDWEDT)  VALUE(%SST(*LDA 29 8))
+             CHGVAR     VAR(&LDWESYN) VALUE(%SST(*LDA 37 7))
+             CHGVAR     VAR(&LDWEMDY) VALUE(%SST(*LDA 44 6))
+
+/*----------------------------------------------------------------*/
+/* RETRIEVE/SET PRINT DEFAULTS                                    */
+/*----------------------------------------------------------------*/
+
+ OUTQ:       CHGVAR     VAR(&OUTQ) VALUE(%SST(*LDA 401 10))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(*JOB))
+
+ HOLD:       CHGVAR     VAR(&HOLD) VALUE('*YES')
+             CHGDTAARA  DTAARA(*LDA (411 4)) VALUE('*YES')
+
+ SAVE:       CHGVAR     VAR(&SAVE) VALUE('*YES')
+             CHGDTAARA  DTAARA(*LDA (415 4)) VALUE('*YES')
+
+ COPY:       CHGVAR     VAR(&COPY) VALUE(%SST(*LDA 419 1))
+             IF         COND(&COPY = 0) THEN(CHGVAR VAR(&COPY) +
+                          VALUE(1))
+
+/*----------------------------------------------------------------------------*/
+/* ALWAYS DELETE ANY/ALL EXISTING WEEKLY RECORDS FOR THE WEEK                 */
+/*----------------------------------------------------------------------------*/
+
+             CALL       PGM(RO210)
+
+/*----------------------------------------------------------------------------*/
+/* UPDATE VALUES IN THE WEEKLY REVENUE DETAIL RECORDS                         */
+/*----------------------------------------------------------------------------*/
+
+             CALL       PGM(TF206) PARM('R' &LDWEDT) /* Inventory             */
+             CALL       PGM(TF242) PARM(&LDWEDT)     /* Item Structure values */
+             CALL       PGM(TF243) PARM(&LDWEDT &LDWESYN) /* Std Costs/Yields */
+
+/*----------------------------------------------------------------------------*/
+/* WRITE PRODUCT EXCEPTION RECORDS FOR THE SHOULDER SPLITS                    */
+/*----------------------------------------------------------------------------*/
+
+             CALL       PGM(RO246) /* NonByproduct Shoulder Splits            */
+
+/*----------------------------------------------------------------------------*/
+/* BUILD THE BY-PRODUCT DETAIL & SUMMARY FILES FOR MIX                        */
+/* (Note: We only process Finished Goods items in most of these programs.     */
+/*        The WIPS come in at the end of this section of processing.)         */
+/*----------------------------------------------------------------------------*/
+/* For the TF Byproduct logic, select only the TF Margin Adjustment           */
+/* Detail records that have a Meat Cost Group Code assigned.                  */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+  /*PIO      CHGVAR     VAR(%SST(&QDATA 1 17)) VALUE('AOHFAA *NE "    "') */
+  /*PIO*/    CHGVAR     VAR(%SST(&QDATA 1 17)) VALUE('AOHFAA  <> "    "')
+
+  /*PIO      OVRDBF     FILE(PPAOREL1) SHARE(*YES)    +
+             OPNQRYF    FILE((PPAOREL1)) OPTION(*INP) QRYSLT(&QDATA) +  +
+                          KEYFLD(*FILE) SEQONLY(*YES)              */
+
+  /*PIO*/    OVRDBF     FILE(PPAOREP) TOFILE(PPAOREP) LVLCHK(*NO)
+  /*PIO*/    OPNSQLF    SQL('Select * from PPAOREP Where  ' *BCAT +
+                          &QDATA  *BCAT ' Order by AOFLAA ASC, +
+                          AORGNB ASC, AORHNB ASC, AORINB ASC') +
+                          OPNID(PPAOREL1) OPTION(*ALL) SEQONLY(*NO) +
+                          RCDFMT(@AOREVX) ALWCPY(*IFRQD)
+  /*PIO*/    OVRDBF     FILE(PPAOREL1) TOFILE(PPAOREP) LVLCHK(*NO) +
+                          OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+
+             CALL       PGM(RO221) /* Byproduct Detail                  */
+
+             CLOF       OPNID(PPAOREL1)
+  /*PIO      DLTOVR     FILE(PPAOREL1)  */
+             DLTOVR     FILE(PPAOREL1) LVL(*JOB) /*PIO*/
+
+             CALL       PGM(RO231) /* Byproduct Exceptions-Manual to Detail  */
+             CALL       PGM(RO235) /* Byproduct Cap&Blade 61210 61410        */
+             CALL       PGM(RO222) /* Byproduct Exceptions-BP1 BP6 BP7       */
+             CALL       PGM(RO230) /* Byproduct Pump to Start Wgt Exceptions */
+             CALL       PGM(RO232) /* Byproduct Skirt Meat                   */
+             CALL       PGM(RO228) /* Byproduct Split 26010 to 28063         */
+             CALL       PGM(RO212) /* Byproduct Values Summary */
+             CALL       PGM(RO227) /* Tanked Group Calcs: BNIN RBBN RBLT SKPC */
+             CALL       PGM(RO225) /* TF Byproduct Mix Summary                */
+
+
+/* Work in Process Items (WIPS)                                              */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+   /*PIO     CHGVAR     VAR(%SST(&QDATA 1 35)) VALUE('AOSWSX *EQ "Y" + +
+                        *AND AOSVSX *EQ "BP"')                   */
+   /*PIO*/   CHGVAR     VAR(%SST(&QDATA 1 35)) VALUE('AOSWSX  =  "Y" +
+                         AND AOSVSX  =  "BP"')
+
+    /*PIO    OVRDBF     FILE(PPAOREL1) SHARE(*YES)      +
+             OPNQRYF    FILE((PPAOREL1)) OPTION(*INP) QRYSLT(&QDATA) + +
+                          KEYFLD((AOFLAA) (AOHFAA) (AORGNB) +   +
+                          (AOI1T1) (AORHNB) (AORINB)) SEQONLY(*YES) */
+
+     /*PIO*/    OVRDBF     FILE(PPAOREP) TOFILE(PPAOREP) LVLCHK(*NO)
+     /*PIO*/    OPNSQLF    SQL('SELECT * FROM PPAOREP WHERE  ' *BCAT +
+                             &QDATA  *BCAT ' ORDER BY AOFLAA ASC, +
+                             AORGNB ASC, AORHNB ASC, AORINB ASC') +
+                             OPNID(PPAOREL1) OPTION(*ALL) SEQONLY(*NO) +
+                             RCDFMT(@AOREVX) ALWCPY(*IFRQD)
+     /*PIO*/    OVRDBF     FILE(PPAOREL1) TOFILE(PPAOREP) LVLCHK(*NO) +
+                             OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+             CALL       PGM(RO226) /* TF Byproduct Mix Detail/Summary */
+             CLOF       OPNID(PPAOREL1)
+    /*PIO    DLTOVR     FILE(PPAOREL1) */
+             DLTOVR     FILE(PPAOREL1) LVL(*JOB) /*PIO*/
+
+/* FG/WP LOGIC */
+             CALL       PGM(RO224) /* TF Byproduct Mix Recap      */
+
+/*----------------------------------------------------------------------------*/
+/* CREATE THE BYPRODUCT VOLUME RECORDS                                        */
+/*----------------------------------------------------------------------------*/
+
+             CALL       PGM(RO233)
+
+
+/*----------------------------------------------------------------------------*/
+/* CLEAR & THEN REBUILD THE 'ITEM PROCESSING SEQUENCE' WORKFILE               */
+/*----------------------------------------------------------------------------*/
+/* WE WANT TO KEEP THIS FILE TO DEBUG A RUN. SO, INSTEAD OF CREATING IT       */
+/* IN QTEMP, WE WILL CLEAR IT BEFORE EACH RUN.                                */
+
+             CLRPFM    FILE(ROP300)
+
+             OVRPRTF    FILE(PRINT198) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(&HOLD) SAVE(&SAVE)
+
+             CALL       PGM(RO213) /* Assign Sequence */
+
+/* If this run is from the Inventory Stock Closing (see TF270CL), then      */
+/* delete the listing generated in RO213. If we don't it gets emailed along */
+/* with the Weekly Yield Reports (from TF415CL).                            */
+
+             IF         COND(&CLPARM *EQ 'N') THEN(DO) /* If Stock Closing */
+             DLTSPLF    FILE(PRINT198)
+             ENDDO                                     /* If Stock Closing */
+
+/*----------------------------------------------------------------------------*/
+/* HAM PROCESSING  ---   GET HAM YIELDS                                       */
+/*    ---  RO219 - CALC ITEM WEEKLY BOM YIELD OVERRIDES (ROP107)              */
+/*----------------------------------------------------------------------------*/
+
+ RO219:      CHGVAR     VAR(&QDATA) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA 1 43)) VALUE('W1PGCD *EQ +
+                          "HAMC  "                        ')
+
+             OVRDBF     FILE(ROP300) SHARE(*YES)
+             OPNQRYF    FILE((ROP300)) QRYSLT(&QDATA) +
+                          KEYFLD(*FILE) SEQONLY(*YES)
+
+             CALL       PGM(RO219) /* Calculate BOM Yield Overrides */
+
+             CLOF       OPNID(ROP300)
+             DLTOVR     FILE(ROP300)
+
+/*----------------------------------------------------------------------------*/
+/* END OF HAM PROCESSING                                                      */
+/*----------------------------------------------------------------------------*/
+/*                                                                            */
+/*----------------------------------------------------------------------------*/
+/* Component Item and Item Meat Cost                                          */
+/*----------------------------------------------------------------------------*/
+
+             CALL       PGM(RO214) /* Component Item Meat Cost */
+             CALL       PGM(RO215) /* Item Meat Cost */
+
+/******************************************************************************/
+/* ONLY PRINT LISTINGS WHEN THE INCOMING PARM IS BLANK                        */
+/* (ie: not called from Inventory Stock Closing)                              */
+/******************************************************************************/
+
+             IF         COND(&CLPARM *EQ ' ') THEN(DO) /* If reports */
+
+        /*-----------------------------------------------*/
+        /* Print Listings:                               */
+        /*   RO602-Listing of Item Control Data          */
+        /*   RO616-Listing of Meat Cost Overrides        */
+        /*-----------------------------------------------*/
+
+             CALL       PGM(RO401CL) /* Item Control Data   */
+             CALL       PGM(RO416CL) /* Meat Cost Overrides */
+
+        /*-------------------------------------------------------------*/
+        /* Print Byproduct Values Report:                              */
+        /*    1) RO612 - ByProduct Values Report                       */
+        /*  Listing of data in files: ROP122-Byproduct Detail          */
+        /*                            ROP101-Byproduct Values Summary  */
+        /*-------------------------------------------------------------*/
+
+             CALL       PGM(RO412CL) /* ByProduct Values Report */
+
+        /*--------------------------------------------------------------*/
+        /* Print Meat Cost Reports:                                     */
+        /*    1) RO613 - Meat Cost Report                               */
+        /*    2) RO614 - Ham Group Yield Breakdown                      */
+        /*  Listing of data in files: ROP102-Component Item Meat Cost   */
+        /*                            ROP103-Item Meat Cost             */
+        /*                            ROP106-Ham Group Matrix Summary   */
+        /*--------------------------------------------------------------*/
+
+             CHGDTAARA  DTAARA(*LDA (113 1)) VALUE('M') /* Meat Cost Reports */
+             CALL       PGM(RO413CL)
+             ENDDO                                     /* If reports */
+
+/*----------------------------------------------------------------------------*/
+/* Update Synon Item Standard Cost file with the Meat Cost value.             */
+/* (Note: We originally did this only on a FINAL run; now we do it on         */
+/*        Preliminary runs too.)                                              */
+/*----------------------------------------------------------------------------*/
+
+             CALL       PGM(RO211) /* Update Item Standard Cost file */
+             CALL       PGM(RO209) /* Overridden Items */
+
+/*----------------------------------------------------------------------------*/
+/*  Call the program to update the Resource Optimization Header to            */
+/*  Preliminary/Final.                                                        */
+/*----------------------------------------------------------------------------*/
+
+             CALL       PGM(RO200)
+
+/******************************************************************************/
+/* ONLY PRINT LISTING WHEN THE INCOMING PARM IS BLANK                         */
+/* (ie: not called from Inventory Stock Closing)                              */
+/******************************************************************************/
+
+             IF         COND(&CLPARM *EQ ' ') THEN(DO) /* If printing */
+
+              /*--------------------------------------------------------------*/
+              /* Print an FYI Listing of Missing Standard Yield/Cost Data     */
+              /*--------------------------------------------------------------*/
+              /* Run this twice: once for Byproducts; then for Non-ByProducts */
+
+             CHGDTAARA  DTAARA(*LDA (401 10)) VALUE(&OUTQ)
+             CHGDTAARA  DTAARA(*LDA (411 1)) VALUE('Y') /* HOLD */
+             CHGDTAARA  DTAARA(*LDA (412 1)) VALUE('1')
+/*           CHGDTAARA  DTAARA(*LDA (413 10)) VALUE(&OUTQ)                    */
+             CHGDTAARA  DTAARA(*LDA (419 1)) VALUE('1')
+
+             CHGDTAARA  DTAARA(*LDA (113 1)) VALUE('B')    /* Byproducts */
+             CALL       PGM(TF414CL)
+
+             CHGDTAARA  DTAARA(*LDA (113 1)) VALUE('N')    /* NonByproducts */
+             CALL       PGM(TF414CL)
+             ENDDO                                         /* If printing */
+
+/*----------------------------------------------------------------------------*/
+/*  Change the Data Area to indicate that the "calc" function                 */
+/*  has finished running.                                                     */
+/*----------------------------------------------------------------------------*/
+
+             CHGDTAARA  DTAARA(DAROCALC (1 1)) VALUE(' ')
+
+             ENDPGM
+

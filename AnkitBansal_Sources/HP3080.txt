@@ -1,0 +1,649 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP3080
+      * TITLE:       Workfile: Activity Variance Report
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     10/03/02
+      *
+      * FUNCTION:  Build a file that holds both the 'actual' and the 'reported' data for
+      *            group/week.
+      *
+      *            This listing is submitted from HP4080-Specify Options for
+      *            Activity Variance Report.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 04/27/06  LeAnne Fedor
+      *           Changed the "NC" (not-complete sales movement) logic. We
+      *           now handle NC like "FP" (fully paid) instead of like
+      *           "SH" (shipped).
+      *
+      * 06/07/06  LeAnne Fedor
+      *           Prior to this change, ALL "created" groups were omitted from processing.
+      *           Now, the users want to include "created" groups that have a "create date" that
+      *           is at least 7 days before the report selection date. These groups never have
+      *           any data on this Variance Report-- which is reporting head values--which
+      *           "created" groups never have.  But, the users that run this report are
+      *           also responsible for checking that 'created' groups are being 'opened' on
+      *           a timely basis----so, they wanted the "older" created groups to print on
+      *           this report---since they generate this report weekly anyway. For these
+      *           'created' groups, we will print an '*' between the Cell and Farm.
+      *
+      * 07/02/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 05/17/10  LeAnne Ramsey
+      *           Recompile only. Corrected spelling on Workfile field text.
+      *
+      * 05/20/10  LeAnne Ramsey  (E1557)
+      *           Per Debbie Deen, added Yard Dead (from Market Sales) to workfile/report.
+      *
+      * 09/17/12  LeAnne Ramsey  (E2256)
+      *           Per Sami Wilson, we will replace 4 "reported" columns with Shipped Head:
+      *             transferred out, transferred in, cull sale, market sale.
+      *           I kept the 'reported' fields and added 4 new 'shipped' fields to HSP3080..
+      *           just in case Sami W. wants to revert back to using "reported".
+      *
+      * 10/04/12  LeAnne Ramsey  (E2256)
+      *           Per Sami Wilson, we are making more changes on E2256 from 9/17/12.
+      *           We are adding 2 fields:
+      *                   Shipped Ending Inventory Head
+      *                   Variance Shipped Head
+      *           Also, the calc for Transfer In Shipped Head will now be:
+      *                    shipped head - DOA - KOA
+      *           Also, we removed the optional selection based on the number of Reported
+      *                    Variance head (Below):
+      *
+      *        You may further limit the groups that are included on the report by entering
+      *        either one or both of the following options:
+      *        Groups to include .. ?                                           (Blank = All)
+      *        Groups whose Ending Inventory Variance Head is: ?                (GT GE LT LE)
+      *                                  an absolute value of:
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp018    if   e           k disk
+      *  Farm Site
+      *
+      *
+     Fhsp034    if   e           k disk
+      *  Hog group (records selected in open query)
+      *
+      *
+     Fhsl068d   if   e           k disk
+      *  Killed/dead hogs (records selected in open query)
+      *
+      *
+     Fhsl069a   if   e           k disk
+      *  Inventory adjustments (records selected in open query)
+      *
+      *
+     Fhsj075i   if   e           k disk    rename(mdrec:mdreci)
+      *  Transfer movement detail + transfer movement header
+      *
+      *
+     Fhsj075g   if   e           k disk    rename(mdrec:mdrecg)
+      *  Transfer movement detail + transfer movement header
+      *
+      *
+     Fhsj085e   if   e           k disk
+      *  Sales movement detail + sales movement header
+      *
+      *
+     Fhsp102    if   e           k disk
+      *  Reported weekly activity (records selected in open query)
+      *
+      *
+     Fhsp3080   o    e           k disk
+      *  Workfile: Activity variance report
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D procfl          s              1
+      *
+      *
+      * Workfields
+      *
+     D wkhd            s                   like(w1amkhd)
+      *
+     D wkwk            s              2  0
+     D wkday           s              1  0
+     D wkalphwk        s              2
+     D wkalphday       s              1
+      *
+      *
+      * Work fields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+     D wkisocrdt       s               D   datfmt(*iso)
+     D wkisosat        s               D   datfmt(*iso)
+      *
+      *
+      * Define parms for the generic movement program
+      *
+     D zzcymd          s              8  0
+      *
+     D @@nu50          s              5  0
+     D gpihd           s                   like(@@nu50)
+     D pinhd           s                   like(@@nu50)
+     D tinhd           s                   like(@@nu50)
+     D tisphd          s                   like(@@nu50)
+     D tidphd          s                   like(@@nu50)
+     D pouhd           s                   like(@@nu50)
+     D touhd           s                   like(@@nu50)
+     D tosphd          s                   like(@@nu50)
+     D todphd          s                   like(@@nu50)
+     D rinhd           s                   like(@@nu50)
+     D rouhd           s                   like(@@nu50)
+     D qinhd           s                   like(@@nu50)
+     D qouhd           s                   like(@@nu50)
+     D morhd           s                   like(@@nu50)
+     D inahd           s                   like(@@nu50)
+      *
+     D @@nu92          s              9  2
+     D pinlb           s                   like(@@nu92)
+     D tinlb           s                   like(@@nu92)
+     D tisplb          s                   like(@@nu92)
+     D tidplb          s                   like(@@nu92)
+     D poulb           s                   like(@@nu92)
+     D toulb           s                   like(@@nu92)
+     D tosplb          s                   like(@@nu92)
+     D todplb          s                   like(@@nu92)
+     D rinlb           s                   like(@@nu92)
+     D roulb           s                   like(@@nu92)
+     D qinlb           s                   like(@@nu92)
+     D qoulb           s                   like(@@nu92)
+     D morlb           s                   like(@@nu92)
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldcdyr                 1      4  0
+     D  ldcdwk                 5      6  0
+     D  ldfcymd                7     14  0
+     D  ldtcymd               15     22  0
+      *
+     D  ldrpfl                23     23
+     D  ldtfcd                24     28
+     D  ldblank               29     30
+      *
+     D  ldfsbo                31     35
+     D  ldptcd                36     40
+     D  ldppcd                41     45
+     D  ldcell                46     47  0
+     D  ldfscd                48     52  0
+     D  ldhgcd                53     59
+     D  ldhgsn                60     66  0
+     D  ldgtcd                67     67
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Read each group selected by the open query.
+      *
+     C     *loval        setll     hsp034
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsp034                                 90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   move      yes           procfl
+      *
+      * If a group has a "created" status, only process it if it has
+      * been in the "create" status for at least 7 days prior to the
+      * report date.
+     C                   if        hggscd = 'CR'
+     C     *iso          move      hgcrdt        wkisodate
+     C                   if        wkisodate > wkisocrdt
+     C                   move      no            procfl
+     C                   endif
+     C                   endif
+      *
+      * Retrieve farm data for group.
+      *    If user elected to print the report for a single cell, only continue
+      *        if this group is in that cell.
+      *    If user elected to print the report for a single 'type of farm' only
+      *        process this group if it is on a farm of that type
+      *
+     C     hgfscd        chain     hsp018                             92
+     C                   select
+     C                   when      *in92 = *on
+     C                   move      no            procfl
+      *
+     C                   when      ldcell <> 0 and ldcell <> fscell
+     C                   move      no            procfl
+      *
+     C                   when      ldtfcd <> *blank and ldtfcd <> fstfcd
+     C                   move      no            procfl
+     C                   endsl
+      *
+      *
+     C                   if        procfl = yes                                 If process
+      *
+      * Set up workfile fields that are a direct map.
+      *
+     C                   exsr      $directmap
+      *
+      * Retrieve additional info for the groups that are not in "Created" status.
+      *    Retrieve all reported weekly data
+      *    Retrieve all actual data
+      *    Make calculations
+      *
+     C                   if        hggscd <> 'CR'
+     C                   exsr      $reported
+     C                   exsr      $actuals
+     C                   exsr      $calcs
+     C                   endif
+      *
+      * Write a workfile record
+      *
+     C                   exsr      $wrt3080
+      *
+     C                   endif                                                  If process
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * EOF processing
+      *
+     C                   seton                                        lr
+      /EJECT
+      *-------------------------------------------------------------------------------
+      * Write workfile record
+      *-------------------------------------------------------------------------------
+      *
+     C     $wrt3080      begsr
+      *
+     C                   if        hggscd = 'CR'
+     C                   move      '*'           w1cast
+     C                   endif
+      *
+     C                   write     w1rec
+     C                   clear                   w1rec
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Process all actual movement data for the group
+      *-------------------------------------------------------------------------------
+      *
+     C     $actuals      begsr
+      *
+      * Get inventory for the group as of the day before the beginning of the week
+      *
+     C     *iso          move      ldfcymd       wkisodate
+     C     wkisodate     subdur    1:*days       wkisodate
+     C                   move      wkisodate     zzcymd
+      *
+     C                   call      'HPMOVE'      plist01
+     C                   z-add     gpihd         w1abginhd
+      *
+      * Transfers
+     C                   exsr      $transfers
+      *
+      * Sales
+     C                   exsr      $sales
+      *
+      * Daily dead
+     C                   exsr      $dead
+      *
+      * Inventory adjustments
+      *
+     C                   exsr      $adjust
+      *
+      * Calculate Actual Ending Inventory Head
+      *
+     C                   eval      w1aeninhd = w1abginhd + w1atihd
+     C                             - w1atohd - w1acuhd - w1amkhd
+     C                             - w1addhd - w1adshd + w1aiahd
+      *
+      * Calculate Shipped Ending Inventory Head
+      *
+     C                   eval      w1seninhd = w1abginhd + w1stihd
+     C                             - w1stohd - w1scuhd - w1smkhd
+     C                             - w1addhd - w1adshd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Transferred head
+      *---------------------------------------------------------------
+      *
+     C     $transfers    begsr
+      *
+      * Transferred in head
+      *
+     C     hghgsn        setll     hsj075i
+     C                   dou       *in91 = *on                                  Do trans in
+     C     hghgsn        reade     hsj075i                                91
+     C                   if        *in91 = *off and                             If ok date
+     C                             (mhrcdt >= ldfcymd and mhrcdt <= ldtcymd)
+     C                   add       mdqlhd        w1atihd
+     C                   add       mdrjhd        w1atihd
+     C                   add       mdshhd        w1stihd
+     C                   sub       mddohd        w1stihd
+     C                   endif                                                  If ok date
+     C                   enddo                                                  Do trans in
+      *
+      *
+      * Transferred out head
+      *
+     C     hghgsn        setll     hsj075g
+     C                   dou       *in91 = *on                                  Do trans out
+     C     hghgsn        reade     hsj075g                                91
+     C                   if        *in91 = *off and                             If in range
+     C                             (mhrcdt >= ldfcymd and mhrcdt <= ldtcymd)
+     C                   add       mdqlhd        w1atohd
+     C                   add       mdrjhd        w1atohd
+     C                   add       mddohd        w1atohd
+     C                   add       mdshhd        w1stohd
+     C                   endif                                                  If in range
+     C                   enddo                                                  Do trans out
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------------
+      * Retrieve 'sales movements' that are not in a 'scheduled' status
+      *----------------------------------------------------------------------------------------
+      *
+     C     $sales        begsr
+      *
+     C     hghgsn        setll     hsj085e
+      *
+     C                   dou       *in91 = *on                                  Do sales
+     C     hghgsn        reade     hsj085e                                91
+     C                   if        *in91 = *off and                             If in range
+     C                             (shrcdt >= ldfcymd and shrcdt <= ldtcymd)
+      *
+     C                   select
+     C                   when      shmscd = 'SH'
+     C                   z-add     sgshhd        wkhd
+     C                   other
+     C                   z-add     sglvhd        wkhd
+     C                   add       sgdohd        wkhd
+     C                   endsl
+
+      * Cull sales
+     C                   select
+     C                   when      shstcd = 'CULLS'
+     C                   add       wkhd          w1acuhd
+     C                   add       sgshhd        w1scuhd
+      *
+     C                   if        shmscd = 'FP' or shmscd = 'PP'
+     C                   else
+     C                   move      '*'           w1acuast
+     C                   endif
+     C                   other
+      *
+      * Market/FPS sales
+     C                   add       wkhd          w1amkhd
+     C                   add       sgydhd        w1aydhd
+     C                   add       sgshhd        w1smkhd
+      *
+     C                   if        shmscd = 'FP' or shmscd = 'PP'
+     C                   else
+     C                   move      '*'           w1amkast
+     C                   endif
+     C                   endsl
+      *
+     C                   endif                                                  If in range
+     C                   enddo                                                  Do sales
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve 'daily dead' data
+      *---------------------------------------------------------------
+      *
+     C     $dead         begsr
+      *
+     C     hghgsn        setll     hsl068d
+      *
+     C                   dou       *in91 = *on                                  Do daily dead
+     C     hghgsn        reade     hsl068d                                91
+     C                   if        *in91 = *off                                 If not eof
+     C                   add       kdkdlb        w1akdlb
+      *
+     C                   select
+     C                   when      kddsfl = yes
+     C                   add       kdkdhd        w1adshd
+      *
+     C                   when      kddsfl = no
+     C                   add       kdkdhd        w1addhd
+     C                   endsl
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do daily dead
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve 'inventory adjustment' head
+      *---------------------------------------------------------------
+      *
+     C     $adjust       begsr
+      *
+     C     hghgsn        setll     hsl069a
+      *
+     C                   dou       *in91 = *on                                  Do adjusts
+     C     hghgsn        reade     hsl069a                                91
+     C                   if        *in91 = *off                                 If not eof
+     C                   add       iaiahd        w1aiahd
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do adjusts
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve 'reported' data
+      *---------------------------------------------------------------
+      *
+     C     $reported     begsr
+      *
+     C     key01         chain     hsp102                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   move      *blank        w1rast
+     C                   z-add     rwbginhd      w1rbginhd
+     C                   z-add     rwtihd        w1rtihd
+     C                   z-add     rwtohd        w1rtohd
+     C                   z-add     rwcuhd        w1rcuhd
+     C                   z-add     rwmkhd        w1rmkhd
+     C                   else
+     C                   move      '*'           w1rast
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Set up fields that are a direct map
+      *---------------------------------------------------------------
+      *
+     C     $directmap    begsr
+      *
+     C                   move      fsfsnm        w1fsnm
+     C                   z-add     fscell        w1cell
+      *
+     C                   z-add     hgfscd        w1fscd
+     C                   z-add     hghgsn        w1hgsn
+     C                   move      hghgcd        w1hgcd
+     C                   move      hgblcd        w1blcd
+     C                   move      hgrmcd        w1rmcd
+     C                   move      hgppcd        w1ppcd
+      *
+     C                   z-add     ldcdyr        w1cdyr
+     C                   z-add     ldcdwk        w1cdwk
+     C                   z-add     ldfcymd       w1wbdt
+     C                   z-add     ldtcymd       w1wedt
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Make calculations
+      *---------------------------------------------------------------
+      *
+     C     $calcs        begsr
+      *
+      * Calculate weeks/days in phase for the group
+      *
+     C                   exsr      $phase
+      *
+      * Calculate 'reported ending inventory'
+      *
+     C                   z-add     w1rbginhd     w1reninhd
+     C                   add       w1rtihd       w1reninhd
+     C                   sub       w1rtohd       w1reninhd
+     C                   sub       w1rcuhd       w1reninhd
+     C                   sub       w1rmkhd       w1reninhd
+     C                   sub       w1addhd       w1reninhd
+     C                   sub       w1adshd       w1reninhd
+      *
+      * Calculate Variance between Actual and:
+      *    1) Reported Ending Inventory Head
+      *    2) Shipped Ending Inventory Head
+      *
+     C     w1aeninhd     sub       w1reninhd     w1rveninhd
+     C     w1aeninhd     sub       w1seninhd     w1sveninhd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Calculate weeks/days in phase
+      *---------------------------------------------------------------
+      *
+     C     $phase        begsr
+      *
+      * Calculate the days in the phase
+      *
+     C     *iso          move      hgopdt        wkisodate
+     C     wkisosat      subdur    wkisodate     w1phsday:*d
+      *
+      * Format days in the phase into an alpha field of weeks-days
+      *
+      * Calculate 'weeks in the phase'.
+      *
+     C     w1phsday      div       7             wkwk
+     C                   mvr                     wkday
+      *
+      *
+      * Concatenate the week and day into a single alpha field.
+      *
+     C                   movel     wkwk          wkalphwk
+     C                   if        %subst(wkalphwk: 1: 1) = '0'
+     C                   eval      %subst(wkalphwk: 1: 1) = *blank
+     C                   endif
+      *
+     C                   movel     wkday         wkalphday
+      *
+     C                   eval      w1phswd = wkalphwk + '-' + wkalphday
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *
+     C     plist01       plist
+     C                   parm                    hghgsn
+     C                   parm                    zzcymd
+      * Head
+     C                   parm                    gpihd                          GROUP INV
+     C                   parm                    pinhd                          PIG IN
+     C                   parm                    tinhd                          TRSF IN
+     C                   parm                    tisphd                         SAME PHASE
+     C                   parm                    tidphd                         DIFF PHASE
+     C                   parm                    pouhd                          PIGS OUT
+     C                   parm                    touhd                          TRSF OUT
+     C                   parm                    tosphd                         SAME PHASE
+     C                   parm                    tosphd                         DIFF PHASE
+     C                   parm                    rinhd                          REJECT IN
+     C                   parm                    rouhd                          REJECT OUT
+     C                   parm                    qinhd                          QUALITY IN
+     C                   parm                    qouhd                          QUALITY OUT
+     C                   parm                    morhd                          MORTALITY
+     C                   parm                    inahd                          INV ADJ
+      * Pounds
+     C                   parm                    pinlb                          PIG IN
+     C                   parm                    tinlb                          TRSF IN
+     C                   parm                    tisplb                         SAME PHASE
+     C                   parm                    tidplb                         DIFF PHASE
+     C                   parm                    poulb                          PIG OUT
+     C                   parm                    toulb                          TRSF OUT
+     C                   parm                    tosplb                         SAME PHASE
+     C                   parm                    todplb                         DIFF PHASE
+     C                   parm                    rinlb                          REJECT IN
+     C                   parm                    roulb                          REJECT OUT
+     C                   parm                    qinlb                          QUALITY IN
+     C                   parm                    qoulb                          QUALITY OUT
+     C                   parm                    morlb                          MORTALITY
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    hghgsn
+     C                   kfld                    ldcdyr
+     C                   kfld                    ldcdwk
+      *
+      * To calculate the 'days in the phase' for each group, you will need
+      * the Saturday report selection date in iso format.
+      *
+     C     *iso          move      ldtcymd       wkisosat
+      *
+      * To make the determination on whether to include each group in "created"
+      * status, you will need the date 7 days prior to this Saturday.
+      *
+     C     wkisosat      subdur    7:*days       wkisocrdt
+      *
+     C                   endsr
+      /EJECT

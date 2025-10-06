@@ -1,0 +1,421 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Margin Management
+      * PROGRAM:     SD214 - Signal Demand: Open Order
+      * PROGRAMMER:  Alice
+      * CREATED:     12/27/07
+      *
+      * FUNCTION: This program builds the Open Order files to be sent to Signal
+      *           Demand.
+      *
+      *           It only processes "order" records from the Order Header file that
+      *           are NOT in a "C"omplete status and are NOT Cancelled ("X"-status).
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * Date      Programmer
+      *
+      * 04/03/08  LeAnne Ramsey
+      *           All "cost" fields removed from Order Header/Detail files.
+      *
+      * 05/05/08  LeAnne Ramsey
+      *           Added new logic based on Warehouse, Sold 100% Frozen,
+      *           Make to Order values to handle "demand" for frozen product.
+      *           A longer lead time is required when there is a demand for:
+      *            1) items that are sold frozen that are not normally sold frozen or
+      *            2) frozen "make to order" items
+      *           The availability of fresh product must be adjusted on the appropriate
+      *           day for the production of this frozen demand.
+      *
+      *           So, the open order logic here will now EXCLUDE open order detail records
+      *           for these "frozen demand" items. Logic excludes records where:
+      *             1) the warehouse is a Frozen warehouse and the Item is:
+      *                 a) Sold 100% Frozen=No  or
+      *                 b) Sold 100% Frozen=Yes and Make to Order=Yes
+      *
+      * 06/19/08  LeAnne Ramsey
+      *           Added code to populate existing Price Method Code field with
+      *           value from new Synon field "Order Detail Signal Demand Price Method"
+      *           in Synon Order Detail file.
+      *
+      * 03/02/10  LeAnne Ramsey
+      *           Recompile only. The Synon folks changed file OPBGWKP-Order Detail for
+      *           Phase 1 of the Age Code project.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fcabzrel1  if   e           k disk
+      *   Company item
+      *
+      *
+     Fcaadrel1  if   e           k disk
+      *   Warehouse
+      *
+      *
+     Fombyrel1  if   e           k disk
+      *  Item default
+      *
+      *
+     Fopbfcpl1  if   e           k disk
+      *   PO Order Header   (records selected with open query)
+      *
+      *
+     Fopbgwkl1  if   e           k disk
+      *   PO Order Detail
+      *
+      *
+     Fsdp001    if   e           k disk
+      *   Signal Demand: Price method override
+      *
+      *
+     Fsdp214    o    e           k disk
+      *    Signal Demand: Open order header
+      *
+      *
+     Fsdp215    o    e           k disk
+      *    Signal Demand: Open order detail
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *---------------------------------------------------------------
+      *  Standalone fields
+      *---------------------------------------------------------------
+      *
+      * Control fields
+      *
+     D dtlfl           s              1    inz('N')
+     D procfl          s              1    inz('Y')
+      *
+      * Save fields
+      *
+     D svajcd          s                   like(omajcd)
+     D svkxcd          s                   like(omkxcd)
+     D svaic3          s                   like(omaic3)
+     D svhgcd          s                   like(omhgcd)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               d   datfmt(*iso)
+      *
+      ****************************************************************
+      * Data Structures
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * Mainline
+      ***************************************************************************************
+      *
+      * Process records in the OMS Order Header file that have been selected in the
+      * Open Query in the driving CLP:
+      *    1.  Orders that are NOT in a Complete Status  (begwst = "C")
+      *    2.  Orders that are NOT in a Cancelled Status (begwst = "X")
+      *    3.  Sales orders only                         (bejncd = "OR")
+      *
+     C     *loval        setll     opbfcpl1
+      *
+     C                   dou       *in90 = *on                                  Main do loop
+     C                   read      opbfcpl1                               90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Write detail recs.
+      * If you wrote any "detail" recs, write a Header record.
+      *
+     C                   move      no            dtlfl
+     C                   exsr      $detail
+      *
+     C                   if        dtlfl = yes
+     C                   exsr      $header
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do loop
+      *
+     C                   seton                                        lr
+      /eject
+      *--------------------------------------------------------------------------------
+      * Read all Order Detail records for this Order
+      *--------------------------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+      * Read all Order Detail records for this Company/Order
+      *
+     C     key02         setll     opbgwkl1
+      *
+     C                   dou       *in91 = *on                                  Do detail
+     C     key02         reade     opbgwkl1                               91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * Check whether to process this item.
+      *
+     C                   move      yes           procfl
+     C                   exsr      $check
+      *
+     C                   if        procfl = yes                                 If process
+      *
+      * Save fields for writing the Header record later.
+      *
+     C                   move      omajcd        svajcd
+     C                   move      omkxcd        svkxcd
+     C                   z-add     omaic3        svaic3
+     C                   z-add     omhgcd        svhgcd
+      *
+      * Set up Detail Record info
+      *
+     C                   z-add     omc4nb        odorno                             order #
+     C                   z-add     omdpnb        odseqno                            order seq #
+     C                   z-add     omuenb        odsecno                            order secondary
+     C                   z-add     omhgcd        oditcd                             shipped item
+      * Age code
+     C                   move      omrpcd        odagecd
+      *
+      * Pricing Codes
+     C                   move      omlqcd        odcmcd                             comm mkt
+     C                   move      omrdcd        oddmcd                             date method
+      * Price Method
+     C                   move      omq7cd        odpmcd
+      *
+      * Check for a Price Method Override value for this Ship To Customer.
+      *
+     C     bebkc7        chain     sdp001                             92
+     C                   if        *in92 = *off and popmcd <> *blank
+     C                   move      popmcd        odpmcd
+     C                   endif
+      *
+      * This code will, after a suitable transition time, be the only
+      * "price method" code.
+      *
+     C                   if        omf7sx <> *blank
+     C                   move      omf7sx        odpmcd
+     C                   endif
+      *
+      * Market Pricing Date
+      *
+     C     *cymd         test(d)                 omexdt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      omexdt        wkisodate
+     C     *iso          move      wkisodate     odmpdt
+     C                   endif
+      *
+      * Pricing Date Used
+      *
+     C     *cymd         test(d)                 omgidt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      omgidt        wkisodate
+     C     *iso          move      wkisodate     odprdt
+     C                   endif
+      *
+      * Weights
+     C                   z-add     omd0wg        odorwt                             ordered
+     C                   z-add     omauwg        odscwt                             scheduled
+     C                   z-add     omatwg        odshwt                             ship/billed
+      * Quantities
+     C                   z-add     omavqt        odorqt                             ordered
+     C                   z-add     omccqt        odscqt                             scheduled
+     C                   z-add     omcbqt        odshqt                             ship/billed
+      *
+      * Amounts
+     C                   z-add     omkdva        odgram                             bill dtl gross
+      *
+      * Prices
+     C                   if        odshwt <> 0                                  If weight
+     C     odgram        div       odshwt        odgrpr                             gross
+     C                   z-add     ombzpr        odcppr                             contract
+     C                   endif                                                  If weight
+      *
+      * Write record
+     C                   move      yes           dtlfl
+     C                   write     odrec
+     C                   clear                   odrec
+      *
+     C                   endif                                                  If process
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do detail
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------
+      * Write the Open Order header record
+      *--------------------------------------------------------------------------------
+      *
+     C     $header       begsr
+      *
+      * key data
+     C                   z-add     bec4nb        ohorno                         order #
+     C                   move      bejncd        ohtycd                         Order Type
+     C                   z-add     beaic3        ohscono                        Ship Company #
+      *
+      * customer data
+     C                   z-add     bebkc7        ohshcuno
+     C                   move      behnna        ohshcity
+     C                   move      bedbcd        ohshstate
+     C                   move      becktx        ohshzipcd
+      *
+      * other data
+     C                   move      ber4cd        ohorspcd                       Salesperson
+     C                   z-add     bermnb        ohloadno                       Load no
+     C                   move      beq2cd        ohsmcd                         Ship Method
+     C                   move      bebzna        ohcrcd                         Carrier Code
+     C                   move      beu2st        ohexfl                         Export flag
+     C                   move      bebcst        ohblorfl                       Block Order
+     C                   move      begwst        ohhdsts                        Header Status
+      *
+      * Fields from Order Detail & other files
+      *
+     C                   z-add     adbtc3        ohacono                        Acctg Company #
+     C                   move      svajcd        ohwhcd                         whse code
+     C                   move      svkxcd        ohexcntry                      export country
+      *
+      * Fresh/frozen code
+     c                   exsr      $fresh
+      *
+      * Order date
+      *
+     C     *cymd         test(d)                 bea0dt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      bea0dt        wkisodate
+     C     *iso          move      wkisodate     ohordt
+     C                   endif
+      *
+      * Request Ship Date
+      *
+     C     *cymd         test(d)                 bea5dt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      bea5dt        wkisodate
+     C     *iso          move      wkisodate     ohrqdt
+     C                   endif
+      *
+      * Sched Ship Date
+      *
+     C     *cymd         test(d)                 beaodt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      beaodt        wkisodate
+     C     *iso          move      wkisodate     ohscdt
+     C                   endif
+      *
+      * Actual Ship Date
+      *
+     C     *cymd         test(d)                 begndt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      begndt        wkisodate
+     C     *iso          move      wkisodate     ohacdt
+     C                   endif
+      *
+      * Write record
+     C                   write     ohrec
+     C                   clear                   ohrec
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Determine whether to process an Item
+      *--------------------------------------------------------------------------------------
+      *
+     C     $check        begsr
+      *
+     C     omhgcd        chain     ombyrel1                           92
+     C                   if        *in92 = *on                                  If no item hit
+     C                   move      no            procfl
+     C                   else
+      *
+      * Retrieve the Warehouse record
+      *
+     C     omajcd        chain     caadrel1                           92
+      *
+     C                   select
+     C                   when      *in92 = *on
+     C                   move      no            procfl
+      *
+      * Frozen warehouse, Item is NOT "sold 100% frozen"
+      *
+     C                   when      adwpst = 'FZ' and bys4st = no
+     C                   move      no            procfl
+      *
+      * Frozen warehouse, Item IS "sold 100% frozen", Make to Order is YES
+      *
+     C                   when      adwpst = 'FZ' and bys4st = yes and
+     C                             byxxst = yes
+     C                   move      no            procfl
+     C                   endsl
+      *
+     C                   endif                                                  If no item hit
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Set Fresh/Frozen Flag on the Order Header using values from the "last" Item
+      *--------------------------------------------------------------------------------------
+      *
+     C     $fresh        begsr
+      *
+      * Make two attempts to determine fresh/frozen:
+      *  1) check the 'sld fzn flag' in the Company/Item file
+      *  2) if the item is not a frozen item, then
+      *     Use the Warehouse Code from the OMS Order Detail record to access
+      *     the Warehouse file. Move the  'warehouse type' from the retrieved
+      *     warehouse record to the fresh/frozen flag field.
+      *
+     C     key01         chain     cabzrel1                           92
+     C                   if        *in92 = *off and                             If frozen
+     C                             bzs4st = 'Y'
+     C                   move      'FZ'          ohfffl
+     C                   else
+      *
+      * Check the Warehouse file
+      *
+     C     svajcd        chain     caadrel1                           92
+     C                   if        *in92 = *off
+     C                   move      adwpst        ohfffl
+     C                   endif
+     C                   endif                                                  If frozen
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    svaic3
+     C                   kfld                    svhgcd
+      *
+     C     key02         klist
+     C                   kfld                    beaic3
+     C                   kfld                    bec4nb
+      *
+     C                   endsr
+      /EJECT

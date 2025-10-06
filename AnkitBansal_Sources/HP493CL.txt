@@ -1,0 +1,275 @@
+/***************************************************************** */
+/*  ENVIRONMENT:       HOG PRODUCTION SYSTEM                       */
+/*  PROGRAM NUMBER:    HP493CL                                     */
+/*  PROGRAM NAME:      PRINT TRANSFER MOVEMENT BILL OF LADING      */
+/*  PROGRAMMER:        LEANNE FEDOR                                */
+/*  DATE:              09/13/04                                    */
+/*                                                                 */
+/*  THIS IS A CLONE OF HP481CL THAT WILL GENERATE THE NEW BOL      */
+/*  USING OVERLAY.                                                 */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFICATIONS                                                   */
+/* 07/19/21 DN  W80211 - Added email as input parm. If email is    */
+/*              entered then execute ESEND to send BOL as PDF.     */
+/*              OVRPRTF QPRINT to set page width to 95 & adjust    */
+/*              offset front overlay.                              */
+/* 03/02/22 BG  S92027 - Put report on hold when selecting to      */
+/*              email.                                             */
+/*                                                                 */
+/***************************************************************** */
+
+             PGM        PARM(&EMAIL)
+
+             DCL        VAR(&EMAIL) TYPE(*CHAR) LEN(50)    /* W80211 */
+
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(60)  /* W80211 */
+             DCL        VAR(&MESSAGE) TYPE(*CHAR) LEN(256) /* W80211 */
+             DCL        VAR(&DATA) TYPE(*CHAR) LEN(10)     /* W80211 */
+             DCL        VAR(&DATAH) TYPE(*CHAR) LEN(10)    /* W80211 */
+
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(247)
+
+             DCL        VAR(&LDREPRINT) TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&LDMVSN) TYPE(*DEC) LEN(7)
+
+             DCL        VAR(&LDFCYMD) TYPE(*DEC) LEN(8)
+             DCL        VAR(&LDTCYMD) TYPE(*DEC) LEN(8)
+
+             DCL        VAR(&LDORPT) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&LDORPP) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&LDORFS) TYPE(*DEC) LEN(5)
+
+             DCL        VAR(&LDDNPT) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&LDDNPP) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&LDDNFS) TYPE(*DEC) LEN(5)
+
+             DCL        VAR(&HOLD) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+
+/* W80211 - ADDED ERROR MESSAGE FIELDS                                      */
+             DCL        VAR(&MSG)   TYPE(*CHAR) LEN(512)
+             DCL        VAR(&MSGID) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&MSGL)  TYPE(*DEC) LEN(5 0)
+
+
+             CHGVAR     VAR(&LDREPRINT) VALUE(%SST(*LDA 1 1))
+             CHGVAR     VAR(&LDMVSN) VALUE(%SST(*LDA 2 7))
+             CHGVAR     VAR(&LDFCYMD) VALUE(%SST(*LDA 9 8))
+             CHGVAR     VAR(&LDTCYMD) VALUE(%SST(*LDA 17 8))
+
+             CHGVAR     VAR(&LDORPT) VALUE(%SST(*LDA 30 5))
+             CHGVAR     VAR(&LDORPP) VALUE(%SST(*LDA 35 5))
+             CHGVAR     VAR(&LDORFS) VALUE(%SST(*LDA 42 5))
+
+             CHGVAR     VAR(&LDDNPT) VALUE(%SST(*LDA 47 5))
+             CHGVAR     VAR(&LDDNPP) VALUE(%SST(*LDA 52 5))
+             CHGVAR     VAR(&LDDNFS) VALUE(%SST(*LDA 59 5))
+
+/*-------------------------------------------------------------------*/
+/*  SETUP QUERY OVER THE TRANSFER MOVEMENT HEADER FILE               */
+/*-------------------------------------------------------------------*/
+
+/*  IF THE USER ELECTED TO SEE ONE SPECIFIC MOVEMENT NUMBER,      */
+/*  SET THE QUERY UP FOR THAT MOVEMENT ONLY                       */
+
+             IF         COND(&LDMVSN *NE 0) THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('MHMVSN *EQ')
+             CHGVAR     VAR(%SST(&QDATA 12 7)) VALUE(&LDMVSN)
+             ENDDO
+             ELSE       CMD(DO)
+
+
+/*  ALWAYS SELECT ONLY SCHEDULED TRANSFER MOVEMENTS              */
+
+             CHGVAR     VAR(%SST(&QDATA 1 15)) VALUE('MHMSCD +
+                          *EQ "SC"')
+
+/*  ALWAYS SELECT ONLY TRANSFERS WITH A SCHEDULED SHIP DATE       */
+/*  IN THE USERS REQUESTED DATE RANGE                             */
+
+             CHGVAR     VAR(%SST(&QDATA 41 15)) VALUE('*AND MHSCDT +
+                          *GE')
+             CHGVAR     VAR(%SST(&QDATA 57 8)) VALUE(&LDFCYMD)
+             CHGVAR     VAR(%SST(&QDATA 66 15)) VALUE('*AND MHSCDT +
+                          *LE')
+             CHGVAR     VAR(%SST(&QDATA 82 8)) VALUE(&LDTCYMD)
+
+
+/*  IF THIS IS NOT A REPRINT, ONLY SELECT TRANSFERS THAT HAVE     */
+/*  NEVER HAD A BOL PRINTED                                       */
+
+             IF         COND(&LDREPRINT *EQ 'N') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 91 17)) VALUE('*AND MHPTCT +
+                          *EQ 0')
+             ENDDO
+
+/*  IF THIS IS A REPRINT, ONLY SELECT TRANSFERS THAT HAVE         */
+/*  ALREADY HAD A BOL PRINTED                                     */
+
+             IF         COND(&LDREPRINT *EQ 'Y') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 91 17)) VALUE('*AND MHPTCT +
+                          *GT 0')
+             ENDDO
+
+
+/*  IF ORIGIN PRODUCTION TYPE                                      */
+
+             IF         COND(&LDORPT *NE ' ') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 109 17)) VALUE('*AND MHORPT +
+                          *EQ "')
+             CHGVAR     VAR(%SST(&QDATA 126 5)) VALUE(&LDORPT)
+             CHGVAR     VAR(%SST(&QDATA 131 1)) VALUE('"')
+             ENDDO
+
+
+/*  IF ORIGIN PRODUCTION PHASE                                     */
+
+             IF         COND(&LDORPP *NE ' ') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 133 17)) VALUE('*AND MHORPP +
+                          *EQ "')
+             CHGVAR     VAR(%SST(&QDATA 150 5)) VALUE(&LDORPP)
+             CHGVAR     VAR(%SST(&QDATA 155 1)) VALUE('"')
+             ENDDO
+
+/*  IF ORIGIN FARM SITE                                          */
+
+             IF         COND(&LDORFS *NE 0) THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 157 15)) VALUE('*AND MHORFS +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 173 5)) VALUE(&LDORFS)
+             ENDDO
+
+
+/*  IF DESTINATION PRODUCTION TYPE                                 */
+
+             IF         COND(&LDDNPT *NE ' ') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 179 17)) VALUE('*AND MHDNPT +
+                          *EQ "')
+             CHGVAR     VAR(%SST(&QDATA 196 5)) VALUE(&LDDNPT)
+             CHGVAR     VAR(%SST(&QDATA 201 1)) VALUE('"')
+             ENDDO
+
+
+/*  IF DESTINATION PRODUCTION PHASE                                */
+
+             IF         COND(&LDDNPP *NE ' ') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 203 17)) VALUE('*AND MHDNPP +
+                          *EQ "')
+             CHGVAR     VAR(%SST(&QDATA 220 5)) VALUE(&LDDNPP)
+             CHGVAR     VAR(%SST(&QDATA 225 1)) VALUE('"')
+             ENDDO
+
+
+/*  IF DESTINATION FARM SITE                                     */
+
+             IF         COND(&LDDNFS *NE 0) THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 227 15)) VALUE('*AND MHDNFS +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 243 5)) VALUE(&LDDNFS)
+             ENDDO
+
+             ENDDO
+
+
+/*-------------------------------------------------------------------*/
+/* OVERRIDE THE TRANSFER MOVEMENT HEADER FILE                        */
+/*-------------------------------------------------------------------*/
+
+             OVRDBF     FILE(HSP074) SHARE(*YES)
+             OPNQRYF    FILE((HSP074)) OPTION(*INP *UPD) +
+                          QRYSLT(&QDATA) KEYFLD((MHORFS) +
+                          (MHSCDT) (MHMVSN)) SEQONLY(*NO)
+
+/*-------------------------------------------------------------------*/
+/* SET UP PRINT OVERRIDES                                            */
+/*-------------------------------------------------------------------*/
+
+/*HOLD:       IF         COND(%SST(*LDA 411 1) = 'Y') THEN(CHGVAR +
+                          VAR(&HOLD) VALUE(*YES)) */
+/*           ELSE       CMD(CHGVAR VAR(&HOLD) VALUE(*NO))  */
+
+ HOLD:       SELECT
+               WHEN       COND(&EMAIL *NE '   ') THEN(CHGVAR +
+                          VAR(&HOLD) VALUE(*YES))
+
+               WHEN       COND(%SST(*LDA 411 1) = 'Y') THEN(CHGVAR +
+                          VAR(&HOLD) VALUE(*YES))
+
+               OTHERWISE  CMD(CHGVAR VAR(&HOLD) VALUE(*NO))
+             ENDSELECT
+
+ OUTQ:       CHGVAR     VAR(&OUTQ) VALUE(%SST(*LDA 413 10))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(%SST(*LDA 401 10)))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(*JOB))
+
+/* W80211 - If Email is NOT Entered then Call Print Program to Print Report +
+             Else Call Program to Email BOL Report. */
+             IF         COND(&EMAIL *EQ ' ') THEN(DO)
+
+ OVRPRTF:    OVRPRTF    FILE(QPRINT) TOFILE(PRTBOLTR) OUTQ(&OUTQ) +
+                          HOLD(&HOLD)
+
+/*-------------------------------------------------------------------*/
+/* PRINT THE BILL OF LADINGS                                         */
+/*-------------------------------------------------------------------*/
+
+             CALL       PGM(HP693)
+
+             DLTOVR     FILE(*ALL)
+
+             GOTO       CMDLBL(ENDPGM)  /* W80211 */
+
+             ENDDO      /* W80211 */
+
+/* W80211 - Call Print Program to Email BOL Report */
+             ELSE       CMD(DO)                    /* EMAIL *NE ' ' */
+
+             OVRPRTF    FILE(QPRINT) TOFILE(PRTBOLTR) PAGESIZE(*N +
+                          95) FRONTOVL(OVLBOLTR .40) OUTQ(&OUTQ) +
+                          HOLD(&HOLD)
+
+             CHGVAR     VAR(&SUBJECT) VALUE('HPS Transfer Movement BOL')
+             CHGVAR     VAR(&MESSAGE) VALUE('HPS Transfer Movement +
+                          BOL Attached')
+
+             CALL       PGM(CAQXXFR) PARM(' ' &DATA &DATAH)
+
+             /* SET TEST VERBIAGE IN EMAIL IF NOT PRODUCTION LIBRARY */
+             IF         COND(&DATA *NE 'PRKFLIB') THEN(DO)
+             CHGVAR     VAR(&MESSAGE) VALUE(&MESSAGE *BCAT ' - TEST')
+             ENDDO
+
+/*-------------------------------------------------------------------*/
+/* Call Print Program to Email the Bill of Ladings as PDF.           */
+/*-------------------------------------------------------------------*/
+             CALL       PGM(HP693)
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG(&MESSAGE) MSGTYPE(*DFT) ATTLIST((* +
+                          *PDF *N QPRINT * *ALL *ALL))
+             MONMSG     MSGID(EML0999) EXEC(GOTO CMDLBL(MSGTRAP))
+
+             DLTOVR     FILE(*ALL)
+
+             GOTO       CMDLBL(ENDPGM)
+
+             ENDDO      /* W80211 */
+
+/* W80211 - Added Message Trap Routine. */
+/*----------------------RECEIVE MESSAGES----------------------------*/
+
+ MSGTRAP:    RCVMSG     MSGTYPE(*EXCP) MSGDTA(&MSG) MSGDTALEN(&MSGL) +
+                          MSGID(&MSGID)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(ENDPGM))
+
+             SNDPGMMSG  MSGID(&MSGID) MSGF(QCPFMSG) MSGDTA(%SST(&MSG +
+                          1 &MSGL)) MSGTYPE(*ESCAPE)
+             MONMSG     MSGID(CPF0000)
+
+
+ENDPGM:      ENDPGM
+

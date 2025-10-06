@@ -1,0 +1,780 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP204FP- Build JDE Upload file: HPS Feed Pickup Dollars
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     10/22/01
+      *
+      * FUNCTION: This program builds an upload file of feed pickup tickets
+      *           that will be interfaced to JDE.
+      *
+      *           Only "Produced" feed tickets are uploaded in this process.
+      *
+      *           In the original version of this program, we omitted all pick-up
+      *           tickets that had no 'to' farm delivery. As of February 2002, we
+      *           will include all pick-up tickets...we just have different logic
+      *           for those tickets with no 'to' farm side.
+      *
+      *           This program is called from HP204CLFP which is called
+      *           from the upload driver CL HP404CL..which is submitted from
+      *           HP404.
+      *
+      * For the HPS Feed Pickup upload to JDE, we will ultimately:
+      *    1) create one batch per period
+      *    2) retrieve a new JDE document number for that batch
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 12/09/02  LeAnne Fedor
+      *           Removed 'production phase' from the Feed Ticket Detail file.
+      *           So, changed logic in this program to retrieve 'production phase' from
+      *           the Hog Group file or Farm Site file.
+      *
+      * 04/25/02  LeAnne Fedor
+      *           No changes were required to this program. But, just to document, the
+      *           open query now selects out only 'produced' feed tickets.
+      *
+      * 09/26/07  LeAnne Ramsey
+      *           Added logic for new Sunray mill. The users do not want/need the
+      *           Sunray mill feed by BGF/NUR/GF since they are not tracking inventory.
+      *           They are not tracking inventory because Sunray currently has feed
+      *           purchased from Murphy's--but the users want the feed to show/process in
+      *           HPS as Produced--not Purchased. So, as far as HPS knows, this feed is
+      *           Produced. At some point in the future, we assume that Sunray will
+      *           actually be our own feed; so, at that time we're guessing that we would
+      *           take out the special SUMIL code.
+      *
+      * 02/20/08  LeAnne Ramsey
+      *           We have another new mill like Sunray--we don't own it. We will
+      *           handle it exactly like Sunray; the new mill is DAMIL=Dalhart.
+      *
+      * 04/23/09  LeAnne Ramsey
+      *           Recompile only. Costed Time/User added to Feed Ticket Header.
+      *
+      * 05/12/09  LeAnne Ramsey
+      *           Recompile only. PickUp Ticket Type added to Feed Ticket Header.
+      *           Since we still need the "TO FARM" for our logic, we will not change
+      *           the existing logic that determines 1-sided, 2-sided, same-sided.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 09/21/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Upload Date' to Feed Ticket Header.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      * 02/29/16  Barb Gutierrez(E5290)
+      *           Added logic to handle new company Iowa Farms.
+      * 04/11/16  Barb Gutierrez(E5290)
+      *           Offsetting entries need to happpen when the company changes.  added logic
+      *           to accomodate this.  (E5290)
+      *
+      * 06/05/17  Lara Buser  E010639
+      *           Added 3 fields to HSP089, Mill Type Code and Description and Active/
+      *           Inactive Status. Removed hardcoding of SUMIL and DAMIL and replaced
+      *           with test of Mill Type Code.
+      *
+      * 10/17/18  Danny Nguyen  (S13682)
+      *           Removed control break by Company since OPNQRYF logic on
+      *           hsj018a is now selecting by Company.
+      *
+      * 10/30/19  Brad Baden   E15736 - Upload Toll Mill Receipts
+      *           Recompiled only for new field is HSP089 file.
+      *
+      * 05/19/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsj018a   if   e           k disk
+      *    Farm Master  + Feed ticket Header
+      *
+     Fhsp018    if   e           k disk    rename(fsrec:p1rec18) prefix(p1)
+      *    Farm site
+      *
+      *
+     Fhsl034d   if   e           k disk
+      *    Hog group
+      *
+      *
+     F*hsl037i   if   e           k disk
+      *    Feed ticket header
+      *    (records selected in open query)
+      *
+      *
+     Fhsp038    if   e           k disk
+      *    Feed ticket detail
+      *
+      *
+     Fhsp071    if   e           k disk
+      *    Ration
+      *
+      *
+     Fhsp089    if   e           k disk
+      *    Feed mill alias
+      *
+      *
+     Fhsp204    uf   e           k disk
+      *    HPS to JDE upload file
+      *
+      *
+     Fhsl204c   uf a e           k disk    rename(hjrec:hjrecc)
+      *    HPS to JDE upload file
+      *
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *----------------------------------------------------------------
+      * ARRAYS AND TABLES
+      *----------------------------------------------------------------
+      *
+     D arfmpp          s             10    dim(210)                             Mill/phase
+     D aram            s             13  2 dim(210)                             Amount
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *---------------------------------------------------------------
+      * STANDALONE FIELDS
+      *---------------------------------------------------------------
+      *
+      * Control fields
+      *
+     D twosided        s              1
+     D samesided       s              1
+     D svfscd          s                   like(fdfscd)
+     D svfmbo          s                   like(fdfmbo)
+     D svrncd          s                   like(fdrncd)
+     D svppcd          s                   like(fsppcd)
+     D svcocd          s                   like(hjcocd)
+     D svmcu           s                   like(fscjd)
+     D first           s              1
+      *
+      *
+      * Array indexes
+      *
+     D x               s              3  0
+     D y               s              3  0
+      *
+      *
+      * Workfields
+      *
+     D wk2sub          s                   like(ma2sub)
+     D wkfmpp          s             10
+     D wkppcd          s              5
+     D wkfmbo          s              5
+     D wkfscd          s                   like(fsfscd)
+     D wkmcu           s                   like(fscjd)
+     D wkalphfscd      s              5
+     D wkam            s                   like(hjhpsval)
+     D wkoffset        s                   like(hjoffset)
+     D wkcocd          s                   like(hjcocd)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldacyr                 1      4  0
+     D  ldacpe                 5      6  0
+     D  ldbpdt                 7     14  0
+     D  ldepdt                15     22  0
+     D  ldhucd                23     24
+      *
+     D  ldhuds               100    129
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+     C                   move      yes           first
+      *
+      * Read all feed pick-up tickets selected by the open query
+      *
+     C     *loval        setll     hsj018a
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsj018a                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   if        first = yes
+     C                   move      no            first
+     C                   move      fscocd        svcocd
+     C                   move      fscocd        svmcu
+     C                   endif
+      *
+      * When company number changes, we need to write the offsetting entry.
+      * S13682-Removed Control Break on Company Number. Open Query File Logic will now select
+      *        by Company Number.
+13682C**                 if        svcocd <> fscocd
+      *
+      * Write offsetting entry for the pickup tickets when the company changes.
+13682C**                 exsr      $offset
+  |  C**                 move      fscocd        svcocd
+  |  C**                 move      fscocd        svmcu
+  |  C**                 z-add     0             aram
+  |  C**                 move      *blanks       arfmpp
+  |  C**                 z-add     0             hjhpsval
+  |  C**                 z-add     0             hjjdeval
+  |  C**                 z-add     0             hjbatval
+13682C**                 endif
+      *
+      * Determine if this ticket:
+      * 1) Was 1-sided (had a 'from' farm but no 'to' farm), or
+      * 2) Was 2-sided (had both a 'from' and 'to' farm)
+      *    For 2-sided tickets, we must know whether the 'from' and 'to'
+      *    farms are the same.
+      *
+     C                   exsr      $determine
+      *
+      * Only continue processing this ticket if it is not 'same-sided'.
+      * We will not process if the from/to farms are the same.
+      *
+     C                   if        samesided = no                               If continue
+      *
+      * Read feed ticket detail records and add up the dollars for the
+      * 'from farm' on this ticket.
+      *
+     C                   exsr      $detail
+      *
+      * If there were dollars, execute the 'from' and 'to' farm logic
+      *
+     C                   if        wkam <> 0                                    If dollars
+     C                   exsr      $fromfarm
+      *
+     C                   if        twosided = yes
+     C                   exsr      $tofarm
+     C                   else
+     C                   exsr      $nofarm
+     C                   endif
+      *
+     C                   endif                                                  If dollars
+      *
+     C                   endif                                                  If continue
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * Last Record processing
+      *
+     C                   exsr      $offset
+      *
+      * Ultimately, we will create a single batch in JDE for all pickup tickets for each company.
+      *
+     C                   move      *blanks       svcocd
+     C     *loval        setll     hsp204
+     C                   dou       *in92 = *on
+     C                   read      hsp204                                 92
+     C                   if        *in92 = *off
+      *
+     C                   if        svcocd <> hjcocd
+     C                   move      yes           hjnewbat
+     C                   move      yes           hjnewdoc
+     C                   update    hjrec
+     C                   move      hjcocd        svcocd
+     C                   else
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+     C                   endif
+     C                   endif
+     C                   enddo
+      *
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Determine whether this ticket is 1-sided or 2-sided and if it is same-sided
+      *---------------------------------------------------------------------------------------
+      *
+     C     $determine    begsr
+      *
+     C                   move      no            twosided
+     C                   move      no            samesided
+     C                   z-add     0             svfscd
+      *
+     C     key01         setll     hsp038                                 91
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     key01         reade     hsp038                                 91
+     C                   if        *in91 = *off and fdfdlb > 0                  If has a 'to'
+     C                   z-add     fdfscd        svfscd
+     C                   move      yes           twosided
+     C                   if        fdfscd = fhfscd                              If same to
+     C                   move      yes           samesided
+     C                   endif                                                  If same to
+      *
+     C                   endif                                                  If has a 'to'
+     C                   enddo                                                  Do loop
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Read feed ticket detail records and add up dollars for the 'from' farm for this ticket
+      *---------------------------------------------------------------------------------------
+      *
+      * The 'from' farm records will be the records with negative feed pounds.
+      *
+     C     $detail       begsr
+      *
+     C                   z-add     0             wkam
+      *
+     C     key01         setll     hsp038                                 91
+      *
+     C                   dou       *in91 = *on                                  Do detail
+     C     key01         reade     hsp038                                 91
+     C                   if        *in91 = *off and fdfdlb < 0                  If neg lbs
+     C                   add       fdinam        wkam
+     C                   add       fdmfam        wkam
+     C                   add       fdmdam        wkam
+      *
+     C                   if        twosided = no
+     C                   move      fdfmbo        svfmbo
+     C                   move      fdrncd        svrncd
+     C                   exsr      $ppcd
+     C                   endif
+      *
+     C                   endif                                                  If neg lbs
+     C                   enddo                                                  Do detail
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Retrieve Production Phase
+      *--------------------------------------------------------------------------------------
+      *
+     C     $ppcd         begsr
+      *
+      * Retrieve 'production phase' associated with a) group or b) farm
+      *
+     C                   select
+     C                   when      fdhgsn <> 0
+     C     fdhgsn        chain     hsl034d                            92
+     C                   if        *in92 = *off
+     C                   move      hgppcd        svppcd
+     C                   endif
+     C                   other
+      *
+     C     fdfscd        chain     hsp018                             92
+     C                   if        *in92 = *off
+     C                   move      p1fsppcd      svppcd
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Strip leading zeros from alpha farm site field
+      *--------------------------------------------------------------------------------------
+      *
+     C     $alphfscd     begsr
+      *
+      * Move farm site number to an alpha field and strip the leading zeros.
+      * Then concatenate it with text for the description field. This field
+      * will ulimately end up being the value in the JDE 'Explanation-remark'
+      * field.
+     C                   move      wkfscd        wkalphfscd
+     C                   if        %subst(wkalphfscd:1:1) = '0'                 If position 1
+     C                   eval      %subst(wkalphfscd:1:1) = *blank
+     C                   if        %subst(wkalphfscd:2:1) = '0'                 If position 2
+     C                   eval      %subst(wkalphfscd:2:1) = *blank
+     C                   if        %subst(wkalphfscd:3:1) = '0'                 If position 3
+     C                   eval      %subst(wkalphfscd:3:1) = *blank
+     C                   if        %subst(wkalphfscd:4:1) = '0'                 If position 4
+     C                   eval      %subst(wkalphfscd:4:1) = *blank
+     C                   endif                                                  If position 4
+     C                   endif                                                  If position 3
+     C                   endif                                                  If position 2
+     C                   endif                                                  If position 1
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Retieve the cost center for a farm
+      *--------------------------------------------------------------------------------------
+      *
+     C     $fscd         begsr
+      *
+     C     wkfscd        chain     hsp018                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   move      p1fscjd       wkmcu
+     C                   move      p1fscocd      wkcocd
+     C                   else
+     C                   move      *blank        wkmcu
+     C                   move      *blanks       wkcocd
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write records to the upload file for the 'from' farm site
+      *--------------------------------------------------------------------------------------
+      *
+      * The 'from' farm side is considered:
+      *         1) the credit entry (negative)
+      *         2) not the offset entry
+      *
+      *
+     C     $fromfarm     begsr
+      *
+      * Retrieve the cost center for the farm using the farm site from the feed ticket
+      * header record.
+      *
+     C                   z-add     fhfscd        wkfscd
+     C                   exsr      $fscd
+      *
+      * Determine if you already have a record for this 'from' farm.
+      *
+     C                   move      no            wkoffset
+      *
+     C     key02         chain     hsl204c                            92
+     C                   if        *in92 = *off                                 If already
+     C                   add       wkam          hjhpsval
+     C     100           mult      hjhpsval      hjjdeval
+     C                   update    hjrecc
+     C                   else
+      *
+      * Set up defaults for credit upload record
+      *
+     C                   eval      hjexa  = 'HPS Feed Pickup Ticket Upload'
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+     C                   move      'AA'          hjtype
+     C                   move      no            hjoffset
+     C                   z-add     0             hjbatval
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+     C                   move      svcocd        hjcocd
+      *
+      * Description
+     C                   exsr      $alphfscd
+     C                   eval      hjdesc = 'Feed pickups from Farm ' +
+     C                                      %trim(wkalphfscd)
+      * Account info
+     C                   move      fscjd         hjmcu
+     C                   eval      hjobj = '6110'
+     C                   eval      hjsub = *blank
+      *
+      *
+      * The 'from' farm entries will be credit entries.  (The 'from' dollars are
+      * stored in HPS as negative. So, we don't have to flip signs.)
+      *
+     C                   z-add     wkam          hjhpsval
+     C     100           mult      hjhpsval      hjjdeval
+      *
+     C                   write     hjrecc
+     C                   endif                                                  If already
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write the 'to' farm site of the pickup ticket
+      *--------------------------------------------------------------------------------------
+      *
+      * The 'to' farm side is considered:
+      *         a) the offset entry and
+      *         b) the debit entry (positive)
+      *
+      *
+     C     $tofarm       begsr
+      *
+      * Retrieve the cost center for the farm using the farm site that you saved earlier
+      * when you made the two-sided/same-sided determination.
+      *
+     C                   z-add     svfscd        wkfscd
+     C                   exsr      $fscd
+      *
+      * Determine if you already have a record for this 'to' farm.
+      *
+     C                   move      yes           wkoffset
+      *
+     C     key02         chain     hsl204c                            92
+     C                   if        *in92 = *off                                 If already
+     C     -1            mult      wkam          wkam
+     C                   add       wkam          hjhpsval
+     C     100           mult      hjhpsval      hjjdeval
+      *
+      * Populate the 'batch header value' field with the 'offset' value. Force the
+      * number to be positive.
+      *
+     C                   select
+     C                   when      hjjdeval >= 0
+     C                   z-add     hjjdeval      hjbatval
+     C                   other
+     C     -1            mult      hjjdeval      hjbatval
+     C                   endsl
+     C                   update    hjrecc
+     C                   else
+      *
+      * You are writing a new record. Set up defaults.
+      *
+     C                   eval      hjexa  = 'HPS Feed Pickup Ticket Upload'
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+     C                   move      'AA'          hjtype
+     C                   move      yes           hjoffset
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+     C                   move      svcocd        hjcocd
+      *
+      * Description info
+     C                   exsr      $alphfscd
+     C                   eval      hjdesc = 'Feed pickups to Farm ' +
+     C                                      %trim(wkalphfscd)
+      * Account info
+     C                   move      wkmcu         hjmcu
+     C                   eval      hjobj = '6110'
+     C                   eval      hjsub = *blank
+      *
+      * Set up amount as a debit (positive)
+      *
+     C     -1            mult      wkam          wkam
+     C                   z-add     wkam          hjhpsval
+     C     100           mult      hjhpsval      hjjdeval
+      *
+      *
+      * Populate the 'batch header value' field with the 'offset' value. Force the
+      * number to be positive.
+      *
+     C                   select
+     C                   when      hjjdeval >= 0
+     C                   z-add     hjjdeval      hjbatval
+     C                   other
+     C     -1            mult      hjjdeval      hjbatval
+     C                   endsl
+      *
+     C                   write     hjrecc
+      *
+     C                   endif                                                  If already
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Put the 'to' side of the transaction in your arrays when there is no 'to' farm
+      *--------------------------------------------------------------------------------------
+      *
+      * When a pick-up ticket was one-sided...it did not have a delivery to a 'to' farm,
+      * we will the accumulate dollars by mill/phase into arrays. Then, after all tickets are
+      * processed, we will come back and process the array entries to put the 'to' side
+      * of these one-sided tickets into the upload file.
+      *
+     C     $nofarm       begsr
+      *
+      * Retrieve the phase of the ration.
+      *
+     C                   exsr      $ration
+      *
+      * Concatenate the feed mill and the phase into a single field
+      * (Note: For Sunray and Dalhart Mills, we want all feed together regardless of Phase.)
+      *
+     C******             if        svfmbo = 'SUMIL' or svfmbo = 'DAMIL'
+     C******             eval      wkfmpp = svfmbo
+     C******             else
+     C******             eval      wkfmpp = svfmbo + svppcd
+     C******             endif
+      *
+      * Processing for Toll Mill                                        E010639
+      *
+     C     svfmbo        chain     hsp089                             93
+     C                   if        *in93 = *off                                 If found
+     C                   if        mamltcd = 'TM'                                If Toll Mill
+     C                   eval      wkfmpp = svfmbo
+     C                   else
+     C                   eval      wkfmpp = svfmbo + svppcd
+     C                   endif
+     C                   endif
+      *
+      * Lookup the concatenated value in the mill/phase array and add the 'amount'
+      * into the 'amount' array.
+      *
+     C                   z-add     1             x
+     C     wkfmpp        lookup    arfmpp(x)                              92
+     C                   if        *in92 = *on                                  If exists
+     C                   add       wkam          aram(x)
+     C                   else
+     C                   add       1             y
+     C                   move      wkfmpp        arfmpp(y)
+     C                   z-add     wkam          aram(y)
+     C                   endif                                                  If exists
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Determine ration phase
+      *--------------------------------------------------------------------------------------
+      *
+      * We will offset one-sided tickets based on mill/phase. So, determine the phase of
+      * the ration. If you don't find the ration, then retain the 'from' farm phase (it's
+      * already in your save field.)
+      *
+     C     $ration       begsr
+      *
+     C     svrncd        chain     hsp071                             92
+     C                   if        *in92 = *off                                 If found
+     C                   move      rnppcd        svppcd
+     C                   endif                                                  If found
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write 'offsetting' entries for pickup tickets with no 'to' farm
+      *--------------------------------------------------------------------------------------
+      * We have already written the offsetting entries for pickup tickets that had
+      * 'to' farms. Now, we will read the entries in our 'no farm' arrays and write
+      * one offsetting entry for each entry in the mill/phase array.
+      *
+     C     $offset       begsr
+      *
+     C                   if        wkfmpp <> *blank
+      *
+      * Set up the fields that will not change for these offsetting records.
+      *
+     C                   eval      hjexa  = 'HPS Feed Pickup Ticket Upload'
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+     C                   move      'AA'          hjtype
+     C                   move      yes           hjoffset
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+      *
+      * Initialize your array index
+      *
+     C                   z-add     0             x
+      *
+      * Process each entry in you mill/phase array
+      *
+     C                   do        y                                            Do array loop
+     C                   add       1             x
+      *
+     C                   if        arfmpp(x) <> *blank                          If entry
+      *
+     C                   movel     arfmpp(x)     wkfmbo
+     C                   move      *blank        wk2sub
+     C                   move      *blank        wkppcd
+      *
+      * Move the following to after the chain to HSP089, then process based
+      * on the value of the Mill Type Code. This will either be a Toll Mill (TM)
+      * or a Company Owned Mill (CO)                                    E010639
+     C****               if        wkfmbo = 'SUMIL' or wkfmbo = 'DAMIL'         If Sun/Dalh
+     C****               eval      hjobj = '3063'
+     C****               move      *blank        hjsub
+     C****               eval      hjdesc = 'Pickups--no delivery ' +
+     C****                                  %trim(wkfmbo)
+     C****               else
+      *
+      * Retrieve the leading 2 characters to use for the 'subsidiary'
+      * value for the mill.
+      *
+     C     wkfmbo        chain     hsp089                             92
+     C                   if        *in92 = *off
+     C                   move      ma2sub        wk2sub
+     C                   endif
+      *
+      * Processing for Toll Mill                                        E010639
+      *
+     C                   if        mamltcd = 'TM'                                If Toll Mill
+     C                   eval      hjobj = '3063'
+     C                   move      *blank        hjsub
+     C                   eval      hjdesc = 'Pickups--no delivery ' +
+     C                                      %trim(wkfmbo)
+     C                   else
+      *
+      * Processing for Company Owned Mill                               E010639
+      *
+     C                   eval      hjmcu = svmcu
+     C                   eval      hjobj = '1649'
+      *
+      * Now, set up the description and sub-account info based on the phase
+      * of the ration.
+      *
+     C                   move      arfmpp(x)     wkppcd
+      *
+     C                   select
+     C                   when      wkppcd = 'BGF  '
+     C                   eval      hjdesc = 'Pickups--no delivery ' +
+     C                                      %trim(wkfmbo) + ' SOW'
+     C                   eval      hjsub = wk2sub + 'SP'
+      *
+     C                   when      wkppcd = 'NUR  '
+     C                   eval      hjdesc = 'Pickups--no delivery ' +
+     C                                      %trim(wkfmbo) + ' NUR'
+     C                   eval      hjsub = wk2sub + 'NP'
+      *
+     C                   when      wkppcd = 'GF   '
+     C                   eval      hjdesc = 'Pickups--no delivery ' +
+     C                                      %trim(wkfmbo) + ' FIN'
+     C                   eval      hjsub = wk2sub + 'FP'
+     C                   endsl
+     C                   endif                                                  If Toll Mill
+      *
+      * Set up amount as a debit (positive)
+      *
+     C     -1            mult      aram(x)       wkam
+     C                   z-add     wkam          hjhpsval
+     C     100           mult      hjhpsval      hjjdeval
+      *
+      * Populate the 'batch header value' field with the 'offset' value. Force the
+      * number to be positive.
+      *
+     C                   select
+     C                   when      hjjdeval >= 0
+     C                   z-add     hjjdeval      hjbatval
+     C                   other
+     C     -1            mult      hjjdeval      hjbatval
+     C                   endsl
+      *
+     C                   write     hjrecc
+      *
+     C                   endif                                                  If entry
+     C                   enddo                                                  Do array loop
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Initialization subroutine
+      *--------------------------------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C     key01         klist
+     C                   kfld                    fhfmbo
+     C                   kfld                    fhtkno
+     C                   kfld                    fhtrcd
+      *
+     C     key02         klist
+     C                   kfld                    wkmcu
+     C                   kfld                    wkoffset
+      *
+     C                   endsr
+      /EJECT

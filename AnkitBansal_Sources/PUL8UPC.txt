@@ -1,0 +1,137 @@
+/*********************************************************************/
+/* PROGRAM : PUL8UPC                                                 */
+/* DESC    : EXC QSH & SEND TO DW  CL  EXECUTE USER PROGRAM          */
+/* DATE    : 03/20/2019                                              */
+/* PROJECT : R14444 - CARLISLE BALANCE & FALLOUT EXPORT              */
+/* BY      : DANNY NGUYEN                                            */
+/* PURPOSE : Execute the QSH workflow from Informatica to send the   */
+/*           updated records in the PFS Balance Fallout Code         */
+/*           (PUBBCPP) file to the Data Warehouse.                   */
+/*                                                                   */
+/*           Program is called from WW Balance & Fallout Codes (F11) */
+/*           & from JS 'PRDSCHEDGU' only. Since Informatica selects  */
+/*           all Companies, only run this once from the JS.          */
+/*                                                                   */
+/* PARAMETER:                                                        */
+/*           &CALLFMJS - CALLED FROM JOB SCHEDULE (Y/N)              */
+/*                                                                   */
+/*********************************************************************/
+/* MAINTENANCE LOG:                                                  */
+/*-------------------------------------------------------------------*/
+/* DATE     BY  CHANGE DESCRIPTION                                   */
+/* -------- --- ---------------------------------------------------- */
+/* MM/DD/YY                                                          */
+/*                                                                   */
+/* 04/07/24 Santosh Task: SDN972 CM Project: SDN972                  */
+/*          1. Hardcoded Password is commented/removed and decrypted */
+/*             password is received from PVGJXFR.                    */
+/*          2. Passwords are managed by Security team in the Cross   */
+/*             Application Menu CAS002/29 (WW Security Controls).    */
+/*********************************************************************/
+
+             PGM        PARM(&CALLFMJS)
+
+             DCL        VAR(&CALLFMJS) TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&JOBNME) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&USER) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBNBR) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&COPIES) TYPE(*DEC) LEN(3 0)
+
+             DCL        VAR(&DTALIB) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&CMD) TYPE(*CHAR) LEN(150)
+/*SDN972*/ /*DCL        VAR(&PSWD) TYPE(*CHAR) LEN(10) */
+             DCL        VAR(&WFNAME) TYPE(*CHAR) LEN(20)
+             DCL        VAR(&FOLDER) TYPE(*CHAR) LEN(13)
+
+             DCL        VAR(&COVAL) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&EMAIL) TYPE(*CHAR) LEN(50)
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(50)
+             DCL        VAR(&MESSAGE) TYPE(*CHAR) LEN(256)
+
+             /* SDN972 - Changes Start */
+                      DCL        VAR(&PSWD) TYPE(*CHAR) LEN(20)
+                      DCL        VAR(&USRID) TYPE(*CHAR) LEN(12)
+                      DCL        VAR(&IPADDRS) TYPE(*CHAR) LEN(60)
+             /* SDN972 - Changes End */
+
+             RTVJOBA    JOB(&JOBNME) USER(&USER) NBR(&JOBNBR)
+
+             CHGVAR     VAR(&COVAL) VALUE('PFSBALFALL')
+             CHGVAR     VAR(&SUBJECT) VALUE('Balance Fallout codes +
+                          sent to DW')
+
+/*-------------------------------------------------------------------*/
+/* Get Data Library to Determine if in TEST or PROD Env.             */
+/*-------------------------------------------------------------------*/
+             CALL       PGM(PPJXXFR) PARM(' ' 'DTALIB' &DTALIB)
+
+/*-------------------------------------------------------------------*/
+/* Build & Execute the Informatica Workflow Qshell Script.           */
+/*-------------------------------------------------------------------*/
+             CHGVAR     VAR(&CMD) VALUE(*BLANKS)
+
+    /* Set TEST or PROD Workflow Directory - Is Case Sensitive.           */
+    /* SDN972 - Changes Begin - Comment & remove hardcoded password.      */
+    /*          Get Password from PVGJXFR.                                */
+    /*       IF         COND(&DTALIB *NE 'PRKFLIB') THEN(DO)              */
+    /*       CHGVAR     VAR(&PSWD) VALUE(' ')                             */
+    /*       CHGVAR     VAR(&CMD) VALUE('/QOpenSys/infawf/INFA_WF_TST.sh')*/
+    /*       ENDDO                                                        */
+    /*       ELSE       CMD(DO)                                           */
+    /*       CHGVAR     VAR(&PSWD) VALUE(' ')                    */
+    /*       CHGVAR     VAR(&CMD) VALUE('/QOpenSys/infawf/INFA_WF_PRD.sh')*/
+    /*       ENDDO                                                        */
+
+             IF         COND(&DTALIB *EQ 'PRKFLIB') THEN(DO)
+             CALL       PGM(PVGJXFR) PARM((' ') ('BALLFALLOUT') +
+                          ('PROD') (&CMD) (&USRID) (&PSWD) +
+                          (&IPADDRS)) /* Retrieve password */
+             ENDDO
+             ELSE       CMD(DO)
+             CALL       PGM(PVGJXFR) PARM((' ') ('BALLFALLOUT') +
+                          ('QAT') (&CMD) (&USRID) (&PSWD) +
+                          (&IPADDRS)) /* Retrieve password */
+             ENDDO
+    /* SDN972 - Changes End */
+
+             CHGVAR     VAR(&WFNAME) VALUE('wf_L_Balance_Fallout')
+             CHGVAR     VAR(&FOLDER) VALUE('ERP_Reporting')
+
+             CHGVAR     VAR(&CMD) VALUE(&CMD *BCAT &PSWD)
+             CHGVAR     VAR(&CMD) VALUE(&CMD *BCAT &WFNAME)
+             CHGVAR     VAR(&CMD) VALUE(&CMD *BCAT &FOLDER)
+
+    /* Call Qshell Command */
+             QSH        CMD(&CMD)
+
+    /* If Called from JS then Check if Spooled File Exist. If Exist, +
+       Job on Informatica Failed Else Successful. */
+             IF         COND(&CALLFMJS *EQ 'Y') THEN(DO)
+
+         /* Get Email DL from Company Value for 'PFSBALFALL'. */
+             CALL       PGM(PUH4XFR) PARM(' ' X'360F' &COVAL &EMAIL)
+
+             RTVSPLFA   SPLF(QPRINT) JOB(&JOBNBR/&USER/&JOBNME) +
+                          COPIES(&COPIES)
+             MONMSG     MSGID(CPF3C40) /* Splf QPRINT Not Found */
+
+         /* Send ESEND Message to Notify Baseline Job Failed/Completed. */
+             IF         COND(&COPIES *EQ 1) THEN(DO)
+             CHGVAR     VAR(&SUBJECT) VALUE(&SUBJECT *BCAT 'Failed')
+             CHGVAR     VAR(&MESSAGE) VALUE('BASELINE: Balance +
+                          Fallout codes sent to Data Warehouse +
+                          failed.')
+             ENDDO
+             ELSE       CMD(DO)
+             CHGVAR     VAR(&SUBJECT) VALUE(&SUBJECT *BCAT 'Completed')
+             CHGVAR     VAR(&MESSAGE) VALUE('BASELINE: Balance +
+                          Fallout codes sent to Data Warehouse +
+                          completed.')
+             ENDDO
+             CALL       PGM(PUE8UPC) PARM(&EMAIL &SUBJECT &MESSAGE)
+
+             ENDDO      /* &CALLFMJS = Y */
+
+
+             ENDPGM

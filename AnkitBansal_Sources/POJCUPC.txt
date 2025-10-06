@@ -1,0 +1,172 @@
+/*********************************************************************/
+/*     Program: POJCUPC                                              */
+/*       Title: Retrieve & Process Lockbox Transmission File         */
+/*        Date: 11/16/00                                             */
+/* Description: - INITIATED FROM A MENU OPTION TO RECEIVE THE FILE   */
+/*                FROM THE LOCAL PC.                                 */
+/*              - Validates the DEPOSIT DATE FOR DUPLICATE ERROR     */
+/*                AND SEND MESSAGE TO THE APPROPRIATE DISTRIBUTION   */
+/*                LIST.                                              */
+/*              - Create A MEMBER IN THE BALCKBOX FILE FOR           */
+/*                PROCESSING.                                        */
+/*********************************************************************/
+/* Modifications:                                                    */
+/*                                                                   */
+/*   Date     Pgmr     Description                                   */
+/* -------- ---------- --------------------------------------------  */
+/* 11/16/00 ISPPATE    Copied FROM NATIONS BANK LOCK BOX PROGRAM.    */
+/*                     CHANGED TO ACCOMODATE NEW PROCESSING FOR      */
+/*                     RETREIVING DATA FROM BANK OF AMERICA FTP      */
+/*                     SITE.                                         */
+/* 09/13/01 ISRCENT    MOVE PDI9XFR TO RUN IN THE RPG POJEUPR PGM @ */
+/*                     LOCKBOX NUMBER BREAK                          */
+/* 08/15/02 ISRCENT    USE SNDPGRMSG A LIEU SNDDST                  */
+/* 04/06/05 ISRCENT    Changes for multiple lockbox per day:        */
+/*                     removed company and added deposit time.      */
+/*                     Mbr is named CMMDDHHMM where C is the 1st   */
+/*                     letter of the loc.                            */
+/* 6/27/07    SAZ      ADD SL & MT DIST LIST HANDLING.               */
+/* 5/24/10    BLG      Migrating to bank of new york for lockbox     */
+/*                     processing.  Need to keep current UMB process */
+/*                     in tact until we know it has been turned off  */
+/*                     at the bank.                                  */
+/*                                                                   */
+/*                     Also, Dailys lockboxes are now going to be    */
+/*                     combined into one instead of individual for   */
+/*                     each company.                                 */
+/* 7/07/10    BLG      Changed message description to try and        */
+/*                     distinguish it from the actual retrieval msgs */
+/*                     from the bank.  The one in this cl is         */
+/*                     generated from a menu option "Process Lockbox */
+/*                     Deposit".                                     */
+/*********************************************************************/
+             PGM        PARM(&LOC &DATE)
+
+/*-------------------------------------------------------------------*/
+/* Declare Variables                                                 */
+/*-------------------------------------------------------------------*/
+
+/* INPUT */
+             DCL  VAR(&LOC) TYPE(*CHAR) LEN(2)
+             DCL  VAR(&DATE) TYPE(*DEC) LEN(7 0)
+
+/* WORKING VARIABLES */
+             DCL  VAR(&SUCCESS) TYPE(*CHAR) LEN(1)
+             DCL  VAR(&RETURN)  TYPE(*CHAR) LEN(7)
+   /*        DCL  VAR(&COMPANY) TYPE(*CHAR) LEN(3)           */
+             DCL  VAR(&LCKBOX)  TYPE(*CHAR) LEN(7)
+             DCL  VAR(&DDATE)   TYPE(*CHAR) LEN(7)
+             DCL  VAR(&CYYMMDD) TYPE(*CHAR) LEN(7)
+             DCL  VAR(&DTIME)   TYPE(*CHAR) LEN(4)       /*  deposit time */
+             DCL  VAR(&LOC1 )   TYPE(*CHAR) LEN(1)       /* LOC 1ST LETTER */
+             DCL  VAR(&MMDD)   TYPE(*CHAR) LEN(4)        /* MMDD  */
+             DCL  VAR(&USRCLS)  TYPE(*CHAR) LEN(10)
+             DCL  VAR(&DIST)    TYPE(*CHAR) LEN(10)
+             DCL  VAR(&MBR)     TYPE(*CHAR) LEN(10)
+             DCL  VAR(&ZMBR)    TYPE(*CHAR) LEN(10)
+             DCL  VAR(&MSG)     TYPE(*CHAR) LEN(132)
+
+/*-------------------------------------------------------------------*/
+/* INITIALIZATION                                                    */
+/*-------------------------------------------------------------------*/
+/* RETRIEVE USER CLASS */
+             RTVUSRPRF  USRCLS(&USRCLS)
+             IF COND(&USRCLS *EQ '*PGMR') THEN(DO)
+                CHGVAR VAR(&DIST) VALUE('PRKDEV')
+                ENDDO
+             ELSE (DO)
+
+ /* UMB LOCKBOXES.. */
+
+  /*PORK CH OR TX */
+             IF         COND((&LOC = 'CH') *OR (&LOC = 'TX')) THEN(DO)
+                CHGVAR VAR(&DIST) VALUE('PRKLCKBX')
+             ENDDO
+  /*DAILYS SLC  */
+             IF         COND(&LOC = 'SL') THEN(DO)
+             CHGVAR VAR(&DIST) VALUE('DLYLCKBXS')
+             ENDDO
+
+  /*DAILYS MMT  */
+             IF         COND(&LOC = 'MT') THEN(DO)
+             CHGVAR VAR(&DIST) VALUE('DLYLCKBXM')
+             ENDDO
+
+ /* BNY LOCKBOXES.. */
+
+             IF         COND(&LOC = 'PD') THEN(DO)
+             CHGVAR VAR(&DIST) VALUE('PDVLCKBX')
+             ENDDO
+
+             IF         COND(&LOC = 'DF') THEN(DO)
+             CHGVAR VAR(&DIST) VALUE('DPMLCKBX')
+             ENDDO
+             ENDDO
+
+/* PROCESS FILE */
+             CHGVAR VAR(&SUCCESS) VALUE('N')
+
+             CHGVAR VAR(&CYYMMDD) VALUE(&DATE)
+             CHGVAR VAR(&MBR)  VALUE(&LOC *CAT &CYYMMDD)
+             CPYF       FROMFILE(BALCKBOX) TOFILE(BALCKBOX) +
+                          FROMMBR(&MBR) TOMBR(*FIRST) MBROPT(*REPLACE)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CPYF1))
+
+
+/*-------------------------------------------------------------------*/
+/* MAIN PROCESSING                                                   */
+/*-------------------------------------------------------------------*/
+/*------------------------------------------*/
+/* Distribute the Transmission file records */
+/* into the appropriate Lock Box work file. */
+/*------------------------------------------*/
+
+             CALL       PGM(POJEUPR) PARM(&SUCCESS &LCKBOX &DDATE +
+                          &DTIME)
+
+             IF COND(&SUCCESS *EQ 'Y') THEN(DO)
+
+                /*---------------------------------------------*/
+                /* Process deposit and create system generated */
+                /* write offs and charge backs.                */
+                /*-----------------------------------*/
+                /* Execute purge and delete process. */
+                /*-----------------------------------*/
+                CALL PGM(PDJLXFR) PARM('')
+
+             SNDPGRMSG  TOPGR(&DIST) MSG(&LOC *BCAT 'Process +
+                          lockbox deposit has completed, you may now +
+                          run a proof list.') CONFMSG(*NO)
+
+/* RENAME MEMBER WITH Z */
+/*           CHGVAR     VAR(&ZMBR) VALUE('Z' *CAT &MBR)       */
+/* RENAME MEMBER WITH ZCMMDDHHMM    AS OF 4/6/05 NOTE: C=LOC 1ST LETTER  */
+                 CHGVAR     VAR(&LOC1) VALUE(&LOC)
+                 CHGVAR     VAR(&MMDD) VALUE(%SST(&DDATE 4 4))
+                 CHGVAR  VAR(&ZMBR) VALUE('Z' *CAT &LOC1 *CAT &MMDD *CAT &DTIME)
+             RNMM       FILE(BALCKBOX) MBR(&MBR) NEWMBR(&ZMBR)
+             ENDDO
+             ELSE CMD(DO)
+
+             SNDPGRMSG  TOPGR(&DIST) MSG(&LOC *BCAT 'Process +
+                          lockbox deposit has failed--check error +
+                          report.') CONFMSG(*NO)
+             ENDDO
+
+             GOTO       CMDLBL(END)
+
+/*-------------------------------------------------------------------*/
+/* ERROR PROCESSING                                                  */
+/*-------------------------------------------------------------------*/
+CPYF1:
+             CHGVAR     VAR(&MSG) VALUE(&LOC *BCAT 'Process Lockbox +
+                          Deposit Option did not find Lockbox Date +
+                          ' *CAT &CYYMMDD *BCAT 'to process.')
+             SNDPGRMSG  TOPGR(&DIST) MSG(&MSG) CONFMSG(*NO)
+             GOTO       CMDLBL(END)
+
+/*-------------------------------------------------------------------*/
+/* END PROGRAM                                                       */
+/*-------------------------------------------------------------------*/
+ END:
+             ENDPGM

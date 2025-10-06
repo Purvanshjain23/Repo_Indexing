@@ -1,0 +1,415 @@
+      *These two lines here to aid in debugging when needed***************
+     H debug(*yes)
+     H option(*srcstmt:*nodebugio)
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HPS Data Mart
+      * PROGRAM:     HP236 - Upd DataMart Group Header with Sold Days in Phase
+      *                      and Average Sold Days in Phase.
+      * PROGRAMMER:  Barb Gutierrez
+      * CREATED:     09/14/16
+      *
+      * FUNCTION:    This program calculates the total sold days in phase, the weighted received
+      *              date and the average sold days in phase for Grow Finish groups only.
+      *              We only include 'LIVE' head.  No deads or culls.
+      *
+      *              Project number E006136
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      /eject
+      ****************************************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************************************
+      *
+     Fhsp034    if   e           k disk
+      *    Hog group (records selected with open query)
+      *
+      *
+     Fhsj085e   if   e           k disk
+      *   Movement Event + Transfer Header
+      *
+     Fhsp074    if   e           k disk
+      *  Transfer movement header
+      *
+     Fhsj075i   if   e           k disk
+      *  Transfer movement detail + Transfer movement header
+      *
+      *
+     Fhppf034   uf   e           k disk    rename(hgrec: hgrec1) prefix(p1)
+      *   Datamart FIN: Group header
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Workfields for dates
+      *
+     D wkcymdiso       s               D   datfmt(*iso)
+     D wkisoopdt       s               D   datfmt(*iso)
+     D wkisorcdt       s               D   datfmt(*iso)
+     D wkwtopdt        s               D   datfmt(*iso)
+     D wkwkbegdt       s                   like(p1hgcldt)
+      *
+      * Workfields
+      *
+     D wkhavemnt       s              1
+     D wktqlhd         s              5  0
+     D wksldd          s              8  0
+     D wktsldd         s              8  0
+     D wkdays          s              8  0
+     D wkdaysd         s              8  0
+     D wkavsldd        s              7  2
+     D wkqlthd         s              5  0
+     D wkpercent       s              7  4
+     D wkfld           s              7  4
+     D wkresult        s              7  4
+     D wkfactor        s              3  0
+      *
+      * Parm fields
+      *
+     D xxcurbegdt      s              8  0
+     D xxcurhist       s              1
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Definition for external data area
+      *---------------------------------------------------------------
+      *
+     Ddafin            ds                  dtaara(dafin)
+     D  daccyy                 1      4
+     D  dacwkbegdt            29     36  0
+     D  dacwkenddt            38     45  0
+     D  dadays                47     49  0
+     D  dasbmfl               62     62
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Read the hog group master file. Open query in CL only selects:
+      *     1) production phase = 'GF'
+      *     2) Omits group status of 'VD'
+      *     3) Open dates not zero
+      *     1) closed dates = 0 or
+      *     2) closed dates >= beg date in DAFIN
+      *
+      * This gives us all the records that are being deleted and reprocessed in the
+      * cognos datamart build.
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsp034                                 90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Process this group when this is:
+      * 1) a History run or
+      * 2) a Current run and the group is either:
+      *    a) not closed or
+      *    b) closed on/after the 'current' week-beginnning date from the
+      *       data area.
+      *
+     C                   if        xxcurhist = 'H' or                           If continue
+     C                             (hgcldt = 0 or
+     C                              hgcldt >= xxcurbegdt)
+      *
+     C                   move      hgopdt        wkisoopdt
+      *
+      * Accumulate total quality head for group for only 'market sales' to use
+      * to calculate the average market days.
+      *
+     C                   exsr      $qltyhead
+      *
+      * Process each sales movement to determine the total sold (market) days.
+      *
+     C                   if        wkhavemnt  = 'Y'
+     C                   exsr      $mvdet
+     C                   endif
+      *
+      * Calculate the avg sold (market) days in phase for the group
+      *
+     C                   exsr      $avgsldday
+      *
+      * Chain to datamart finisher file and update
+      *
+     C     hghgcd        chain     hppf034                            95
+     C                   if        *in95 = *off
+      *
+     C                   z-add     wkavsldd      p1hgasdphs                      avg sld days in phs
+     C                   z-add     wktsldd       p1hgsdphs                       total sold days
+     C                   move      wkwtopdt      p1hgwtopdt                      weighted open date
+      *
+      * Update the Datamart group header record
+      *
+     C                   update    hgrec1
+      *
+     C                   z-add     0             wkavsldd                       avg sold days
+     C                   z-add     0             wktsldd                        total sold days
+     C                   z-add     0             wktqlhd                        total qlty head
+     C                   z-add     0             wksldd                         sold days
+     C                   endif
+      *
+     C                   endif
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+     C                   seton                                        lr
+      /eject
+      *------------------------------------------------------------------
+      * $qltyhead - accumulate total quality head for group.
+      *------------------------------------------------------------------
+      *
+     C     $qltyhead     begsr
+     C                   move      'N'           wkhavemnt
+      *
+      * Retrieve all sales movements for the group and accumulate the live head.  This should
+      * be the same total as quality head.
+      *
+     C     hghgsn        setll     hsj085e
+      *
+     C                   dou       *in93 = *on                                  Do sales
+     C     hghgsn        reade     hsj085e                                93
+     C                   if        *in93 = *off and                             If sale
+     C                             shstcd = 'MRKTS'
+      *
+     C                   select
+     C                   when      shmscd = 'SC'
+      *
+     C                   when      shmscd = 'SH'
+     C                   other
+      *
+     C                   add       sglvhd        wktqlhd                        qlty hd same as live
+     C                   move      'Y'           wkhavemnt
+     C                   endsl
+      *
+     C                   endif                                                  If sale
+     C                   enddo                                                  Do sales
+     C                   endsr
+      /eject
+      *
+      *---------------------------------------------------------------
+      * $mvdet  - process each sales movement for the group and calc
+      *           the % of total quality head.
+      *---------------------------------------------------------------
+      *
+     C     $mvdet        begsr
+      *
+     C     hghgsn        setll     hsj085e
+      *
+     C                   dou       *in91 = *on                                  Do received in
+     C     hghgsn        reade     hsj085e                                91
+     C                   if        *in91 = *off and                             If not EOF
+     C                             shstcd = 'MRKTS'
+      *
+     C                   select
+     C                   when      shmscd = 'SC'
+      *
+     C                   when      shmscd = 'SH'
+     C                   other
+      *
+     C                   if        wktqlhd <> 0
+      *
+      * For each movement detail record, calculate a weighted open received date
+      *
+     C                   exsr      $wtopdt
+      *
+      * Now that we have a weighted open date, find the days difference between it and the
+      * received date of the movement.
+      *
+     C                   exsr      $daysdiff
+      *
+      * Accumulate total sold days in phase for each sales movement to use to calculate the
+      * average at the group level.
+      *
+     C                   add       wksldd        wktsldd
+      *
+     C                   endif
+     C                   endsl
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do received in
+     C                   endsr
+      /eject
+      *
+      *---------------------------------------------------------------
+      * $wtopdt - Calculate the weighted open date
+      *---------------------------------------------------------------
+      *
+     C     $wtopdt       begsr
+      *
+     C                   z-add     0             wkresult
+      *
+      * Read the transfer movement detail records for transfers into the group.
+      *
+     C     hghgsn        setll     hsj075i
+      *
+     C                   dou       *in94 = *on                                  Do received in
+     C     hghgsn        reade     hsj075i                                94
+     C                   if        *in94 = *off                                 If not EOF
+      *
+      * NOTE:  For Grow Finish groups, use only transfers in from Nursery groups
+      *
+     C                   if        (hgppcd = 'GF   ' and                        If go ahead
+     C                              mhorpp = 'NUR  ')
+      *
+      * For each transfer movement detail record,
+      * Calculate the percent of total received head represented by each
+      * record. (Leave the result as a rate. IE: 20% will be .20)
+      *
+     C                   if        wktqlhd <> 0
+     C     mdqlhd        div       wktqlhd       wkpercent
+     C                   else
+     C                   z-add     0             wkpercent
+     C                   endif
+      *
+      * Calculate the elapsed days between the group's open date and the
+      * received date of the transfer movement and accumulate the result.
+      *
+     C                   exsr      $days
+      *
+      * Multiple the elapsed days times the rate. Accumulate the result.
+      *
+     C     wkdays        mult      wkpercent     wkfld
+     C                   add       wkfld         wkresult
+      *
+     C                   endif                                                  If go ahead
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do received in
+      *
+      * You have now processed all detail records for the group. Round the
+      * accumulated result field into a whole number that will be used as the
+      * weighting factor.
+      *
+     C                   z-add(h)  wkresult      wkfactor
+      *
+     C     wkisoopdt     adddur    wkfactor:*d   wkcymdiso
+     C                   movel     wkcymdiso     wkwtopdt
+      *
+     C                   endsr
+      *
+      /eject
+      *--------------------------------------------------------------------------------
+      * Calculate the elapsed days between the weighted open date and the received date
+      *--------------------------------------------------------------------------------
+      *
+     C     $daysdiff     begsr
+      *
+     C                   z-add     0             wkdaysd
+      *
+      * Test received date for a valid date. If it is valid, find the
+      * days difference between it and the group's open date.
+      *
+     C     *iso          test(d)                 shrcdt                 92
+     C                   if        *in92 = *off                                 If valid date
+     C                   movel     shrcdt        wkisorcdt
+     C     wkisorcdt     subdur    wkwtopdt      wkdaysd:*d
+      *
+      * Calculate sold days by multiplying days difference by the
+      * market head received at plant for the movement.
+      *
+     C     wkdaysd       mult      sglvhd        wksldd
+     C                   endif                                                  If valid date
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------
+      * $avgsldday - calculate the sold (market) days in phase for the group.
+      *----------------------------------------------------------------------
+      *
+     C     $avgsldday    begsr
+      *
+      * Calculate the average sold (market) days in phase
+      *
+     C                   if        wktqlhd <> 0
+     C     wktsldd       div(h)    wktqlhd       wkavsldd
+     C                   else
+     C                   z-add     0             wkavsldd
+     C                   z-add     0             wktsldd
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------
+      * Calculate the elapsed days between the group's open date and the received date
+      *--------------------------------------------------------------------------------
+      *
+     C     $days         begsr
+      *
+     C                   z-add     0             wkdays
+      *
+      * Retrieve movement header to get received date
+      *
+     C     mdmvsn        chain     hsp074                             96
+     C                   if        *in96 = *off                                 If header
+      *
+      * Test received date for a valid date. If it is valid, find the
+      * days difference between it and the group's open date.
+      *
+     C     *iso          test(d)                 mhrcdt                 97
+     C                   if        *in97 = *off                                 If valid date
+     C                   movel     mhrcdt        wkisorcdt
+     C     wkisorcdt     subdur    wkisoopdt     wkdays:*d
+     C                   endif                                                  If valid date
+     C                   endif                                                  if header
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C     *entry        plist
+     C                   parm                    xxcurhist
+     C                   parm                    xxcurbegdt
+      *
+      * If this is a 'Current' run, you will ultimately need the incoming date in ISO format
+      * date comparison purposes. So, always just get it ready!
+      *
+     C     *iso          movel     xxcurbegdt    wkwkbegdt
+      *
+      *
+      * Bring in the data area that contains the 'historical' year that controls
+      * data selection.  Concatenate the year which is in the format CCYY with
+      * four zeros so that you get a value such as 19980000.
+      *
+     C                   in        dafin
+      *
+     C                   endsr
+      /eject

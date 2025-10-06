@@ -1,0 +1,388 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     Closing Period: Build Period Cost File
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     04/24/03
+      *
+      * FUNCTION:    This function builds the Period Cost file--1 record for group/period
+      *              by rolling up the Costed Movements for the period.
+      *
+      ********************************************************************************************
+      * MODIFICATIONS:
+      ********************************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 04/08/04  LeAnne Fedor
+      *           We were encountering the scenario where a group was closed in a period where
+      *           it had NO movements. Basically, the users SHOULD HAVE closed the group in the
+      *           previous period but didn't. When these groups required an Adjustment
+      *           Amount, our existing logic was updating/writing a period record to HSP055
+      *           for the period being closed---and we were fine. BUT, when no Adjustment
+      *           was needed, we ended up with no HSP055 record for the group/period. This
+      *           caused the group to NOT SHOW UP on HP631-Closed Group Cost of Sales Report.
+      *
+      *           So, Alice and I decided to tweak our existing closed group logic to ALWAYS
+      *           put a record in HSP055 for the closing group/period---even if its values are
+      *           zero.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      * 03/04/16  ROSE CENTONZE
+      *           FOR HSL055A, CHAIN TO HSL034D TO CHECK THE COMPANY BEFORE DELETE
+      /EJECT
+      ********************************************************************************************
+      * FILE SPECIFICATIONS
+      ********************************************************************************************
+      *
+     Fhsp033    if   e           k disk
+      *    Closed hog group
+      *
+      *
+     Fhsl034d   if   e           k disk
+      *    Hog groups
+      *
+      *
+     Fhsl034l   if   e           k disk    rename(hgrec:hgrecl)
+      *    Hog groups
+      *
+      *
+     Fhsl118d   if   e           k disk
+      *    Costed movements
+      *
+      *
+     Fhsp055    uf a e           k disk
+      *    Period costs for hogs moved out
+      *
+      *
+     Fhsl055a   uf   e           k disk    rename(pcrec:pcreca)
+      *    Period costs for hogs moved out
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+      *
+      *
+      * Save fields
+      *
+     D svorhgsn        s                   like(cmorhgsn)
+      *
+      *
+      * Workfields
+      *
+     D wkrpcd          s                   like(cgrpcd) inz('COS  ')
+     D wk033am         s                   like(cgcgam)
+     D wk055am         s                   like(pcam)
+     D wkdiffam        s                   like(pcam)
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldbpdt                 1     08  0
+     D  ldepdt                 9     16  0
+     D  ldacpe                17     18  0
+     D  ldacyr                20     23  0
+     D  ldcocd               200    202
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * MAINLINE
+      ***************************************************************************************
+      *
+      * This function has 3 steps:
+      *   1) Delete all Period Costs records for the period
+      *   2) Roll-up Costed Movements into a Period Cost record for each group
+      *   3) Reread the Period Cost records for the period. For each closed group,
+      *      calculate the 'adjusted' amount.
+      *
+     C                   exsr      $delete
+     C                   exsr      $rollup
+     C                   exsr      $closed
+      * EOF processing
+      *
+     C                   seton                                        lr
+      /eject
+      *------------------------------------------------------------------------------------------
+      * Delete all Period Costs records for the Period to prepare for the roll-up
+      *------------------------------------------------------------------------------------------
+      *
+     C     $delete       begsr
+      *
+     C     key01         setll     hsl055a
+      *
+     C                   dou       *in91 = *on                                  Do period
+     C     key01         reade     hsl055a                                91
+     C                   if        *in91 = *off                                 If more
+     C     pchgsn        chain     hsl034d                            92
+     C                   if        *in92 = *off and
+     c                             hgcocd = ldcocd
+     C                   delete    pcreca
+     C                   endif                                                  If company
+     C                   endif                                                  If more
+     C                   enddo                                                  Do period
+      *
+     C                   endsr
+      *
+      /eject
+      *---------------------------------------------------------------------------------------
+      * Roll up Costed Movements into a Period Cost record for each group
+      *---------------------------------------------------------------------------------------
+      *
+     C     $rollup       begsr
+      *
+      * Read each movement detail record. Sum values and write a Period Cost record
+      * when the group changes.
+      *
+     C     key01         setll     hsl118d
+      *
+     C                   dou       *in90 = *on                                  Do movements
+     C     key01         reade     hsl118d                                90
+     C                   if        *in90 = *off                                 If not EOF
+     C     cmorhgsn      chain     hsl034d                            92
+     C                   if        *in92 = *off and
+     c                             hgcocd = ldcocd
+      *
+      * Control break
+     C                   select
+     C                   when      first = yes
+     C                   z-add     cmorhgsn      svorhgsn
+     C                   move      no            first
+     C                   clear                   pcrec
+     C                   clear                   pcreca
+      *
+     C                   when      cmorhgsn <> svorhgsn
+     C                   exsr      $wrt055
+     C                   endsl
+      *
+      * Detail processing
+      *
+     C                   add       cmam          pcam
+     C                   add       cmhd          pclvhd
+     C                   add       cmlb          pclvlb
+      *
+     C                   select
+     C                   when      cmmtcd = 'T'
+     C                   add       cmam          pctam
+     C                   add       cmhd          pctlvhd
+     C                   add       cmlb          pctlvlb
+      *
+     C                   when      cmmtcd = 'S'
+     C                   add       cmam          pcsam
+     C                   add       cmhd          pcslvhd
+     C                   add       cmlb          pcslvlb
+     C                   add       cmcrlb        pcscrlb
+     C                   add       cmcrlb        pccrlb
+     C                   endsl
+      *
+     C                   endif                                                  If company
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do movements
+      *
+      * Write out last record
+      *
+     C                   if        first = no
+     C                   exsr      $wrt055
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------------------
+      * Write a Period Cost record for the origin group
+      *---------------------------------------------------------------------------------------
+      *
+     C     $wrt055       begsr
+      *
+     C                   z-add     ldacyr        pcacyr
+     C                   z-add     ldacpe        pcacpe
+      *
+      * Retrieve group info
+      *
+     C                   z-add     svorhgsn      pchgsn
+      *
+     C     pchgsn        chain     hsl034d                            92
+     C                   if        *in92 = *off
+     C                   z-add     hgfscd        pcfscd
+     C                   move      hgppcd        pcppcd
+     C                   move      hggscd        pcgscd
+     C                   move      hggtcd        pcgtcd
+     C                   endif
+      *
+      * Calculate per head/per pound rates.
+      *
+     C                   exsr      $rates
+      *
+     C                   write     pcrec
+     C                   clear                   pcrec
+      *
+     C                   z-add     cmorhgsn      svorhgsn
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------------------
+      * Calculate per head/per pound rates
+      *---------------------------------------------------------------------------------------
+      *
+     C     $rates        begsr
+      *
+      * Calculate total cost per head
+      *
+     C                   if        pclvhd <> 0
+     C     pcam          div       pclvhd        pchdrt
+     C                   endif
+      *
+      * Calculate total cost per pounds
+      *
+     C                   if        pclvlb <> 0
+     C     pcam          div       pclvlb        pclbrt
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------------
+      * Read/update the Period Cost records for Closed Groups and calculate the 'adjusted amount'
+      *------------------------------------------------------------------------------------------
+      *
+     C     $closed       begsr
+      *
+      * Process all groups that closed in this period
+      *
+     C     ldbpdt        setll     hsl034l
+      *
+     C                   dou       *in90 = *on or hgcldt > ldepdt               Do closed
+     C                   read      hsl034l                                90
+     C                   if        *in90 = *off and hgcldt >= ldbpdt            If more closed
+     C                             and hgcldt <= ldepdt
+      *
+      *
+      * Retrieve the dollars from the Closed Hog Group file for report code
+      * 'COS'.
+     C                   z-add     0             wk033am
+     C     key02         chain     hsp033                             92
+     C                   if        *in92 = *off
+     C                   z-add     cgcgam        wk033am
+     C                   endif
+      *
+      *
+      * Retrieve dollars for ALL periods for the group from the Period Cost
+      * file.
+      *
+     C                   z-add     0             wk055am
+     C     hghgsn        setll     hsp055
+      *
+     C                   dou       *in91 = *on                                  Do period
+     C     hghgsn        reade     hsp055                                 91
+     C                   if        *in91 = *off                                 If more
+     C                   add       pcam          wk055am
+     C                   endif                                                  If more
+     C                   enddo                                                  Do period
+      *
+      * Subtract the Period Cost dollars from the Closed Group COS dollars
+      *
+     C     wk033am       sub       wk055am       wkdiffam
+      *
+      * We ultimately want a Period Cost record for every group that is
+      * 'closing' this period---even when the group had no activity!
+      *
+      * So, always attempt to retrieve a Period Cost record for the group/period:
+      *     If there is no record, always write a record.
+      *     If there is a record, udpate it if you had a 'difference'.
+      *
+     C     key03         chain     hsp055                             92
+     C                   select
+     C                   when      *in92 = *on
+     C                   move      hgppcd        pcppcd
+     C                   z-add     hgfscd        pcfscd
+     C                   z-add     hghgsn        pchgsn
+     C                   move      hggscd        pcgscd
+     C                   move      hggtcd        pcgtcd
+     C                   z-add     ldacyr        pcacyr
+     C                   z-add     ldacpe        pcacpe
+     C                   z-add     wkdiffam      pcajam
+     C                   z-add     wkdiffam      pcam
+     C                   z-add     0             pclvhd
+     C                   z-add     0             pclvlb
+     C                   z-add     0             pccrlb
+     C                   z-add     0             pchdrt
+     C                   z-add     0             pclbrt
+     C                   z-add     0             pctam
+     C                   z-add     0             pctlvhd
+     C                   z-add     0             pctlvlb
+     C                   z-add     0             pcsam
+     C                   z-add     0             pcslvhd
+     C                   z-add     0             pcslvlb
+     C                   z-add     0             pcscrlb
+     C                   write     pcrec
+      *
+     C                   when      wkdiffam <> 0
+     C                   z-add     wkdiffam      pcajam
+     C                   add       wkdiffam      pcam
+     C                   exsr      $rates
+     C                   update    pcrec
+     C                   endsl
+      *
+     C                   endif                                                  If more closed
+     C                   enddo                                                  Do closed
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    ldacyr
+     C                   kfld                    ldacpe
+      *
+     C     key02         klist
+     C                   kfld                    hghgsn
+     C                   kfld                    wkrpcd
+      *
+     C     key03         klist
+     C                   kfld                    hghgsn
+     C                   kfld                    ldacyr
+     C                   kfld                    ldacpe
+      *
+      *
+     C                   endsr
+      /EJECT

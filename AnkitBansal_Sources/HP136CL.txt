@@ -1,0 +1,113 @@
+/*****************************************************************   */
+/*                                                                   */
+/*  SYSTEM-----------> HOG PRODUCTION SYSTEM                         */
+/*  PROGRAM NUMBER --> HP136CL                                       */
+/*  PROGRAM NAME ----> WORK WITH CHECKS                              */
+/*  PROGRAMMER ------> ROSE MARTIN                                   */
+/*  DATE ------------> 08/04/94                                      */
+/*                                                                   */
+/*  PURPOSE ---------> THIS CL EXECUTES THE CMD TO START COMMITMENT  */
+/*                     CONTROL, INVOKE FUNCTION PROGRAMS AND END     */
+/*                     COMMITMENT CONTROL.                           */
+/*                                                                   */
+/*********************************************************************/
+/* MODIFIED:                                                         */
+/* 03/08/96  LEANNE FEDOR                                            */
+/*           THE 'CHECK AMOUNT' FIELD WAS INCREASED FROM 7,2 TO 9,2  */
+/*                                                                   */
+/* 05/21/96  LEANNE FEDOR                                            */
+/*           IN PREPARATION FOR HAVING TWO BOXES (CISC AND RISC),    */
+/*           REPLACED STANDARD CREATE DUPLICATE OBJECT COMMAND       */
+/*           WITH A COMMAND CUSTOMIZED BY JOHN ERICSON. THIS         */
+/*           COMMAND WILL RETRIEVE/USE THE FILE FROM THE APPRO-      */
+/*           PRIATE LIBRARY INSTEAD OF USING HARDCODED 'PRKFLIB'.    */
+/*           THE CUSTOMIZED COMMAND IS CRTDUPOBJL FOR 'CREATE        */
+/*           DUPLICATE OBJECT FROM LIBRARY'.                        */
+/*                                                                   */
+/* 09/05/08  LEANNE RAMSEY                                           */
+/*           IN THE LAST 12 MONTHS WE HAVE HAD 9 OCCURENCES OF THE   */
+/*           SALES MOVEMENT DETAIL NOT BEING IN SYNCH WITH THE       */
+/*           CHECK DETAIL. SO, APPROX 10 RECORDS OUT OF 40,000 DIDN'T */
+/*           GET UPDATED CORRECTLY ??!!! DID THE USERS FIND/REPORT   */
+/*           ALL OCCURENCES??  WE CANNOT RECREATE THE ERROR. COULD   */
+/*           IT BE A GLITCH WITH THE COMMIT/ROLLBACK? IN THE REPORTED*/
+/*           INSTANCES WE NEVER HAD TO ADD/DELETE A MOVEMENT DETAIL  */
+/*           RECORD...JUST HAD TO CHANGE HEAD/POUNDS.                */
+/*           SO, WE ARE ADDING A NEW "RESYNCH" PROGRAM (HP138) AFTER */
+/*           WE END COMMIT/CONTROL TO READ THE CHECK DETAIL FOR THE  */
+/*           CHECK AND, FOR EACH MOVEMENT ON THE CHECK, RECALC THE   */
+/*           HEAD/POUNDS FOR THE SALES MOVEMENT DETAIL RECORDS.      */
+/*                                                                   */
+/* 11/09/17  BRAD BADEN   E010812                                    */
+/*           ADD NEW PARAMETER FOR BUSINESS OFFICE.  THE BUSINESS    */
+/*           OFFICE VALUE WILL BE DISPLAYED ON SCREENS.              */
+/*********************************************************************/
+
+             PGM        PARM(&MODE &BOCOCD &BOBOBO &WKCHDT &WKCHNO +
+                          &WKCVNO &WKSTCD &WKCMDY &WKCHAM &RTNCD)
+
+             DCL        VAR(&MODE) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&BOCOCD) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&BOBOBO) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&WKCHDT) TYPE(*DEC) LEN(8 0)
+             DCL        VAR(&WKCHNO) TYPE(*DEC) LEN(7 0)
+             DCL        VAR(&WKSTCD) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&WKCVNO) TYPE(*DEC) LEN(8 0)
+             DCL        VAR(&WKCMDY) TYPE(*DEC) LEN(6 0)
+             DCL        VAR(&WKCHAM) TYPE(*DEC) LEN(9 2)
+             DCL        VAR(&RTNCD) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&CREATE) TYPE(*CHAR) LEN(6) VALUE(CREATE)
+
+
+ /* IF THE USER IS CREATING A NEW CHECK, CREATE THE TEMPORARY   */
+ /* ADJUSTMENT FILE IN QTEMP AND START JOURNALING IT            */
+
+             IF         COND(&MODE = &CREATE) THEN(DO)
+
+             CHKOBJ     OBJ(QTEMP/HSP065) OBJTYPE(*FILE)
+             MONMSG     MSGID(CPF9801) EXEC(DO)
+             CRTDUPOBJL OBJ(HSP065) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             STRJRNPF   FILE(QTEMP/HSP065) JRN(JRNLIB/HSPJRN) +
+                          IMAGES(*BOTH) OMTJRNE(*OPNCLO)
+             ENDDO
+             ENDDO
+
+
+ /* START COMMITMENT CONTROL FOR THIS ROUTING STEP              */
+
+ RETRY:      STRCMTCTL  LCKLVL(*CHG) NFYOBJ(*NONE)
+             MONMSG     MSGID(CPF8351) EXEC(DO)
+             ENDCMTCTL
+             GOTO RETRY
+             ENDDO
+
+/* CALL MAINTAIN CHECK DETAIL WITH INVOKES ALL OTHER CHECK FUNCTIONS */
+
+             CALL       PGM(HP136) PARM(&MODE &BOCOCD &BOBOBO +
+                          &WKCHDT &WKCHNO &WKCVNO &WKSTCD &WKCMDY +
+                          &WKCHAM &RTNCD)
+
+ /* END COMMITMENT CONTROL FOR THIS ROUTING STEP              */
+
+             ENDCMTCTL
+
+ /* IF THE USER WAS IN CREATE MODE, DELETE THE TEMPORARY       */
+ /* ADJUSTMENT FILE IN QTEMP AND END ITS JOURNALING            */
+
+             IF         COND(&MODE = &CREATE) THEN(DO)
+
+             ENDJRNPF   FILE(QTEMP/HSP065) JRN(JRNLIB/HSPJRN)
+             MONMSG     MSGID(CPF0000)
+
+             DLTF       FILE(QTEMP/HSP065)
+             MONMSG     MSGID(CPF0000)
+             ENDDO
+
+ /* RESYNCH THE SALES MOVEMENT DETAIL WITH THE CHECK DETAIL    */
+
+             CALL       PGM(HP138) PARM(&WKCHDT &WKCHNO &WKCVNO)
+
+             ENDPGM
+

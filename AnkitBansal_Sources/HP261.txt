@@ -1,0 +1,752 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP261 - HPS: Update the Sales Movements from Scheduled to Shipped
+      * PROGRAMMER:  Brad Baden
+      * CREATED:     12/15/2017
+      *
+      * Function:    Currently, this program will only be called for company 440 during
+      *              the Edit.  The purpose of this program is to make sure the
+      *              Movement Status in the Sales Header file HSP084 is 'SC' or 'NC', and
+      *              if all of the Movement Statuses for the records be processed are 'SC'
+      *              or 'NC', change the Movement Statuses value on all records to 'SH'.
+      *              If any record is found not to originally be an 'SC', then none
+      *              of the records are updated to 'SH'.  This programm was created for
+      *              Company 440 because the status must be 'SH' before the work files
+      *              are created in program HP243.
+      *
+      *              If all records are valid:
+      *              In HSP084, update the Status from SC to SH.  Set
+      *              the Shipped Date and Received Date in the HSP084
+      *              file to the Shipped Date value in the Scheduled
+      *              Load Plan file HSL196B.
+      *
+      *              In HSP085, update the Shipped Head and Shipped
+      *              Pounds values.  The Shipped Head value is accumulated
+      *              for the number of like Movement Numbers.  The
+      *              Shipped Pounds value is calculated by multiplying
+      *              the Shipped Head times the Average Live Weight
+      *              value in the Kill Data record being processed.
+      *
+      *              If no records are selected, the error flag is set
+      *              to yes, and the process will end.
+      *
+      *              This program is called from HP453CL.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      *  1/30/18  Brad Baden        E010812
+      *           On the first pass, checking for non 'SC' records, also
+      *           check if the Buy Order Load record exists.  If it does
+      *           not exist, print error on report and do not perform
+      *           any updates.
+      *
+      *  3/01/18  Brad Baden        E010812
+      *           Modified the calculation of shipped head and shipped
+      *           weight for split loads.  To correctly calculate the
+      *           values on each Sales Detail (HBSP085) record:
+      *           1. Get the total Shipped Head value from the Kill Data
+      *              workfile HSL3101B file.
+      *              Total Shipped Head = Shipped Head + KOA'a
+      *
+      *           2. Read all HSP085 records for the Movement# to count
+      *              the number of records and accumulate the Scheduled
+      *              Head.
+      *           3. Reread each HSP085 record for the Movement#.
+      *              a. If there is only 1 HSP085 record for the Movement#,
+      *                 set the Shipped Head value on the current HSP085
+      *                 record to the Shipped Head value from the Buy Order
+      *                 Load file.  Calculate the Shipped Pounds by
+      *                 multiplying the Shipped Head times the Average Live
+      *                 Weight.  Update the HSP085 record.
+      *              b. If there is more than 1 HSP085 record, calculate
+      *                 the Shipped Head for the Group as follows:
+      *                 Shipped Head = (HSP085.Scheduled Head / Accumulated
+      *                 Scheduled Head) * PKAXCPL0.Shipped Head.
+      *                 Calculate the Shipped Pounds by multiplying the
+      *                 Shipped Head times the Average Live Weight.  Update
+      *                 the HSP085 record, and then read the next HSP085
+      *                 record and repeat the calculation.
+      *
+      * 10/01/18  Brad Baden        E13834
+      *           When there is a Movement Header with a Movement Status
+      *           of 'NC', that record is being kicked out as an error.
+      *           Currently in PASS2 subroutine, it is only checking for
+      *           'SC' if the error flag is set to 'Y'.  Changed the line
+      *           to check for 'SC' AND 'NC'.
+      *
+      * 11/02/20  ISE               H16853
+      *           Recompile only.Increased the length of Buy Order Number length from 5 to 7.
+      *
+      * 01/21/21  ISE               H16853
+      *           Allignment corrected for Buy Order Number.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsl3101b  if   e           k disk
+      *  Workfile: Kill Data for Business Office
+      *
+      *
+     Fhsl196b   if   e           k disk
+      *  Scheduled Load Planning (Key: Business Office, Movement#)
+      *
+      *
+     Fcaabrel3  if   E           K DISK
+      *    Company Name and Address   (Key: Accounting Company Number)
+      *
+      *
+     Fhsp009    if   e           k disk
+      *  Business Office         (Key: Business Office Code)
+      *
+      *
+     Fhsl034d   if   e           k disk
+      *  Hog Group               (Key: System Hog Group Number)
+      *
+      *
+     Fhsp084    uf   e           k disk
+      *  Sales Header            (Key: Movement#)
+      *
+      *
+     Fhsp085    uf   e           k disk
+      *  Sales Detail            (Key: Movement# and Origin Group Number)
+      *
+      *
+     Fqprint    o    f  198        printer oflind(*inof)
+      *
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D notfoundbol     c                   'Buy Order Load record not found'
+     D notfoundslshdr  c                   'Sales Header record not found'
+     D notfoundslsdtl  c                   'Sales Detail record not found'
+     D notfoundscldpl  c                   'Sched Load Plan record not found'
+     D shpkildterr     c                   'Ship Date greater than Kill Date'
+     D shprcvdterr     c                   'Ship Date greater than Receive Date'
+     D tstdatezero     c                   'Kill Date and Received Date = 0'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+     D dash            s            198
+     D rtime           s              6  0
+     D errormsg        s             75
+     D wkfld           s              7
+     D svmvsn          s                   like(w1mvsn)
+     D wkmvsn          s                   like(w1mvsn)
+     D svbocd          s                   like(w1bocd)
+     D wkbono          s                   like(w1bono)
+     D wkboldno        s                   like(w1boldno)
+     D wktattoo        s                   like(w1tattoo)
+     D wkhgsn          s                   like(hghgsn)
+     D wkhgcd          s                   like(hghgcd)
+     D wkblcd          s                   like(hgblcd)
+     D wkrmcd          s                   like(hgrmcd)
+     D wkdate80        s              8  0
+     D wkkldt          s              6  0
+     D firsttime       s              1
+     D curdate         s              8  0
+     D continue        s              1
+     D allSCflag       s              1
+     D allBOLflag      s              1
+     D anyerrors       s              1
+     D schederr        s              1
+     D bolerr          s              1
+     D dthgsn          s                   like(hghgsn)
+     D dthgcd          s                   like(hghgcd)
+     D dtblcd          s                   like(hgblcd)
+     D dtrmcd          s                   like(hgrmcd)
+     D dtkmdy          s              6  0
+      *
+     D sdcount         s              3  0                                      count of records
+     D wkcount         s              3  0                                      work counter
+     D wkmscd          s                   like(shmscd)                         movement status
+     D wkschd          s                   like(sgschd)                         Accum sched head
+     D wkhldovr        s                   like(w1hldovr)                       Accum held overs
+     D wkshhd          s                   like(sgshhd)                         Accum ship head
+     D wkhdrcvd        s                   like(w1hdrcvd)                       Accum head received
+     D wklivwgt        s                   like(w1livwgt)                       Accum live weight
+     D wkhddoa         s                   like(w1hddoa)                        Accum head DOA
+     D ttlshhd         s                   like(sgshhd)                         Total ship head
+     D
+      *
+      *---------------------------------------------------------------
+      *  Local Data Area
+      *---------------------------------------------------------------
+      *
+     D                UDS
+     D  ldkldt                 1     08  0
+     D  ld0ymd                 9     15  0
+     D  ldmdy                 16     21  0
+     D  ldeffl                22     22
+     D  ldefds                23     32
+     D  ldcono                33     35  0
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * On the first pass over the HPS Kill Data file HSP3101, check
+      * to make sure that every HSP3101 record has an associated
+      * Sales Header (HSP084) record and that the Movement Status Code
+      * is Scheduled 'SC'.
+      * If any HSP084 record is not 'SC', then no updates will happen
+      * in the Sales Header and Sales Detail files.
+      *
+     C                   exsr      $pass1
+      *
+      * After checking for non-SC records, reread the HSP3101 records
+      * to update the Sales Header and Sales Detail files if there were
+      * no errors found in the first pass.  Also, print a report of the
+      * Scheduled Movements being processed.
+      *
+     C                   exsr      $pass2
+      *
+      *----------------------------
+      * EOF processing
+      *----------------------------
+      *
+      * if there were no Kill Data records, print header and no data
+      * lines.
+     C                   if        firsttime = yes
+     C                   except    hrhdr
+     C                   except    nodata
+     C                   eval      anyerrors = yes
+     C                   endif
+      *
+     C                   except    endrpt
+      *
+     C                   eval      *inlr = *on
+      *
+      /eject
+      *---------------------------------------------------------------
+      * $pass1 - read HSL3101B and check if the Movement Status Code
+      *          is Scheduled Ship (SC) in the Sales Header file for
+      *          the Movement Number.  Also check that a Buy Order
+      *          Load record exists.
+      *---------------------------------------------------------------
+      *
+     C     $pass1        begsr
+      *
+      * Read all HSL3101B records.  The file is stored in the QTEMP library
+      * and contains only records created in this job.
+      *
+     C     *loval        setll     hsl3101b
+     C                   if        %found                                       if %found
+     C                   dou       %eof(hsl3101b)                               dou %eof
+     C                   read      hsl3101b
+     C                   if        not %eof(hsl3101b)                           if not %eof
+      *
+      * Check if Movement Status is SC or NC when movement number changes
+      * value.  Perform this check when the Movement# first changes, and use a
+      * work field for the Movement# to check the Movement Status Code value.
+     C                   if        w1mvsn <> svmvsn                             if w1mvsn
+     C                   eval      wkmvsn = w1mvsn
+      *
+     C                   exsr      $chk4sched
+      *
+      ** Leave this subroutine if Movement Status is not 'SC', or if
+      ** a Buy Order Load record does not exist.
+     C                   if        schederr  = yes                              if schederr = yes
+     C                   eval      anyerrors = yes
+     C                   leavesr
+     C                   endif                                                  fi schederr = yes
+      *
+     C                   eval      svmvsn = w1mvsn
+     C                   endif                                                  fi w1mvsn
+      *
+     C                   endif                                                  fi not %eof
+     C                   enddo                                                  oud %eof
+     C                   endif                                                  fi %found
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * $chk4sched - Check for a Scheduled Ship or Partially Paid record
+      *---------------------------------------------------------------
+      *
+     C     $chk4sched    begsr
+      *
+     C                   eval      schederr = no
+      *
+     C     wkmvsn        chain     hsp084
+     C                   if        %found(hsp084)                               if %found
+     C                   if        shmscd <> 'SC' and                           if shmscd <> 'SC'
+     C                             shmscd <> 'NC'
+     C                   eval      schederr = yes
+     C                   endif                                                  fi shmscd <> 'SC'
+      *
+     C                   else
+     C                   eval      schederr = yes                               hsp084 record not
+     C                   eval      shmscd   = *blanks
+     C                   endif                                                  fi %found
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * $pass2 - Accumulate all HSL3101B records for a Movement Number.
+      *        - Print report, and update HSP084 Movement Status Code
+      *          to 'SH' if all of the records in HSP084 were 'SC' and
+      *          a Buy ORder Load flag was found for every record.
+      *---------------------------------------------------------------
+      *
+     C     $pass2        begsr
+      *
+     C                   eval      firsttime = yes
+      *
+      * Reread all HSL3101B records.  The file is stored in the QTEMP
+      * library and contains only records created in this job stream.
+      *
+     C     *loval        setll     hsl3101b
+     C                   if        %found                                       if &found
+     C                   dou       %eof(hsl3101b)                               dou %eof hsl3101b
+     C                   read      hsl3101b
+     C                   if        not %eof(hsl3101b)                           if not %eof
+      *
+      * Save movement number to check for change
+     C                   if        firsttime = yes                              if firsttime = yes
+     C                   eval      firsttime = no
+     C                   eval      svmvsn = w1mvsn
+     C                   endif                                                  fi firsttime = yes
+      *
+      * Process updates when movement number changes value and no erros
+     C                   if        w1mvsn <> svmvsn                             if w1mvsn
+      *
+     C                   if        anyerrors <> yes                             if anyerrors = yes
+     C                   exsr      $updsls
+     C                   endif                                                  fi anyerrors = yes
+      *
+      * Write Movement# info to report for previous record
+     C                   exsr      $report
+      *
+      * Load current Kill Data values to work fields
+     C                   eval      wkbono   = w1bono
+     C                   eval      wkboldno = w1boldno
+     C                   eval      wktattoo = w1tattoo
+     C                   eval      wkhdrcvd = w1hdrcvd
+     C                   eval      wkhddoa  = w1hddoa
+     C                   eval      wkhldovr = w1hldovr
+     C                   eval      wklivwgt = (w1hdrcvd + w1hddoa) * w1avlvwgt
+     C                   eval      svmvsn   = w1mvsn
+     C                   else                                                    else w1mvsn
+      *
+      * Save Buy Order, Load Number, and Tattoo number
+     C                   eval      wkbono   = w1bono
+     C                   eval      wkboldno = w1boldno
+     C                   eval      wktattoo = w1tattoo
+      *
+      * Accumulate Recieved Head, DOA's, Held Overs, and live weight
+     C                   eval      wkhdrcvd += w1hdrcvd
+     C                   eval      wkhddoa  += w1hddoa
+     C                   eval      wkhldovr += w1hldovr
+     C                   eval      wklivwgt += (w1hdrcvd + w1hddoa) * w1avlvwgt
+      *
+     C*                  eval      svmvsn = w1mvsn
+     C                   endif                                                  fi w1mvsn
+      *
+      * Print report lines
+      *
+     C                   else                                                    else if %eof
+      *
+      * Process values from the last HSP3101 record at %EOF
+     C*                  eval      wkmvsn = w1mvsn
+      *
+      * Process updates for last record if no errors in pass #1
+     C                   if        anyerrors <> yes                             if anyerrors = yes
+     C                   exsr      $updsls
+     C                   endif                                                  fi anyerrors = yes
+      *
+      * Write Movement# info to report for last record
+     C                   exsr      $report
+     C                   endif                                                  fi not %eof
+     C                   enddo                                                  uod %eof hsl3101b
+     C                   endif                                                  fi %found
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * $upsls - Update Sales Detail HSP085 and Sales Header HSP084
+      *          and write record to report.
+      *---------------------------------------------------------------
+      *
+     C     $updsls       begsr
+      *
+      * Retrieve and update Sales Detail record(s)
+     C                   exsr      $updsd
+      *
+      * Retrieve values from Scheduled Load Plan to update Sales Header
+     C     key02         setll     hsl196b
+     C                   if        %found                                       if %found setll
+     C     key02         reade     hsl196b
+     C                   if        %found(hsl196b)                              if %found hsl196b
+      *
+      * Retrieve and update Sales Header record
+     C     svmvsn        chain     hsp084
+     C                   if        %found(hsp084)                               if %found hsp084
+      *
+     C                   eval      shshdt = lpscshdt
+     C                   eval      shrcdt = lpscshdt
+     C                   eval      shmscd = 'SH'
+     C                   eval      shupdt = curdate
+     C                   eval      shuptm = rtime
+     C                   eval      shpgm  = sdpgm
+      *
+     C                   update    shrec
+      *
+     C                   endif                                                  fi %found hsp084
+     C                   endif                                                  fi %found hsl196b
+     C                   endif                                                  fi %found setll
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * $updsd - Calculate values and update Sales Detail file HSP085
+      *---------------------------------------------------------------
+      *
+     C     $updsd        begsr
+      *
+     C                   eval      ttlshhd = wkhdrcvd + wkhddoa
+      *
+      * Count number of HSP085 records for the Movement Number and
+      * accumulate the Scheduled Head.
+     C                   eval      wkcount = 1
+     C                   eval      sdcount = 0
+     C                   eval      wkschd  = 0
+     C                   eval      wkshhd  = 0
+      *
+     C     svmvsn        setll     hsp085
+     C                   if        %found(hsp085)                               if %found hsp085
+      *
+     C                   dou       %eof(hsp085)                                 dou %eof hsp085
+     C     svmvsn        reade     hsp085
+     C                   if        not %eof(hsp085)                             if not %eof hsp085
+     C                   eval      sdcount += 1
+     C                   eval      wkschd  += sgschd
+     C                   endif                                                  fi not %eof hsp085
+     C                   enddo                                                  uod %eof hsp085
+      *
+     C                   endif                                                  fi %found hsp085
+      *
+      * Reread Sales Detail file for the movement number to calculate
+      * the shipped head and weight for each record.
+      *
+     C     svmvsn        setll     hsp085
+     C                   if        %found(hsp085)                               if %found hsp085
+      *
+     C                   dou       %eof(hsp085)                                 dou %eof hsp085
+     C     svmvsn        reade     hsp085
+     C                   if        not %eof(hsp085)                             if not %eof hsp085
+      *
+      * When movement is not a split, move scheduled head to shipped head
+     C                   select                                                 select
+     C                   when      sdcount = 1                                  when sdcount = 1
+     C                   eval      sgshhd = ttlshhd
+     C                   eval      sgshlb = ttlshhd * w1avlvwgt
+     C                   update    sgrec
+      *
+      * When movement is a split, calculate the shipped head and shipped
+      * weight for each group in the split.
+      *
+     C                   other
+     C                   if        wkcount = sdcount                            if wkcount
+     C                   eval      sgshhd = ttlshhd - wkshhd
+     C                   else
+      *
+     C                   eval      sgshhd = (sgschd / wkschd) * ttlshhd
+     C                   eval      wkshhd += sgshhd
+     C                   eval      wkcount += 1
+     C                   endif                                                  fi wkcount
+      *
+     C                   eval      sgshlb = sgshhd * w1avlvwgt
+     C                   update    sgrec
+     C                   endsl                                                  end select
+      *
+     C                   endif                                                  fi not %eof hsp085
+     C                   enddo                                                  uod %eof hsp085
+      *
+     C                   endif                                                  fi %found hsp085
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * $report - Print report header and detail lines
+      *---------------------------------------------------------------
+      *
+     C     $report       begsr
+      *
+      * Print page header
+     C                   if        firsttime = yes or                           if firsttime
+     C                             *inof = *on or
+     C                             svbocd <> w1bocd
+      *
+     C                   eval      svbocd = w1bocd
+     C                   eval      firsttime = no
+      *
+     C                   exsr      $boname
+     C                   except    hrhdr
+     C                   endif                                                  fi firsttime
+      *
+      ** Convert Kill Date from CCYYMMDD to MMDDYY for report
+      /free
+        wkkldt = %dec(%char(%date(w1kldt:*iso):*mdy0):6:0);
+      /end-free
+      *
+      * Retrieve the hog group code
+     C                   exsr      $group
+      *
+      * Retrieve actual Movement Status Code from Sales Header record
+     C     svmvsn        chain     hsp084
+     C                   if        %found(hsp084)                               if %found(hsp084)
+     C                   eval      wkmscd = shmscd
+     C                   else
+     C                   eval      wkmscd = *blanks
+     C                   endif                                                  fi %found(hsp084)
+      *
+      * Print detail line
+     C                   except    dtline1
+      *
+      ** If Movement Status is not SC AND not NC
+     C                   if        anyerrors = yes and                          if anyerrors
+     C                             shmscd <> 'SC' and
+     C                             shmscd <> 'NC'
+      *
+     C                   eval      errormsg = '<--- Movement Status Code not +
+     C                                        SC and NC.'
+      *
+     C                   except    dtline2
+     C                   endif                                                  fi anyerrors
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * $boname - retrieve business office name
+      *---------------------------------------------------------------
+      *
+     C     $boname       begsr
+      *
+     C     w1bocd        chain     hsp009
+     C                   if        not %found
+     C                   eval      bobods = *blanks
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * $group - retrieve hog group code
+      *---------------------------------------------------------------
+      *
+     C     $group        begsr
+      *
+     C                   eval      dthgcd = *blanks
+     C                   eval      dtblcd = *blanks
+     C                   eval      dtrmcd = *blanks
+     C                   eval      dthgsn = *zeros
+      *
+      * Extract the numeric Hog Group Code from the Group Reference field
+     C                   move      w1grpref      wkfld
+     C                   testn                   wkfld                92
+     C                   if        *in92 = *on                                  if numeric
+     C                   move      wkfld         dthgsn
+     C                   else
+     C                   z-add     *zeros        dthgsn
+     C                   endif                                                  fi numeric
+      *
+      * NOW, USING THE NUMERIC HOG GROUP NUMBER JUST
+      * EXTRACTED, RETRIEVE THE 7-ALPHA HOG GROUP CODE.
+      *
+     C                   if        dthgsn <> *zeros                             if wkhgsn
+     C     dthgsn        chain     hsl034d                            92
+     C                   if        %found(hsl034d)                              if %found
+     C                   movel     hghgcd        dthgcd
+     C                   movel     hgblcd        dtblcd
+     C                   movel     hgrmcd        dtrmcd
+     C                   else
+     C                   movel     'UNKNOWN'     dthgcd
+     C                   move      *blank        dtblcd
+     C                   move      *blank        dtrmcd
+     C                   endif                                                  fi %found
+     C                   endif                                                  fi wkhgsn
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C     *entry        plist
+     C                   parm                    anyerrors
+      *
+      * Key lists
+      *
+      *    Key list for Scheduled Load Planning HSL196B
+     C     key02         klist
+     C                   kfld                    w1bocd
+     C                   kfld                    svmvsn
+      *
+      * Set flags
+      *
+     C                   eval      anyerrors = *blank
+     C                   eval      firsttime = yes
+     C                   movel     *all'-'       dash
+      /free
+        curdate = %dec(%char(%date(udate:*mdy):*iso0):8:0);
+      /end-free
+     C                   time                    rtime
+      *
+      * Get company name abadtx from lda
+     C     ldcono        chain     caabrel3
+      *
+     C                   endsr
+      /eject
+     OQPRINT    E            HRHDR          1 01
+     O                       SDPGM               10
+     O                                          103 'HOG PRODUCTION SYSTEM'
+     O                                          188 'DATE'
+     O                       UDATE         Y    198
+      *
+     O          E            HRHDR          1
+     O                       SDUSR               10
+     O                                          102 'SCHEDULED MOVEMENTS STATUS'
+     O                                         +  1 'UPDATE'
+      *
+     O                                          188 'TIME'
+     O                       RTIME              198 '  :  :  '
+      *
+     O          E            HRHDR          1
+     O                                           20 'PLANT CODE .........'
+     O                       LDCONO              24
+     O                       ABADTX              36
+     O                                          188 'PAGE'
+     O                       PAGE          Z    198
+      *
+     O          E            HRHDR          1
+     O                                           20 'CUT-OFF KILL DATE ..'
+     O                       LDMDY         Y     30
+      *
+     O          E            HRHDR          1
+     O                                           20 'EDIT OR FINAL ......'
+     O                       LDEFDS              32
+      *
+     O          E            HRHDR          2
+     O                                           20 'BUSINESS OFFICE ....'
+     O                       W1BOCD              27
+     O                       BOBODS              59
+      *
+      *-------------------------------------------------------------
+      * COLUMN HEADINGS
+      *-------------------------------------------------------------
+      *
+     O          E            HRHDR          1
+     O                                           24 'KILL'
+     O                                           33 'BUY'
+      *
+     O          E            HRHDR          1
+     O                                            8 'MOVEMENT'
+     O                                           16 'STATUS'
+     O                                           24 'DATE'
+     O                                           34 'ORDER'
+16853O*                                          41 'LOAD'
+16853O                                           43 'LOAD'
+16853O*                                          50 'TATTOO'
+16853O                                           52 'TATTOO'
+      *
+     O          E            HRHDR          1
+     O                       DASH               198
+      *
+      *-------------------------------------------------------------
+      * DETAIL LINE 1 --- Data from HPE
+      *-------------------------------------------------------------
+      *
+     O          E            DTLINE1     1  1
+      *
+      * MOVEMENT NUMBER
+     O                       svmvsn        Z      8
+      *
+      * MOVEMENT STATUS CODE
+     O                       wkmscd              14
+      *
+      * KILL DATE
+     O                       wkkldt        Y     26
+      *
+      * BUY ORDER
+16853O*                      wkbono        z     34
+16853O                       wkbono        z     36
+      *
+      * LOAD
+16853O*                      wkboldno      z     41
+16853O                       wkboldno      z     43
+      *
+      * TATTOO NUMBER
+16853O*                      wktattoo      Z     50
+16853O                       wktattoo      Z     52
+      *
+      *
+      *-------------------------------------------------------------
+      * DETAIL LINE 2 --- Error line
+      *-------------------------------------------------------------
+      *
+     O          E            DTLINE2        1
+      *
+      * MOVEMENT NUMBER
+     O                       errormsg            90
+      *
+      *
+      *-------------------------------------------------------------
+o     * NO ERROR MESSAGE LINE
+      *-------------------------------------------------------------
+      *
+     O          E            NOERR       2
+     O                                           20 'NO ERRORS WERE FOUND'
+      *-------------------------------------------------------------
+      * NO DATA MESSAGE LINE
+      *-------------------------------------------------------------
+      *
+     O          e            nodata      2  1
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'
+      *
+      *-------------------------------------------------------------
+      * End-of-Report
+      *-------------------------------------------------------------
+      *
+     O          e            endrpt      1
+     O                                              '***** END OF REPORT *****'

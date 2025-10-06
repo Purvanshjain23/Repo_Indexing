@@ -1,0 +1,240 @@
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP2021
+      * TITLE:       Datamart FIN: Write Missing Week Records for Farm/Building/Room
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     11/01/04
+      *
+      * FUNCTION:  Batch program to update the file with missing weeks.
+      *
+      *            In March 2004 logic was added to HP221-Datamart FIN: Build Weekly Farm/
+      *            Building/Room to populate new fields in HPPF175-Farm/Building/Room with
+      *            Capacity Head and Capacity Pig Days.
+      *
+      *            But, as it turns out, when a Room does not have hogs in it for the
+      *            entire week, the file that drives our Capacity logic (file HPPF075) does
+      *            not have a record for that farm/bldg/room/week. So, we are missing
+      *            capacity data!
+      *
+      *            Alice is not sure how she wants to handle this for the long term. But,
+      *            for now, she has asked for this new program that writes records
+      *            to HPPF175 for the weeks where there were no groups in the room (ie:
+      *            for the weeks that did not have records in the driver file HPPF075.)
+      *
+      *            This new program will be run after the existing HP221 program that
+      *            initially builds the Datamart Farm/Building/Room records.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 12/27/04  LeAnne Fedor
+      *           Recompile only. New field "Farm Size" added to HPPF018 file.
+      *
+      * 01/16/06  LeAnne Fedor
+      *           Recompile only.
+      *           We have removed "Bin Set" from HSP020-Building/Rooms and put it in our new
+      *           HSP113-Rooms/Bin Sets file.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp020    if   e           k disk
+      *   Building rooms
+      *
+      *
+     Fhppf018   if   e           k disk
+      *   Datamart FIN: Farm site
+      *
+      *
+     Fhppf175   if   e           k disk
+      *    Datamart FIN: Weekly farm/building/room
+      *
+      *
+     Fhplf175a  o    e           k disk    rename(wfrec:wfreca) prefix(p2)
+      *    Datamart FIN: Weekly farm/building/room
+      *
+      *
+     Fhplf175b  if   e           k disk    rename(wfrec:wfrecb) prefix(p1)
+      *    Datamart FIN: Weekly farm/building/room
+      *
+      *
+     Fhsp3021   if   e           k disk
+      *    Workfile: Weeks in date range
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Read all farms from the Datamart Farm Site file.
+      *
+     C     *loval        setll     hppf018
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hppf018                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * For each farm, read each 'building' record. Process each Room
+      * record that is Active in each Building.
+      *
+     C                   exsr      $buildings
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *-----------------
+      * EOF processing
+      *-----------------
+      *
+     C                   seton                                        lr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Process each Building for a Farm
+      *----------------------------------------------------------------------------------
+      *
+     C     $buildings    begsr
+      *
+     C     fsfscd        setll     hsp020
+      *
+     C                   dou       *in91 = *on                                  Do bldgs
+     C     fsfscd        reade     hsp020                                 91
+     C                   if        *in91 = *off and brrmst = 'A'                If active room
+     C                   exsr      $weeks
+     C                   endif                                                  If active room
+     C                   enddo                                                  Do bldgs
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Check that the Farm/Building/Room has a record for each Week in the Workfile
+      *---------------------------------------------------------------------------------------
+      *
+     C     $weeks        begsr
+      *
+      * Process each Week in the Workfile.
+      *
+     C     *loval        setll     hsp3021
+      *
+     C                   dou       *in93 = *on                                  Do weeks
+     C                   read      hsp3021                                93
+     C                   if        *in93 = *off                                 If not eof
+      *
+      * If there is no record for this Week/Room in the Farm/Bldg/Room
+      * file, write a record.
+      *
+     C     key01         chain     hppf175                            92
+     C                   if        *in92 = *on                                  If not found
+     C                   exsr      $wrt175
+     C                   endif                                                  If not found
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do weeks
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write a Farm/building/room record for the missing week
+      *---------------------------------------------------------------
+      *
+     C     $wrt175       begsr
+      *
+      * While we will populate most fields with zero, we will retrieve/use
+      * 3 fields from:
+      *   1) the first farm/building/room record prior to this week or, when
+      *      there is no prior record,
+      *   2) the first farm/building/room record subsequent to this week
+      *
+     C     key02         setll     hplf175b
+     C     key03         readpe    hplf175b                               92
+     C                   if        *in92 = *on                                  If no prior
+     C     key02         setll     hplf175b
+     C     key03         reade     hplf175b                               92
+     C                   endif                                                  If no prior
+      *
+     C                   if        *in92 = *off                                 If anything
+     C                   move      p1wfhgcd      p2wfhgcd
+     C                   z-add     p1wfcphd      p2wfcphd
+     C                   z-add     p1wfcppd      p2wfcppd
+     C                   endif                                                  If anything
+      *
+     C                   z-add     1             p2wfgpcnt
+      *
+     C                   z-add     fsfscd        p2wffscd
+     C                   move      brblcd        p2wfblcd
+     C                   move      brrmcd        p2wfrmcd
+      *
+     C                   movel     w1wedt        p2wfwedt
+     C                   z-add     w1cdyr        p2wfcdyr
+     C                   z-add     w1cdwk        p2wfcdwk
+      *
+     C                   write     wfreca
+     C                   clear                   wfreca
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    fsfscd
+     C                   kfld                    w1cdyr
+     C                   kfld                    w1cdwk
+     C                   kfld                    brblcd
+     C                   kfld                    brrmcd
+      *
+     C     key02         klist
+     C                   kfld                    fsfscd
+     C                   kfld                    brblcd
+     C                   kfld                    brrmcd
+     C                   kfld                    w1cdyr
+     C                   kfld                    w1cdwk
+      *
+     C     key03         klist
+     C                   kfld                    fsfscd
+     C                   kfld                    brblcd
+     C                   kfld                    brrmcd
+      *
+     C                   endsr
+      /EJECT

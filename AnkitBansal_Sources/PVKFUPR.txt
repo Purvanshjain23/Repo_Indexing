@@ -1,0 +1,146 @@
+/*‚*************************************************************** */
+/*‚ PROGRAM NUMBER:  PVKFUPR                                       */
+/*‚ PROGRAM NAME:    Email unposted credit/debit memos in xlsformat*/
+/*‚                  These memos are missed by user as they are not*/
+/*‚                  visible on screen Work With Open Credit/Debit */
+/*‚                  Memos PDPHDFR                                 */
+/*‚ PROGRAMMER:      Jagdish Mistry                                */
+/*‚ CREATE DATE:     03/26/2025                                    */
+/* ‚                                                               */
+/* ‚FUNCTION:        This CL will be called from WRKJOBJS          */
+/*******************************************************************/
+/*‚ Modification History                                           */
+/*‚  Date     Pgmr     Description                                 */
+/*‚-------- ---------- --------------------------------------------*/
+/*‚                                                                */
+/*‚*****************************************************************/
+             PGM        PARM(&COMPANY)
+
+             DCL        VAR(&COMPANY) TYPE(*DEC) LEN(3 0)
+             DCL        VAR(&COMPANYC) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&SQLSTRING) TYPE(*CHAR) LEN(500)
+             DCL        VAR(&JOBDATE) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&DAYCHAR) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&JULDATC) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&JULDATC5) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&JULDAY)  TYPE(*DEC) LEN(3 0)
+             DCL        VAR(&JULYR)   TYPE(*DEC) LEN(2 0)
+             DCL        VAR(&DATE7) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&PRVDTE)  TYPE(*CHAR) LEN(6)
+             DCL        VAR(&RECORDS) TYPE(*DEC) LEN(10 0)
+             DCL        VAR(&EMAILID) TYPE(*CHAR) LEN(40)
+             DCL        VAR(&ERROR) TYPE(*CHAR) LEN(1) VALUE(' ')
+             DCL        VAR(&COMVAL) TYPE(*CHAR) LEN(10) +
+                          VALUE('UNPOSTEDME')
+
+/*‚Get job date                                                      */
+             RTVJOBA    DATE(&JOBDATE)
+             CHGVAR     VAR(&COMPANYC) VALUE(&COMPANY)
+
+/*‚Get distribution list                                             */
+             CALL       PGM(POMTXFR) PARM((' ') (&COMPANY) (&COMVAL) +
+                          (&EMAILID))
+
+/*‚Get Previous date                                                 */
+             CALLSUBR   SUBR(GETPRVDATE)
+
+/*‚Find unposted credit/debit memos to be posted manually...         */
+             CALLSUBR   SUBR(FNDUNPOST)
+
+/*‚Send the final email with MEMOS's needing screen correction      */
+             IF         COND(&ERROR *EQ ' ') THEN(DO)
+             RTVMBRD    FILE(QTEMP/HEADER) NBRCURRCD(&RECORDS)
+             IF         COND(&RECORDS *GT 0) THEN(DO)
+             SEQUEL/EXECUTE SQL('SELECT * FROM QTEMP/HEADER') +
+                          PCFMT(*XLS) RECIPIENT(&EMAILID) +
+                          EMLMSG('Post Credit/Debit Memo using +
+                          screen Work With Open Credit/Debit +
+                          Memos.') TEXT('Memos Correction report')
+             ENDDO
+             IF         COND(&RECORDS *EQ 0) THEN(DO)
+             ESEND/ESNDMAIL RECIPIENT(&EMAILID) SUBJECT('***No Memos +
+                          are selected for Manual Posting Correction +
+                          ***') MSG('No memos are available for +
+                          correction today.')
+             ENDDO
+             ENDDO
+/*-------------------------------------------------------------------*/
+/*‚Find unposted credit/debit memos to be posted manually...         */
+/*-------------------------------------------------------------------*/
+             SUBR       SUBR(FNDUNPOST)
+
+             DLTF       FILE(QTEMP/HEADER)
+             MONMSG     MSGID(CPF0000)
+             CHGVAR     VAR(&SQLSTRING) VALUE(' ')
+             CHGVAR     VAR(&SQLSTRING) VALUE('CREATE TABLE +
+                          QTEMP/HEADER AS (SELECT * FROM +
+                          OPBFCPP WHERE ORDER_TYPE_SALES IN +
+                          (''CM'',''CB'',''DM'',''DB'+
+                          ') AND HEADER_STATUS =''A'' AND +
+                          ORDER_DATE <' || &DATE7 || ' AND +
+                          ORDER_TYPE_PRINT_STATUS IN ('' ''+
+                          ,''N'') AND (COMPANY_NUMBER +
+                          ,ATTACH_TO_ORDER_NUMBER) IN (SELECT +
+                          COMPANY_NUMBER,ORDER_NUMBER FROM OPBFCPP +
+                          WHERE HEADER_STATUS =''C'' AND COMPANY_NUMBER +
+                          = ' || &COMPANYC|| ')) WITH DATA')
+             CALLSUBR   SUBR(CMDRUNSQL)
+
+             ENDSUBR
+/*‚--------------------------------------------------------------- */
+/*‚Get Previous date Logic job date - 7DAYS                        */
+/*‚Consider date as 1225YY in 1st seven days of January            */
+/*‚--------------------------------------------------------------- */
+             SUBR       SUBR(GETPRVDATE)
+
+             CVTDAT     DATE(&JOBDATE) TOVAR(&JULDATC) FROMFMT(*MDY) +
+                          TOFMT(*JUL)
+             CHGVAR     VAR(&JULYR)  VALUE(%SST(&JULDATC 1 2))
+             CHGVAR     VAR(&JULDAY) VALUE(%SST(&JULDATC 4 3))
+
+             SELECT
+
+             WHEN       COND(&JULDAY *GT 7) THEN(DO)
+             CHGVAR     VAR(&JULDAY) VALUE(&JULDAY - 7)
+             CHGVAR     VAR(&DAYCHAR) VALUE(&JULDAY)
+             CHGVAR     VAR(&JULDATC5) VALUE(%CHAR(&JULYR) *TCAT +
+                          &DAYCHAR)
+             CVTDAT     DATE(&JULDATC5) TOVAR(&DATE7) FROMFMT(*JUL) +
+                          TOFMT(*CYMD) TOSEP(*NONE)
+             ENDDO
+
+             WHEN       COND(&JULDAY *LE 7) THEN(DO)
+             CHGVAR     VAR(&JULYR) VALUE(&JULYR - 1)
+             CHGVAR     VAR(&PRVDTE) VALUE('1225' *CAT %CHAR(&JULYR))
+             CVTDAT     DATE(&PRVDTE) TOVAR(&DATE7) FROMFMT(*MDY) +
+                          TOFMT(*CYMD) TOSEP(*NONE)
+             ENDDO
+             ENDSELECT
+
+             ENDSUBR
+/*‚--------------------------------------------------------------- */
+/*‚Process to execute RUNSQL                                       */
+/*‚--------------------------------------------------------------- */
+             SUBR       SUBR(CMDRUNSQL)
+
+             RUNSQL     SQL(&SQLSTRING) COMMIT(*NONE)
+             MONMSG     MSGID(SQL0000 SQ20000 SQ30000) EXEC(DO)
+             CALLSUBR   SUBR(SNDERROR)
+             CHGVAR     VAR(&ERROR) VALUE('Y')
+             ENDDO
+
+             ENDSUBR
+/*‚--------------------------------------------------------------- */
+/*‚Send error notification if Sql query fails                      */
+/*‚--------------------------------------------------------------- */
+             SUBR       SUBR(SNDERROR)
+
+             ESEND/ESNDMAIL RECIPIENT(&EMAILID) SUBJECT('***Error +
+                          for Unposted Credit/Debit Memo job +
+                          FNDUNPOSTD***') MSG('Search unposted +
+                          Credit/Debit Memos to be posted manually +
+                          are included in this report job.Action is +
+                          required for Failed job.')
+
+             ENDSUBR
+ EXIT:       ENDPGM

@@ -1,0 +1,827 @@
+     **
+     **  PROGRAM NUMBER  -> EC200
+     **
+     **  PROGRAM NAME    -> BUILD INVOICE WORKFILE
+     **
+     **  PROGRAM PURPOSE -> THIS PROGRAM RECEIVES CO AND ORDER # TO
+     **                     READ THE HISTORY FILE AND RETREIVE ALL THE
+     **                     LINE ITEM DATA AND WRITE IT TO A WORKFILE
+     **                     FROM WHICH THE INVOICE WILL BE CREATED AND
+     **                     SENT EDI.
+     **
+     **  PROGRAMMER      -> SHARON ZURN             DATE  -> 05/11/99
+     **
+     **  MODIFIED BY
+     **  10/26/00 PKD 1) CHANGED PROGRAM TO USE CUSTOMER ELECTRONIC
+     **               COMMERCE FILE FOR RETRIEVING TRADING PARTNER
+     **               INFORMATION INSTEAD OF COMPANY/CUSTOMER ELECTRONIC
+     **               COMMERCE FILE.
+     **               2) CHANGED APPLICATION TO WORK FOR PORK INSTEAD OF
+     **                  POULTRY.
+     **  04/13/01 RMC FOR ALTERNATE REMITTANCE ADDRESS, GET CUSTOMER
+     **               ALT REMIT FLAG FROM COMPANY/CUSTOMER FILE AND
+     **               THE ADDRESS FROM THE NEW A/R REMITTANCE ADDR FILE
+     **   SCAN  RMC0413
+     **  04/29/02 PKD SELECT ONLY ITEMS WITH SHIPPED QUANTITY GREATER
+     **               THEN ZERO.
+     **  01/11/06 SLM NAME FOR THE REMIT NAME IS IN THE REMITTANCE FILE
+     **               POA7REL1.
+     **  02/13/06 PKD IF UNIT OF MEASURE IS CS, HS, OR EA, THEN SEND
+     **               QUANTITY IN DQTYIN, ELSE SEND WEIGHT.
+     **  05/25/06 RMC ALWAYS USE 360 TO GO TO COMPANY NAME/ADDR FOR UPC
+     **  08/10/06 RMC GET DPITNO FROM POBIREP-CUST ITEM REF FILE
+     **               IF THE CUST ITEM REF IS "Y" IN CUSTOMER FILE.
+     **   SCAN  RMC0810
+     **  06/19/07 RMC RECOMP FOR PDNEREP DB CHANGE - BROKER REMOVED
+     **
+     **   SCAN  TPA071007
+     **  07/10/07 TPA  REMIT DUNS NUMBER MOVED FROM THE CUSTOMER EXT FILE
+     **                TO THE A/R REMITTANCE ADDRESS FILE
+     **
+     **  07/26/07 RMC DLY029 - FROM HISTORY DETAIL ACCRUAL PDICCPP:
+     **               UPDATE DISC/ALLOWANCE IN HEADER AND DTL,
+     **               UPDATE SALES TAX IN HEADER IF APPLICABLE.
+     **   SCAN  RMC0726
+     **  02/07/08 PKD FP1274 - IF UNIT OF MEASURE FOR PRICING IS CW,
+     **               THEN CONVERT IT TO LB.
+     **  04/10/08 SAZ FP1284   ADDED CATCH WEIGHT FLAG TO ECP200.
+     **               ADD CODE TO POPULATE FIELD
+     **  09/03/09 SAZ CHANGED ITEM REF STS FLAG TO I P B N INSTEAD OF
+     **               Y & N.I=INV, P=PO, B=BOTH, N=NONE
+     **  10/26/09 PKD ADDED CUSTOMER CHARGE ACCRUAL TO THE HEADER AND
+     **               DETAIL PROCESS.
+     **  12/14/09 SAZ TRADE PARTNER DAFS REQUESTED THE ITD02 TO READ
+     **               '01' INSTEAD OF ' 1'. ADDED CODE TO SPECIFICALLY
+     **               SEND '01' FOR DAFS ONLY.        (F335)
+     **  08/01/10 SAZ ADD SHIP FROM RECORD FOR ASSOCIATED GROCERS
+     **  03/15/11 SAZ SPARTAN REQUESTED CARRIER NAME FOR THE G27
+     **               SEGMENT 05 ELEMENT. ADD FIELDS TO ECP001
+     **  03/15/11 SAZ HANNAFORD REQUESTED PACK INFORMATON FOR THE P04
+     **               SEGMENT ADD FIELDS TO ECP002
+     ******************************************************************
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FOMHSTPL9IF  E           K        DISK
+      *SALES HISTORY   KEY: CO, ORDER #
+      *
+     FPDNEREL1IF  E           K        DISK
+      *CUSTOMER EXT                        FILE KEY: CO, CUST
+      *
+     FCABBREL1IF  E           K        DISK
+      *CUSTOMER
+      *
+     FCAABREL1IF  E           K        DISK
+      *COMPANY
+      *
+     F*CAAQREL1IF  E           K        DISK
+      *COMPANY DEFAULTS
+      *
+     FCAAOREL1IF  E           K        DISK
+      * TERMS
+      *
+     FOMCQWKL1IF  E           K        DISK
+      *OM ORDER FINANCE WRKFILE   KEY: CO, ORDER #, SEQ #
+      *
+     FCABZREL1IF  E           K        DISK
+      *COMPANY/ITEM               KEY: CO, ITEM CODE
+      *
+     FCAEOREL1IF  E           K        DISK
+      *COMPANY/CUSTOMER           KEY: CO,SHIP TO            RMC0413
+      *
+     FPOA7REL1IF  E           K        DISK
+      *A/R REMITTANCE ADDRESS    KEY: REMITTANCE FLAG
+      *
+     FPOBIREL1IF  E           K        DISK
+      *CUSTOMER ITEM REFERENCE   KEY: SHIP TO CUST / ITEM    RMC0810
+      *
+     FPDICCPL1IF  E           K        DISK
+      *HISTORY DTL ACCRUAL        KEY: CO,ORDER,SEQ,SEC SEQ  RMC0726
+      *
+     FOMBYREL1IF  E           K        DISK
+      *ITEM DEFAULT              KEY: ITEM                   SAZ080410
+      *
+     FPDKMREL1IF  E           K        DISK
+      *COMPANY VALUES                                        SAZ08042010
+      *
+     FOMFFREL0IF  E           K        DISK
+      *CARRIER                   KEY: CARRIER CODE
+      *
+     FECP001  O   E                    DISK
+      *EDI INVOICE HEADER WORK FILE
+      *
+     FECP002  O   E                    DISK
+      *EDI INVOICE DETAIL WORK FILE
+      *
+     FECP003  O   E                    DISK
+      *EDI INVOICE NAME WORK FILE
+      *
+      *ARRAYS TO CONCAT DUNS AND WAREHOUSE TOGETHER.
+     E                    A20        20  1
+     E                    A40        40  1
+      *
+     I           IDS
+      *                                       1  13 UPCCDE
+      *                                       1   1 UPC1
+      *                                       2   8 UPC2
+      *                                       9  13 UPC3
+      *
+     I                                        1  12 UPCCDE
+     I                                        1   7 UPC2
+     I                                        8  12 UPC3
+      *
+     I           IDS
+     I                                        1  20 DUNSST
+     I                                        1   9 DUN
+     I                                       10  13 SFX
+     I                                       14  20 FILL1
+      *
+     I           IDS
+     I                                        1  20 DUNSBT
+     I                                        1   9 DUNBT
+     I                                       10  13 SFXBT
+     I                                       14  20 FILL2
+      *
+     I              'DUNSNUM'             C         DUNS
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+     C                     MOVE *OFF      FIRST   1
+     C                     MOVE *OFF      PROCSS  1
+      *CLEAR WORK FIELDS
+     C                     Z-ADD*ZEROS    WKFRT            FRT AMT
+     C                     Z-ADD*ZEROS    WKWGTI           WEIGHT
+     C                     Z-ADD*ZEROS    WKAMTI           AMOUNT
+     C                     Z-ADD*ZEROS    WKQTYI           QUANTITY
+     C                     Z-ADD*ZEROS    HLITCT           LINE ITEM COUNT
+      *
+      *
+      *READ ALL THE HISTORY DETAIL RECORDS
+      *
+     C           KEYOMH    SETLLOMHSTPL9
+     C           *IN99     DOUEQ*ON                        DO READE
+     C           KEYOMH    READEOMHSTPL9                 99
+     C           *IN99     IFEQ *OFF                       IF REC READ
+      *
+      *************************  DO THIS ROUTINE ONCE **********************
+      *
+     C           FIRST     IFEQ *OFF
+      *
+      *GET THE PO SURROGATE NUMBER TO TIE THE RECORDS TOGETHER
+     C                     Z-ADDF4CONB    NPOSUR           INVOICE NUMBER NAME
+     C                     Z-ADDF4CONB    DPOSUR           INVOICE NUMBER DETAIL
+     C                     Z-ADDF4CONB    HPOSUR           INVOICE NUMBER HEADER
+      *
+      *CHAIN TO THE CUSTOMER EXT FILE TO RETRIEVE THE DUNS
+      *NUMBER FOR THE SHIP TO CUSTOMER FOR THE ORDER
+     C                     Z-ADDF4BKC7    KCUST   70       SHIPTO CUSTOMER #
+     C           KEYEC     CHAINPDNEREL1             89
+     C           *IN89     IFEQ *OFF                       IF REC READ
+      *
+      *MOVE SHIP TO DUNS NUMBER TO DATA STRUCTURE
+     C                     MOVELNEU5TX    DUNSST           SHIPTO DUNS+SUFFIX
+     C                     MOVELDUN       HCEDID           DUNS NUMBER
+      *
+      *SET PROCSS TO ON TO CONTINUE PROCESSING
+     C                     MOVE *ON       PROCSS
+     C                     ENDIF                           *IN89 OFF
+      *
+      *CHAIN TO THE CUSTOMER ELECTRONIC COMM X-REF FILE TO RETRIEVE TRADING
+      *PARTNER CODE AND THE REMIT TO DUNS NUMBER FOR THE AR CUSTOMER FOR
+      *THE ORDER.
+     C                     Z-ADDF4ANC7    KCUST   70       AR CUSTOMER #
+     C           KEYEC     CHAINPDNEREL1             89
+     C           *IN89     IFEQ *OFF                       IF REC READ
+      *
+      *MOVE TRADING PARTNER CODE TO HEADER FIELD
+     C                     MOVE NEJ5NX    HTPCD            TRADING PARTNER CODE
+     C                     MOVELNEU5TX    DUNSBT           BILL TO DUNS+SUFFIX
+     C                     ENDIF                           *IN89 OFF
+      *
+      *PROCESS THE NAME RECORD
+     C                     EXSR $NAME
+      * SETON FIRST
+     C                     MOVE *ON       FIRST
+     C                     ENDIF                           FIRST OFF
+      *
+      **********************************************************************
+      *
+     C           PROCSS    IFEQ *ON
+      *
+      *WRITE A RECORD FOR EVERY DETAIL
+      *PROCESS THE DETAIL RECORD
+     C                     EXSR $DETL
+     C                     ENDIF                           PROCESS=ON
+     C                     ENDIF                           *IN99       S
+     C                     ENDDO                           END DO
+      *
+      *WRITE A RECORD FOR THE HEADER
+      *
+     C           PROCSS    IFEQ *ON
+     C                     EXSR $SUMM
+     C                     ENDIF
+      *
+      *EOF PROCESSING
+     C                     RETRN
+      /EJECT
+      ****************************************************************
+      * SUBROUTINES
+      ****************************************************************
+      *---------------------------------------------------------------
+      * $NAME- GET THE REMIT TO, BILL TO, AND SHIP TO ADDRESSES
+      *---------------------------------------------------------------
+     C           $NAME     BEGSR
+      *
+      *SHIP TO CUSTOMER
+     C                     MOVE 'ST '     NNTYPC           SHIP TO
+     C                     MOVE *BLANKS   NADD1
+     C                     MOVE *BLANKS   NADD2
+      *
+     C           F4BKC7    CHAINCABBREL1             88
+     C           *IN88     IFEQ *OFF
+     C                     MOVELBBACNA    NADD1            ADDRESS
+      *
+     C           BBADNA    IFNE *BLANKS
+     C                     MOVELBBADNA    NADD2            ADDRESS
+     C                     ENDIF
+     C                     ENDIF
+      *
+     C                     MOVELF4BRTX    NNAME            NAME
+     C                     MOVEL9         NIDCDQ           ID CODE QUALIFIER
+     C                     MOVE *BLANKS   NNAME1
+     C                     MOVE *BLANKS   NNAME2
+     C                     MOVELF4HNNA    NCITY
+     C                     MOVE F4DBCD    NSTATE
+     C                     MOVELF4CKTX    NZIP
+     C                     MOVELDUNSST    NIDCDE           SHIPTO DUNS+SUFFIX
+     C                     MOVELBBQYST    SVQYST  1        SHIPTO CUST ITEM REF
+      *
+     C                     WRITEECR003
+      *
+      *BILL TO (A/R CUST)
+     C                     MOVEL'BT '     NNTYPC           BILL TO
+     C                     MOVE *BLANKS   NADD1
+     C                     MOVE *BLANKS   NADD2
+      *
+     C           F4ANC7    CHAINCABBREL1             86
+     C           *IN86     IFEQ *OFF
+     C                     MOVELBBACNA    NADD1            ADDRESS
+      *
+     C           BBADNA    IFNE *BLANKS
+     C                     MOVELBBADNA    NADD2            ADDRESS
+     C                     ENDIF
+     C                     ENDIF
+      *
+     C                     MOVELF4AQTX    NNAME
+     C                     MOVEL9         NIDCDQ           ID CODE QUALIFIER
+     C                     MOVELDUNSBT    NIDCDE           BILL TO DUNS+SUFFIX
+     C                     MOVEL*BLANKS   NNAME1
+     C                     MOVE *BLANKS   NNAME2
+     C                     MOVELF4MONA    NCITY
+     C                     MOVELF4RJCD    NSTATE
+     C                     MOVELF4GPTX    NZIP
+      *
+     C                     WRITEECR003
+      *
+      *GET THE REMIT NAME (OUR BILLING ADDRESS)
+      *
+     C                     MOVE 'RE '     NNTYPC           REMIT TO
+     C                     MOVE *BLANKS   NADD1
+     C                     MOVE *BLANKS   NADD2
+     C                     MOVE *BLANKS   NNAME
+      *
+     C                     Z-ADD000       CMPUPC  30
+     C           CMPUPC    CHAINCAABREL1             88
+     C           *IN88     IFEQ *OFF
+     C************         MOVELABADTX    NNAME
+      *FEDERAL TAX ID FIELD
+     C                     MOVELABA2NA    UPC2
+     C                     ENDIF
+     C** BEGIN: RMC0413
+      *REMIT TO ADDRESS
+     C*
+     C*          F4AIC3    CHAINCAAQREL1             87
+     C*          *IN87     IFEQ *OFF
+     C*                    MOVELAQJ7NA    NADD1            ADDRESS
+     C*                    MOVELAQKANA    NCITY
+     C*                    MOVELAQLWCD    NSTATE
+     C*                    MOVELAQEJTX    NZIP
+     C*          AQJ8NA    IFNE *BLANKS
+     C*                    MOVELAQJ8NA    NADD2            ADDRESS
+     C*                    ENDIF
+     C*                    ENDIF
+      ***
+      *  GET REMITTANCE ADDRESS FLAG FROM COMPANY/CUSTOMER
+     C                     MOVEL*BLANKS   NNAME
+     C           KEYEO     CHAINCAEOREL1             88
+     C           *IN88     IFEQ *OFF
+     C           EOQGST    IFNE ' '
+     C           EOQGST    CHAINPOA7REL1             50
+     C           *IN50     IFEQ *OFF
+     C                     MOVELA7HQT1    NNAME
+     C                     MOVELA7PJNA    NADD1            ADDRESS
+     C                     MOVELA7PMNA    NCITY
+     C                     MOVELA7YNTX    NSTATE
+     C                     MOVELA7YOTX    NZIP
+     C** BEGIN: TPA071007
+     **         REMIT DUNS NUMBER NOW ON A/R REMITTANCE ADDRESS
+     **         SO MOVE IT HERE
+     C                     MOVE A7KYT1    NIDCDE           REMIT TO DUNS+SUFFIX
+     C** END: TPA071007
+      *
+     C           A7PKNA    IFNE *BLANKS
+     C                     MOVELA7PKNA    NADD2            ADDRESS
+     C                     ENDIF
+     C                     ENDIF
+     C                     ENDIF
+     C                     ENDIF
+     C** END: RMC0413
+      *
+      *MOVE THE REMIT TO CUSTOMER DUN NUMBER TO FIELD
+     C                     MOVEL9         NIDCDQ           ID CODE QUALIFIER
+     C** BEGIN: TPA071007
+     **         REMIT DUNS NUMBER MOVED ABOVE SO LINE COMMENTED OUT
+     C*                    MOVE NEW0TX    NIDCDE           REMIT TO DUNS+SUFFIX
+     C** END: TPA071007
+      *
+     C                     MOVE *BLANKS   NNAME1
+     C                     MOVE *BLANKS   NNAME2
+      *
+     C                     WRITEECR003
+      *
+      *SHIP FROM CUSTOMER
+      *
+     C** BEG: SZ08042010
+      *ASSGRC HAS REQUESTED A SHIP FROM RECORD.
+     C           HTPCD     IFEQ 'ASSGRC'
+     C                     MOVE 'SF '     NNTYPC           SHIP TO
+     C                     MOVE *BLANKS   NADD1
+     C                     MOVE *BLANKS   NADD2
+      *
+      *RTV COMPANY ADDRESS    RT - COMPANY NAME AND ADDRESS  *
+     C           PCO       CHAINCAABREL1             88
+     C           *IN88     IFEQ *OFF
+     C                     MOVELABACNA    NADD1            ADDRESS
+      *
+     C           BBADNA    IFNE *BLANKS
+     C                     MOVELABADNA    NADD2            ADDRESS
+     C                     ENDIF
+      *
+      *RTV ALPHA VALUE        RT - COMPANY VALUES  *
+     C           KEYPDK    CHAINPDKMREL1             88
+     C           *IN88     IFEQ *OFF
+     C                     MOVELKMBXTX    WKDCDE 20
+     C                     MOVE PCO       WKCO    4
+     C           WKDCDE    CAT  WKCO      WKDCDE
+     C                     MOVELWKDCDE    NIDCDE           DUNS NUMBER      X
+     C                     ENDIF
+      *
+     C                     MOVELABADTX    NNAME            NAME
+     C                     MOVEL9         NIDCDQ           ID CODE QUALIFIER
+     C                     MOVE *BLANKS   NNAME1
+     C                     MOVE *BLANKS   NNAME2
+     C                     MOVELABAJNA    NCITY
+     C                     MOVE ABBGCD    NSTATE
+     C                     MOVELABBTTX    NZIP
+      *
+     C                     MOVELBBQYST    SVQYST  1        SHIPTO CUST ITEM REF
+      *
+     C                     WRITEECR003
+     C                     ENDIF
+     C                     ENDIF
+     C** END: SZ08042010
+      *
+     C                     ENDSR
+      *---------------------------------------------------------------
+      * $DETL- GET THE DETAIL RECORDS
+      *---------------------------------------------------------------
+     C           $DETL     BEGSR
+     C                     CLEARDUOM
+     C                     CLEARDSHUOM
+      *
+     C                     Z-ADDF4DPNB    DOSEQ1           ORDER SEQ #
+     C                     Z-ADDF4UENB    DOSEQ2           ORDER SEC SEQ #
+      *
+      *SHIPPED INFO
+     C                     MOVEL'CA'      DSHUOM           UOM ORDERED
+     C                     Z-ADDF4EXQT    DUNSHP           QTY BILLED
+      *
+      *BILLING INFO
+     C                     MOVELF4CRCD    DUOM             UM - BASE PRICE
+     C           F4CRCD    IFEQ 'CS'
+     C           F4CRCD    OREQ 'HS'
+     C           F4CRCD    OREQ 'EA'
+     C                     Z-ADDF4EXQT    DQTYIN           QTY BILLED
+     C                     ELSE
+     C                     Z-ADDF4BYWG    DQTYIN           WGT BILLED
+     C                     ENDIF
+      *
+      *ACCUMULATE QTY INVOICED
+     C                     ADD  F4EXQT    WKUNSH 152       QTY BILLED
+      *
+      *ACCUMULATE QTY SHIPPED
+     C                     ADD  F4EXQT    WKQTYI 152       QTY BILLED
+      *
+      *ACCUMULATE WGT INVOICED
+     C                     ADD  F4BYWG    WKWGTI 152       WGT BILLED
+      *
+      *ACCUMULATE AMT INVOICED
+     C                     ADD  F4AYVA    WKAMTI 152       EXTENDED QUANTITY
+      *
+      *PRICING INFO
+     C           F4CRCD    IFEQ 'CW'
+     C                     MOVEL'LB'      DBUPRC           UM - BASE PRICE
+     C           F4AKPR    DIV  100       DUPRC     H
+     C                     ELSE
+     C                     Z-ADDF4AKPR    DUPRC            UNIT PRICE
+     C                     MOVELF4CRCD    DBUPRC           UM - BASE PRICE
+     C                     ENDIF
+      *
+      *UPC CODE
+     C                     MOVE *BLANKS   DUPCNO
+      *
+     C                     MOVELF4S5NB    KITEM            ITEM CODE
+     C           KEYITM    CHAINCABZREL1             83
+     C           *IN83     IFEQ *OFF
+     C*          BZAVST    IFEQ 'Y'
+     C*                    MOVE '9'       UPC1             CATCH WEIGHT
+     C*                    ELSE
+     C*                    MOVE '1'       UPC1             STANDARD WEIGHT
+     C*                    ENDIF
+     C                     Z-ADDF4S5NB    WRKCDE  50       ITEM CODE
+     C                     MOVE WRKCDE    UPC3
+     C                     MOVELUPCCDE    DUPCNO           UPC CODE
+     C                     ELSE
+     C                     MOVEL*BLANKS   DUPCNO           UPC CODE
+     C                     ENDIF
+      *
+     C                     MOVE 'UA'      DUPCCQ
+      *
+      *PURCHASER'S (THEIR) CODE                            RMC0810
+     C                     MOVE *BLANKS   DPITNO
+     C***        SVQYST    IFEQ 'Y'                        IF CUST ITM REF IS Y
+     C           SVQYST    IFEQ 'I'                        IF CUST ITM REF IS Y
+     C           SVQYST    OREQ 'B'                        IF CUST ITM REF IS Y
+     C                     MOVELF4BKC7    BIBKC7           SHIP TO
+     C                     MOVELF4S5NB    BIHGCD           ITEM CODE
+     C           KEYBI     CHAINPOBIREL1             95
+     C           *IN95     IFEQ '0'
+     C                     MOVELBICOAA    DPITNO
+     C                     ENDIF
+     C                     ENDIF
+     C           DPITNO    IFEQ *BLANKS
+     C                     MOVE *BLANKS   DPICDQ
+     C                     ELSE
+     C                     MOVE 'PI'      DPICDQ
+     C                     ENDIF
+      *
+      *VENDOR'S (OUR) CODE
+     C                     MOVELF4S5NB    DVITNO           ITEM CODE
+     C           DVITNO    IFEQ *BLANKS
+     C                     MOVE *BLANKS   DVICDQ
+     C                     ELSE
+     C                     MOVE 'VN'      DVICDQ
+     C                     ENDIF
+      *
+      *F=FREEFORM PRODUCT DESCRIPTION
+     C                     MOVE 'F'       DIDTYP
+     C                     MOVELF4G7NA    DIDESC           ORDER DESC. LINE ONE
+      *
+      *SERVICE PROMOTION,ALLOW, CHARGE INFO ?????????
+      *
+     C                     MOVE *BLANKS   DALLCD           NONE
+     C                     Z-ADD*ZEROS    DSPSCC
+     C                     Z-ADD*ZEROS    DALAMT
+     C                     Z-ADD*ZEROS    DALRTE
+     C                     MOVE *BLANKS   DTMDDU
+     C                     Z-ADD*ZEROS    WKDA   112
+     C                     Z-ADD*ZEROS    WKRB   112
+     C                     Z-ADD*ZEROS    WKCC   112
+      **********
+      ** GET THE CATCH WEIGHT STATUS FROM ITEM DEFAULT.
+      **********
+     C                     MOVELF4S5NB    KITEM            ITEM CODE
+     C           KITEM     CHAINOMBYREL1             83
+     C           *IN83     IFEQ *OFF
+     C                     MOVE BYAVST    DTCTWT
+      **********
+      *GET PACKAGES PER CASE AND PKG LEVEL SIZE
+      **********
+ SZ  C                     MOVE BYCJNB    DPACKL           PKG LEVEL SZ
+ SZ  C                     MOVE BYILNB    DPACK            PKG PER CASE
+     C                     ENDIF
+      *
+      ******
+      * DLY029 RMC0726 IF ALLOW/REBATES EXIST IN HISTORY DTL ACCRUAL PDICCPP,
+      * AND IF INVOICE PRINT TYPE IS ITEM, THEN ACCUM HERE
+      ******
+     C                     SETOF                     73
+     C           KEYICC    SETLL@ICCPS0
+     C           *IN73     DOWEQ'0'
+     C           KEYICC    READE@ICCPS0                  73
+     C           *IN73     IFEQ '0'
+     C           ICQSSX    IFEQ 'IT'
+     C           ICOKCD    IFEQ 'DA'
+     C                     ADD  ICAYVA    WKDA
+     C                     END
+     C           ICOKCD    IFEQ 'CC'
+     C                     ADD  ICAYVA    WKCC
+     C                     END
+     C           ICOKCD    IFEQ 'RB'
+     C                     ADD  ICAYVA    WKRB
+     C                     END
+     C                     END
+     C                     ENDIF
+     C                     ENDDO
+      ******
+     C                     Z-ADDWKDA      DALAMT           DISC/ALLOW
+     C                     ADD  WKRB      DALAMT           REBATE
+     C                     ADD  WKCC      DALAMT           CUST CHARGE
+     C           WKDA      IFNE 0
+     C                     MOVE 'DA'      DTMDDU
+     C                     END
+     C           WKRB      IFNE 0
+     C                     MOVE 'RB'      DTMDDU
+     C                     END
+     C           WKCC      IFNE 0
+     C                     MOVE 'CC'      DTMDDU
+     C                     END
+      ******
+     C           DQTYIN    IFNE *ZEROS                     WGT BILLED>0
+     C                     WRITEECR002
+      *COUNT THE NUMBER OF LINE ITEMS
+     C                     ADD  1         HLITCT
+     C                     ENDIF
+      *
+     C                     ENDSR
+      *---------------------------------------------------------------
+      * $SUMM- GET THE SUMMARY
+      *---------------------------------------------------------------
+     C           $SUMM     BEGSR
+      *EDI PROCESSED FLAG
+     C                     MOVEL'N'       HPFLAG
+      *
+     C                     MOVELF4ANC7    HVENDR           VENDOR #
+     C                     MOVELSFX       HWARHS           WAREHOUSE
+      *INVOICE TYPE
+     C                     MOVEL'O'       HINVTY           O=ORIGINAL
+      *INVOICE DATE & NUMBER
+     C                     Z-ADDF4AWDT    HINVDT           INVOICE DATE
+     C                     MOVELF4CONB    HINVNO           INVOICE NUMBER
+      *PURCHASE ORDER DATE & NUMBER
+     C                     Z-ADDF4A0DT    HPODTE           SCHEDULED SHIP DATE
+     C                     MOVELF4BCNA    HPONO            CUST PO NUMBER
+      *TEST
+     C*                    MOVEL888888    HPONO            CUST PO NUMBER
+      *
+      *************ITD-TERMS OF SALES/DEFERED TERMS OF SALE*************
+      *
+      *RETRIEVE CUSTOMER TERMS INFORMATION
+     C                     MOVE F4AQCD    HTMTCD           TERMS CODE
+      *
+     C           HTPCD     IFEQ 'DAFS  '
+     C                     MOVE '01'      HTMDCD           BASIS DATE CODE
+     C                     ELSE
+     C                     MOVE ' 1'      HTMDCD           BASIS DATE CODE
+     C                     ENDIF
+      *
+     C                     MOVE F4AQCD    KTERMS           TERMS CODE
+     C           KEYTRM    CHAINCAAOREL1             84
+     C           *IN84     IFEQ *OFF
+     C                     MOVELAOAUNA    HTMDSC           TERMS DESC
+     C                     Z-ADDAOA4PC    HTMDPC           TERMS DISCOUNT PCT
+     C                     Z-ADDAOANDY    HTMNDY           TERMS NET DAYS
+     C                     Z-ADDAOANDY    HTMNDY           TERMS DISCOUNT DAYS
+     C                     ELSE
+     C                     MOVE *BLANKS   HTMDSC           TERMS DESC
+     C                     Z-ADD*ZEROS    HTMDPC           TERMS DISCOUNT PCT
+     C                     Z-ADD*ZEROS    HTMNDY           TERMS NET DAYS
+     C                     Z-ADD*ZEROS    HTMNDY           TERMS DISCOUNT DAYS
+     C                     ENDIF
+      *
+      *CALCULATE DUE DATE
+     C                     Z-ADDF4AIC3    P1AIC3  30       COMPANY NUMBER
+     C                     MOVE F4AQCD    P1AQCD  2        TERMS CODE
+     C                     Z-ADD*ZEROS    P1ASDT  70       DISCOUNT DUE DATE
+     C                     Z-ADD*ZEROS    P1ATDT  70       NET DUE DATE
+     C                     Z-ADDF4GNDT    P2A9DT  70       ACTUAL SHIP DATE
+     C                     Z-ADDWKAMTI    P3BSVA 112       ORDER VALUE TOTAL
+     C                     Z-ADD*ZEROS    P4AWVA 112       DISCOUNT AMOUNT
+      *
+     C                     CALL 'CAC9XFR'
+     C                     PARM           P0RTN   7
+     C                     PARM           P1AIC3           COMPANY NUMBER
+     C                     PARM           P1AQCD           TERMS CODE
+     C                     PARM           P1ASDT           DISCOUNT DUE DATE
+     C                     PARM           P1ATDT           NET DUE DATE
+     C                     PARM           P2A9DT           ACTUAL SHIP DATE
+     C                     PARM           P3BSVA           ORDER VALUE TOTAL
+     C                     PARM           P4AWVA           DISCOUNT AMOUNT
+      *
+     C           P0RTN     IFEQ *BLANKS
+     C                     Z-ADDP1ATDT    HTMNDT           NET DUE DATE
+     C                     Z-ADDP4AWVA    HTMDAM           DISCOUNT AMOUNT
+     C           HTMDPC    IFEQ *ZEROS
+     C                     Z-ADD*ZEROS    HTMDDT           DISCOUNT DUE DATE
+     C                     ELSE
+     C                     Z-ADDP1ASDT    HTMDDT           DISCOUNT DUE DATE
+     C                     ENDIF
+     C                     ENDIF
+      *
+      *
+      ***************************                                      *
+      *SHIPMENT METHOD OF PAYMENT
+      ***************************                                      *
+     C                     SELEC
+     C           F4Q2CD    WHEQ 'PT'                       SHIPPING METHOD
+     C           F4Q2CD    OREQ 'PR'                       SHIPPING METHOD
+     C                     MOVE 'PP'      HMOPAY           PREPAID
+ SZ  C                     MOVE 'M'       HTRTYP
+     C                     OTHER
+ SZ  C                     MOVE 'CC'      HMOPAY           COLLECT
+ SZ  C                     MOVE 'H'       HTRTYP
+     C                     ENDSL
+      *
+      ******************************************
+      *RETRIEVE THE CARRIER NAME BY CARRIER CODE.
+      ******************************************
+ SZ  C           F4BZNA    IFNE *BLANKS
+     C           F4BZNA    CHAINOMFFREL0             84
+     C           *IN84     IFEQ *OFF
+     C                     MOVELFFADTX    HROUTE
+     C                     ENDIF
+     C                     ELSE
+     C                     MOVE *BLANKS   HROUTE
+SZ   C                     ENDIF
+      *
+     C                     MOVE 'OR'      HLOCCD           LOCATION CODE
+     C                     Z-ADDF4GNDT    HSHPDT           ACTUAL SHIP DATE
+      *******************
+      *ORDER TOTALS
+      *******************
+     C                     Z-ADDWKAMTI    HTIAMT           INVOICE AMOUNT
+     C                     Z-ADDWKQTYI    HUNTSH           UNITS SHIPPED
+     C                     MOVE 'CA'      HUOM1            SHIPPED UOM
+     C                     Z-ADDWKWGTI    HWGT             WEIGHT SHIPPED
+     C                     MOVE 'LB'      HUOM2            WEIGHT UOM
+      *
+     C                     Z-ADD*ZEROS    HVOLME           VOLUME
+     C                     MOVE '  '      HUOM3            VOLUME UOM
+      *
+      ******************************************
+      *SERVICE PROMOTION,ALLOW, CHARGE INFO ???????????
+      ******************************************
+      *
+      ******
+      *GET THE FREIGHT, THIS IS THE ONLY THING WE WILL HAVE TO PUT
+      *IN THIS SECTION.
+     C           KEYOMH    SETLLOMCQWKL1
+     C           *IN85     DOUEQ*ON
+     C           KEYOMH    READEOMCQWKL1                 85
+     C           *IN85     IFEQ *OFF
+      *
+      *FINANCE TYPE = F FOR FREIGHT
+     C           N2G4ST    IFEQ 'F'
+     C                     ADD  N2BSVA    WKFRT  152       FRT AMT
+     C                     ENDIF                           CODE = F
+     C                     ENDIF                           *IN85
+     C                     ENDDO                           DO 85 = 1
+      *
+     C           WKFRT     IFEQ *ZEROS
+      *NO CHARGES OR ALLOWANCES
+     C                     MOVE *BLANKS   HALLCD
+     C                     MOVE 'ZZZZ'    HSPSCC
+     C*PKD                 Z-ADD*ZEROS    HSPSCC
+     C                     Z-ADD*ZEROS    HALAMT
+     C                     Z-ADD*ZEROS    HALRTE
+     C                     MOVE *BLANKS   HTMDDU
+      *
+     C                     ELSE
+      *CHARGE CODE
+     C                     MOVE 'C'       HALLCD           CHARGE
+      *FREIGHT CODE
+     C                     MOVE 'D240'    HSPSCC
+     C                     Z-ADDWKFRT     HALAMT           AMOUNT
+     C                     Z-ADD*ZEROS    HALRTE
+     C                     MOVE *BLANKS   HTMDDU
+     C                     ENDIF
+      ***
+      ******
+      * DLY029 RMC0726 IF ALLOW/REBATES/SALES TAX, EXIST IN HISTORY DTL ACCRUAL
+      * PDICCPP AND IF INVOICE PRINT TYPE IS INVOICE THEN ACCUM HERE
+      ******
+     C                     Z-ADD*ZEROS    WKDA
+     C                     Z-ADD*ZEROS    WKRB
+     C                     Z-ADD*ZEROS    WKCC
+     C                     Z-ADD*ZEROS    WKTX   112
+     C                     SETOF                     73
+     C           KEYOMH    SETLL@ICCPS0
+     C           *IN73     DOWEQ'0'
+     C           KEYOMH    READE@ICCPS0                  73
+     C           *IN73     IFEQ '0'
+     C           ICQSSX    IFEQ 'IN'
+     C           ICQSSX    OREQ 'IT'
+     C           ICOKCD    IFEQ 'DA'
+     C                     ADD  ICAYVA    WKDA
+     C                     END
+     C           ICOKCD    IFEQ 'RB'
+     C                     ADD  ICAYVA    WKRB
+     C                     END
+     C           ICOKCD    IFEQ 'CC'
+     C                     ADD  ICAYVA    WKCC
+     C                     END
+     C           ICOKCD    IFEQ 'TX'
+     C                     ADD  ICAYVA    WKTX
+     C                     END
+     C                     END
+     C                     ENDIF
+     C                     ENDDO
+     ********
+     C                     Z-ADDWKTX      HATXAM           SALES TAX
+     C                     Z-ADDWKDA      HALAMT           DISC/ALLOW
+     C                     ADD  WKRB      HALAMT           REBATE
+     C                     ADD  WKCC      HALAMT           CUST CHARGE
+     C           WKDA      IFNE 0
+     C                     MOVE 'DA'      HTMDDU
+     C                     END
+     C           WKRB      IFNE 0
+     C                     MOVE 'RB'      HTMDDU
+     C                     END
+     C           WKCC      IFNE 0
+     C                     MOVE 'CC'      HTMDDU
+     C                     END
+      *
+     C                     WRITEECR001
+      *
+     C                     ENDSR
+      *---------------------------------------------------------------
+      * *INZSR - INITIALIZATION SUBROUTINE
+      *---------------------------------------------------------------
+      *
+     C           *INZSR    BEGSR
+      *
+     C** BEG: SZ08042010
+      * KEY FOR FILE PDKMREL1
+      *
+     C           KEYPDK    KLIST
+     C                     KFLD           PCO
+     C                     KFLD           DUNNBR 10
+     C** END: SZ08042010
+      *
+      * KEY FOR FILE OMHSTPL9
+      *
+     C           KEYOMH    KLIST
+     C                     KFLD           PCO
+     C                     KFLD           PORDER
+      *
+      * KEY FOR FILE PDNEREL1
+      *
+     C           KEYEC     KLIST
+      * PKP                KFLD           PCO
+     C                     KFLD           KCUST
+      *
+      * KEY FOR FILE CAAOREP
+      *
+     C           KEYTRM    KLIST
+     C                     KFLD           PCO
+     C                     KFLD           KTERMS  2
+      *
+      * KEY FOR FILE CABZREP
+      *
+     C           KEYITM    KLIST
+     C                     KFLD           PCO
+     C                     KFLD           KITEM   70
+      *
+      * KEY FOR FILE CAEOREL1
+      *
+     C           KEYEO     KLIST
+     C                     KFLD           F4AIC3
+     C                     KFLD           F4BKC7
+      *
+      * KEY FOR FILE POBIREP
+      *
+     C           KEYBI     KLIST
+     C                     KFLD           BIBKC7
+     C                     KFLD           BIHGCD
+      *
+      * KEY FOR FILE PDICCPP
+      *
+     C           KEYICC    KLIST
+     C                     KFLD           PCO
+     C                     KFLD           PORDER
+     C                     KFLD           F4DPNB           SEQ NO
+     C                     KFLD           F4UENB           SEC SEQ NO
+      *
+      * PARM LISTS
+      *
+     C           *ENTRY    PLIST
+     C                     PARM           PCO
+     C                     PARM           PORDER
+      *
+     C           *LIKE     DEFN F4AIC3    PCO
+     C           *LIKE     DEFN F4C4NB    PORDER
+     C                     MOVELDUNS      DUNNBR
+      *
+     C                     ENDSR

@@ -1,0 +1,286 @@
+/**************************************************************************/
+/*  PROGRAM:       PUO9UPC                                                */
+/*  PROGRAM DESC:  EXC DEL DB2 TRG RCDS  CL  EXECUTE USER PROGRAM         */
+/*  PROGRAMMER:    DANNY NGUYEN                                           */
+/*  CREATE DATE:   12/05/2019                                             */
+/*                                                                        */
+/*  PURPOSE:       DELETE RECORDS OUT OF ALL DB2 TRIGGERED FILES THAT ARE */
+/*                 < LAST WEEK SUNDAY DATE & NOT UNPROCESSED '0'.         */
+/*                 WILL KEEP A ROLLING WEEK'S WORTH OF DATA.              */
+/*                                                                        */
+/*  JOB SCHEDULE:  'PRKPRGTRG' WILL RUN WEEKLY EVERY SUNDAY @2AM.         */
+/*                 'PRKPRGTRGT' - FOR TESTING PURPOSE.                    */
+/* -----------------------------------------------------------------------*/
+/*  PARMS:         NONE.                                                  */
+/**************************************************************************/
+/* MODIFICATION HISTORY                                                   */
+/**************************************************************************/
+/* DATE     INT PROJECT DESCRIPTION                                       */
+/* -------- --- ------- --------------------------------------------------*/
+/* 03/16/20 DN  S16166  Added the following DB2 TRG files to purged:      */
+/*                      PUBUCPP - PS Prod Item InventoryTRG               */
+/*                      PUBVCPP - Order Detail Sched-InvTRG               */
+/*                      PUBWCPP - Order Detail Schedule TRG               */
+/*                      PUBXCPP - History Dtl Accrual TRG                 */
+/*                      PUB0CPP - Item Balance Detail TRG                 */
+/* 06/05/20 DN  S16606  Added the following DB2 TRG files to purge:       */
+/*                      PUB2CPP - Load Header TRG                         */
+/*                      PUB3CPP - Load Detail TRG                         */
+/*                      PUB4CPP - Trailer TRG                             */
+/* 08/12/20 DN  R16204  Added Commodity Mrkt Price Intf (PUBZCPP) file to */
+/*                      be purged.                                        */
+/*                      ETL Create Date is an 'D8S' field type but the    */
+/*                      data that ETL Team stores is CYMD 7 byte. Change  */
+/*                      SQL to check CYMD date instead.                   */
+/* 10/29/24 DN  SR21581 Added the following DB2 TRG files to purge:       */
+/*                      PVCMCPP - Customer Accrual Item TRG               */
+/* 03/27/25 DN  SR27558 Retain at least 30 days of data for TMS Order     */
+/*                      Header Trigger (PBATCPPP) file.                   */
+/*                     ˆCOMMENTED OUT JAGDISH CHANGES FOR WI642. WILL     */
+/*                     ˆINFORM JM ONCE MY CHANGES ARE DEPLOY TO PROD ON   */
+/*                     ˆTHU 4/3/25 SO HE CAN UNCOMMENT IT OUT.            */
+/*‚04/03/25 JM  WI642   Added the following DB2 TRG files to purge:       */
+/*‚                     PVCOREP - Export Doc Order Hdr TRG                */
+/*‚                     PVCPCPP - Load Order Change Log TRG               */
+/*                                                                        */
+/**************************************************************************/
+
+             PGM
+
+             DCL        VAR(&CYMDDTE) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&CYMDDTEA) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&CYMDDTE30) TYPE(*CHAR) LEN(10)  /* SR27558 */
+             DCL        VAR(&CCYYMMDD) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&CCYYMMDD2) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PURGEDTE) TYPE(*CHAR) LEN(26)
+             DCL        VAR(&PURGEDTE2) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&PURGEDTE3) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&PURGEDTE30) TYPE(*CHAR) LEN(7)  /* SR27558 */
+             DCL        VAR(&SQLSEL) TYPE(*CHAR) LEN(200)
+
+
+             RTVJOBA    CYMDDATE(&CYMDDTE)
+
+    /* JS Runs Every Sunday So Get Last Sundays Date */
+             ADDDAT2    DAYS(-7) NEWDAT(&CCYYMMDD) FRMDAT(&CYMDDTE) +
+                          FRMDATFMT(*CYMD) NEWDATFMT(*ISO)
+             ADDDAT2    DAYS(-7) NEWDAT(&CYMDDTEA) FRMDAT(&CYMDDTE) +
+                          FRMDATFMT(*CYMD) NEWDATFMT(*CYMD)
+             ADDDAT2    DAYS(-7) NEWDAT(&CCYYMMDD2) FRMDAT(&CYMDDTE) +
+                          FRMDATFMT(*CYMD) NEWDATFMT(*YYMD)
+
+    /* SR27558 - Get Last 30 Days Date */
+             ADDDAT2    DAYS(-30) NEWDAT(&CYMDDTE30) +
+                          FRMDAT(&CYMDDTE) FRMDATFMT(*CYMD) +
+                          NEWDATFMT(*CYMD)
+
+    /* Format Last Sundays Date in Timestamp, CYMD & YYMD Format */
+             CHGVAR     VAR(&PURGEDTE) VALUE(&CCYYMMDD *CAT +
+                          '-00.00.00.000000')                   /* ISO */
+             CHGVAR     VAR(&PURGEDTE2) VALUE(&CYMDDTEA)        /* CYMD */
+             CHGVAR     VAR(&PURGEDTE3) VALUE(&CCYYMMDD2)       /* YYMD */
+             CHGVAR     VAR(&PURGEDTE30) VALUE(&CYMDDTE30) /* SR27558 - CYMD */
+
+    /*ˆFOR TESTING ONLY */
+          /* GOTO       CMDLBL(TEST) */
+
+/*********************************************************************/
+/*DELETE RECORDS FROM DB2 TRIGGERED FILES - WHERE TIMESTAMP DATE IS +
+/*LESS THAN LAST SUNDAY DATE & PROCESS STS <> '0' (UNPROCESSED).    +
+/*********************************************************************/
+
+         /* BI MANIFEST DETAIL TRG */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUBGCPP +
+                          WHERE BGA0TS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND BGJOSC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUBGCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* BI ORDER DETAIL TRG */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUBFCPP +
+                          WHERE BFAZTS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND BFJMSC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUBFCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* BI ORDER HEADER EXTSN TRG */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUBECPP +
+                          WHERE BEAYTS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND BEJKSC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUBECPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* BI ORDER HEADER TRG */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PTC4CPP +
+                          WHERE C4ARTS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND C4D7SC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PTC4CPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* BI SALES HISTORY TRG */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUBHCPP +
+                          WHERE BHA1TS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND BHJQSC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUBHCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* TMS LOAD TRIGGER */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PBBCCPP +
+                          WHERE BCAXDT <' *TCAT &PURGEDTE2 *BCAT +
+                          'AND BCTPRC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PBBCCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* TMS ORDER HEADER TRIGGER */
+            /* SR27558 - Retain Last 30 Days of Data */
+          /* CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PBATCPP +
+                          WHERE ATAXDT <' *TCAT &PURGEDTE2) */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PBATCPP +
+                          WHERE ATAXDT <' *TCAT &PURGEDTE30)   /* SR27558 */
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PBATCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* PS PROD ITEM INVENTORY TRG */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUBUCPP +
+                          WHERE BUA3TS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND BUKOSC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUBUCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* ORDER DETAIL SCHED-INV TRG */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUBVCPP +
+                          WHERE BVA4TS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND BVKQSC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUBVCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* ORDER DETAIL SCHEDULE TRG */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUBWCPP +
+                          WHERE BWA5TS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND BWKSSC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUBWCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* HISTORY DTL ACCRUAL TRG */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUBXCPP +
+                          WHERE BXA6TS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND BXKUSC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUBXCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* ITEM BALANCE DETAIL TRG */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUB0CPP +
+                          WHERE B0A7TS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND B0K2SC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUB0CPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+
+         /* LOAD HEADER TRG (PUB2CPP) */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUB2CPP +
+                          WHERE B2A8TS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND B2LASC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUB2CPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* LOAD DETAIL TRG (PUB3CPP) */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUB3CPP +
+                          WHERE B3A9TS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND B3LCSC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUB3CPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* TRAILER TRG (PUB4CPP) */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUB4CPP +
+                          WHERE B4BATS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND B4LESC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUB4CPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* COMMODITY MRKT PRICE INTF - PUBZCPP */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PUBZCPP +
+                          WHERE BZBED8 <' *TCAT &PURGEDTE2 *BCAT +
+                          'AND BZE8NZ<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PUBZCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* CUSTOMER ACCRUAL ITEM TRG (PVCMCPP) */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PVCMCPP +
+                          WHERE CMBYTS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND CMQSSC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PVCMCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* WI642-LOAD ORDER CHANGE LOG TRG (PVCPCPP) */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PVCPCPP +
+                          WHERE CPB0TS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND CPQ3SC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PVCPCPP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+         /* WI642-EXPORT DOC ORDER HDR TRG (PVCOREP) */
+             CHGVAR     VAR(&SQLSEL) VALUE('FROM' *BCAT 'PVCOREP +
+                          WHERE COBZTS <"' *TCAT &PURGEDTE *TCAT +
+                          '"' *BCAT 'AND COQ1SC<>"0"')
+
+             DELETE     SQL(&SQLSEL)
+
+             RGZPFM     FILE(PVCOREP)
+             MONMSG     MSGID(CPF2981 CPF3135 CPF3202)
+
+ END:        ENDPGM
+

@@ -1,0 +1,237 @@
+/***************************************************************** */
+/*  ENVIRONMENT:       HOG PRODUCTION SYSTEM                       */
+/*  PROGRAM NUMBER:    HP4070CL                                    */
+/*  PROGRAM NAME:      PRINT SALES MOVEMENT BILL OF LADING         */
+/*  PROGRAMMER:        LEANNE FEDOR                                */
+/*  DATE:              10/11/04                                    */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFICATIONS                                                   */
+/* 07/10/20 DN  P408   - Added email as input parm. If email is    */
+/*              entered then execute ESEND to send BOL as PDF.     */
+/*              OVRPRTF QPRINT to set page width to 95 to fit      */
+/*              properly for PRTBOLSL overlay.                     */
+/*              NOTE: HP60701 is a clone of HP6070.                */
+/*                                                                 */
+/* 12/28/21 JBB WHD88707 - Hold report when email address entered. */
+/*                                                                 */
+/***************************************************************** */
+
+             PGM        PARM(&EMAIL)
+
+             DCL        VAR(&EMAIL) TYPE(*CHAR) LEN(50) /* P408 */
+
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(60) /* P408 */
+             DCL        VAR(&MESSAGE) TYPE(*CHAR) LEN(256) /* P408 */
+             DCL        VAR(&DATA) TYPE(*CHAR) LEN(10) /* P408 */
+             DCL        VAR(&DATAH) TYPE(*CHAR) LEN(10) /* P408 */
+
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(178)
+
+             DCL        VAR(&LDREPRINT) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&LDMVSN) TYPE(*DEC) LEN(7)
+             DCL        VAR(&LDSTCD) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&LDFCYMD) TYPE(*DEC) LEN(8)
+             DCL        VAR(&LDTCYMD) TYPE(*DEC) LEN(8)
+             DCL        VAR(&LDFSCD) TYPE(*DEC) LEN(5)
+             DCL        VAR(&LDCVNO) TYPE(*DEC) LEN(8)
+             DCL        VAR(&LDTICD) TYPE(*CHAR) LEN(5)
+
+             DCL        VAR(&HOLD) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+
+/* P408 - ADDED ERROR MESSAGE FIELDS                                        */
+             DCL        VAR(&MSG)   TYPE(*CHAR) LEN(512)
+             DCL        VAR(&MSGID) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&MSGL)  TYPE(*DEC) LEN(5 0)
+
+
+             CHGVAR     VAR(&LDREPRINT) VALUE(%SST(*LDA 60 1))
+             CHGVAR     VAR(&LDMVSN) VALUE(%SST(*LDA 52 7))
+             CHGVAR     VAR(&LDFCYMD) VALUE(%SST(*LDA 6 8))
+             CHGVAR     VAR(&LDTCYMD) VALUE(%SST(*LDA 14 8))
+             CHGVAR     VAR(&LDFSCD) VALUE(%SST(*LDA 27 5))
+             CHGVAR     VAR(&LDTICD) VALUE(%SST(*LDA 47 5))
+             CHGVAR     VAR(&LDCVNO) VALUE(%SST(*LDA 34 8))
+             CHGVAR     VAR(&LDSTCD) VALUE(%SST(*LDA 42 5))
+
+/*-------------------------------------------------------------------*/
+/*  SETUP QUERY OVER THE SALES MOVEMENT HEADER FILE                  */
+/*-------------------------------------------------------------------*/
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+
+/*  IF THE USER ELECTED TO SEE ONE SPECIFIC MOVEMENT NUMBER,      */
+/*  SET THE QUERY UP FOR THAT MOVEMENT ONLY                       */
+
+             IF         COND(&LDMVSN *NE 0) THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('SHMVSN *EQ')
+             CHGVAR     VAR(%SST(&QDATA 12 7)) VALUE(&LDMVSN)
+             ENDDO
+             ELSE       CMD(DO)
+
+
+/*  ALWAYS SELECT ONLY SCHEDULED SALES MOVEMENTS              */
+
+             CHGVAR     VAR(%SST(&QDATA 1 15)) VALUE('SHMSCD +
+                          *EQ "SC"')
+
+/*  ALWAYS SELECT ONLY SALES MOVEMENTS WITH A SCHEDULED SHIP DATE */
+/*  IN THE USERS REQUESTED DATE RANGE                             */
+
+             CHGVAR     VAR(%SST(&QDATA 17 15)) VALUE('*AND SHSCDT +
+                          *GE')
+             CHGVAR     VAR(%SST(&QDATA 33 8)) VALUE(&LDFCYMD)
+             CHGVAR     VAR(%SST(&QDATA 42 15)) VALUE('*AND SHSCDT +
+                          *LE')
+             CHGVAR     VAR(%SST(&QDATA 58 8)) VALUE(&LDTCYMD)
+
+
+/*  SALES TYPE                                                     */
+
+             IF         COND(&LDSTCD *NE ' ') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 67 17)) VALUE('*AND SHSTCD +
+                          *EQ "')
+             CHGVAR     VAR(%SST(&QDATA 84 5)) VALUE(&LDSTCD)
+             CHGVAR     VAR(%SST(&QDATA 89 1)) VALUE('"')
+             ENDDO
+
+
+/*  IF THIS IS NOT A REPRINT, ONLY SELECT MOVEMENTS THAT HAVE     */
+/*  NEVER HAD A BOL PRINTED                                       */
+
+             IF         COND(&LDREPRINT *EQ 'N') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 91 17)) VALUE('*AND SHPTCT +
+                          *EQ 0')
+             ENDDO
+
+/*  IF THIS IS A REPRINT, ONLY SELECT MOVEMENTS THAT HAVE         */
+/*  ALREADY HAD A BOL PRINTED                                     */
+
+             IF         COND(&LDREPRINT *EQ 'Y') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 91 17)) VALUE('*AND SHPTCT +
+                          *GT 0')
+             ENDDO
+
+
+/*  IF FARM SITE                                                 */
+
+             IF         COND(&LDFSCD *NE 0) THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 109 15)) VALUE('*AND SHFSCD +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 125 5)) VALUE(&LDFSCD)
+             ENDDO
+
+
+/* IF CUSTOMER                                                   */
+
+             IF         COND(&LDCVNO *NE 0) THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 131 15)) VALUE('*AND SHCVNO +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 147 8)) VALUE(&LDCVNO)
+             ENDDO
+
+/*  IF TRUCKER                                                     */
+
+             IF         COND(&LDTICD *NE ' ') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 156 17)) VALUE('*AND SHTICD +
+                          *EQ "')
+             CHGVAR     VAR(%SST(&QDATA 173 5)) VALUE(&LDTICD)
+             CHGVAR     VAR(%SST(&QDATA 178 1)) VALUE('"')
+             ENDDO
+
+             ENDDO                            /* MULTIPLE MOVEMENTS */
+
+
+/*-------------------------------------------------------------------*/
+/* OVERRIDE THE SALES MOVEMENT HEADER FILE                           */
+/*-------------------------------------------------------------------*/
+
+             OVRDBF     FILE(HSP084) SHARE(*YES)
+             OPNQRYF    FILE((HSP084)) OPTION(*INP *UPD) +
+                          QRYSLT(&QDATA) KEYFLD((SHSTCD) (SHFSCD) +
+                          (SHSCDT) (SHMVSN)) SEQONLY(*NO)
+
+/*-------------------------------------------------------------------*/
+/* SET UP PRINT OVERRIDES                                            */
+/*-------------------------------------------------------------------*/
+
+ HOLD:       SELECT
+               WHEN       COND(&EMAIL *NE '   ') THEN(CHGVAR +
+                          VAR(&HOLD) VALUE(*YES))
+
+               WHEN       COND(%SST(*LDA 411 1) = 'Y') THEN(CHGVAR +
+                          VAR(&HOLD) VALUE(*YES))
+
+               OTHERWISE  CMD(CHGVAR VAR(&HOLD) VALUE(*NO))
+             ENDSELECT
+
+ OUTQ:       CHGVAR     VAR(&OUTQ) VALUE(%SST(*LDA 413 10))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(%SST(*LDA 401 10)))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(*JOB))
+
+/* P408 - Changed Override Print File to Set Page Size Width to 95. */
+/*  OVRPRTF:    OVRPRTF    FILE(QPRINT) TOFILE(PRTBOLSL) OUTQ(&OUTQ) +
+                          HOLD(&HOLD)                                */
+ OVRPRTF:    OVRPRTF    FILE(QPRINT) TOFILE(PRTBOLSL) PAGESIZE(*N +
+                          95) OUTQ(&OUTQ) HOLD(&HOLD)
+
+/* P408 - If Email is NOT Entered then Call Print Program to Print Report */
+             IF         COND(&EMAIL *EQ ' ') THEN(DO)
+
+/*-------------------------------------------------------------------*/
+/* PRINT THE BILL OF LADINGS                                         */
+/*-------------------------------------------------------------------*/
+             CALL       PGM(HP6070)
+
+             ENDDO      /* P408-&EMAIL = ' ' */
+
+/*********************************************************************/
+/* P408 - If Email is Entered Then Email BOL as PDF via ESEND.       */
+/*********************************************************************/
+             IF         COND(&EMAIL *NE ' ') THEN(DO)
+
+             CHGVAR     VAR(&SUBJECT) VALUE('BOL Sale')
+             CHGVAR     VAR(&MESSAGE) VALUE('BOL Sale Attached')
+
+             CALL       PGM(CAQXXFR) PARM(' ' &DATA &DATAH)
+
+             /* SET TEST VERBIAGE IN EMAIL IF NOT PRODUCTION LIBRARY */
+             IF         COND(&DATA *NE 'PRKFLIB') THEN(DO)
+             CHGVAR     VAR(&MESSAGE) VALUE(&MESSAGE *BCAT ' - TEST')
+             ENDDO
+
+/*-------------------------------------------------------------------*/
+/* Call Print Program to Email the Bill of Ladings as PDF.           */
+/*-------------------------------------------------------------------*/
+             CALL       PGM(HP60701)
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG(&MESSAGE) MSGTYPE(*DFT) ATTLIST((* +
+                          *PDF *N QPRINT * *ALL *ALL))
+             MONMSG     MSGID(EML0999) EXEC(GOTO CMDLBL(MSGTRAP))
+
+             ENDDO      /* &EMAIL <> ' ' */
+
+
+             DLTOVR     FILE(*ALL)
+
+/* P408 - Go To End Program */
+             GOTO       CMDLBL(ENDPGM)
+
+/* P408 - Added Message Trap Routine. */
+/*----------------------RECEIVE MESSAGES----------------------------*/
+
+ MSGTRAP:    RCVMSG     MSGTYPE(*EXCP) MSGDTA(&MSG) MSGDTALEN(&MSGL) +
+                          MSGID(&MSGID)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(ENDPGM))
+
+             SNDPGMMSG  MSGID(&MSGID) MSGF(QCPFMSG) MSGDTA(%SST(&MSG +
+                          1 &MSGL)) MSGTYPE(*ESCAPE)
+             MONMSG     MSGID(CPF0000)
+
+
+ ENDPGM:     ENDPGM
+

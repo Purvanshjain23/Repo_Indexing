@@ -1,0 +1,227 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  HP4082CL                                      */
+/*  PROGRAM NAME:    UT: SPECIFY-MOVE EDITED SCHEDULED MOVEMENTS   */
+/*                   INTO HPS                                      */
+/*                                                                 */
+/*  PROGRAMMER:      Brad Baden                                    */
+/*  CREATE DATE:     09/22/2017                                    */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS SUBMITTED WITH QCMDEXC FROM        */
+/*                   HP4082.                                       */
+/*                                                                 */
+/*=================================================================*/
+/*  Modification History                                           */
+/*  12/04/17 JBB E11947   HPS Mkt Hog OTC: Phase 2 HPE to HPS      */
+/*                        Added call to program HP3101 to read     */
+/*                        records in the Scheduled Load Planning   */
+/*                        file HSP196 and then write records to    */
+/*                        the Delivery Sched Detail INT file       */
+/*                        PWAKCPP.                                 */
+/*                                                                 */
+/*   5/04/18 JBB E13021   Do not use the RUNSQL statement to       */
+/*                        change the Process Status of the HSP196  */
+/*                        records to 'Y' (Processed).  This value  */
+/*                        will now be updated in new program       */
+/*                        HP3102 that is called after HP3101.      */
+/*                        Also added logic to use a different      */
+/*                        email distribution list if the user's    */
+/*                        group profile is SBDPGMR so that the     */
+/*                        production users do not get an email     */
+/*                        while the programmer is testing.         */
+/*                                                                 */
+/*   5/10/18 JBB E13021   Discovered that the EXECUTE needed to    */
+/*                        be run before the call HP3102 to update  */
+/*                        the Processed Flag in HSP196.            */
+/*                                                                 */
+/*   5/11/18 JBB E13021   Adding a CHGJOB command to force a job   */
+/*                        log because of parameter errors on the   */
+/*                        call to the HPE CL program PWFIUPC. The  */
+/*                        errors indicated a parameter mismatch on */
+/*                        calls to programs PLSFXFR and PLSGXFR.   */
+/*                                                                 */
+/*   5/15/18 JBB E13054   Add a delay of 15 seconds before calling */
+/*                        program HP3102.  This should give time   */
+/*                        for the EXECUTE command to create the    */
+/*                        HPS Load Plan spreadsheet before the     */
+/*                        record status on file HSP196 is done.    */
+/*                                                                 */
+/*******************************************************************/
+
+             PGM        PARM(&BUSOFC)
+
+             DCL        VAR(&RETURN)  TYPE(*CHAR) LEN(7)
+             DCL        VAR(&USER)    TYPE(*CHAR) LEN(10)
+             DCL        VAR(&NODATA)  TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&PERCLO)  TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&PERRUN)  TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&EDITERR) TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&COMPANY) TYPE(*DEC)  LEN(3 0)
+             DCL        VAR(&BUSOFC)  TYPE(*CHAR) LEN(5)
+             DCL        VAR(&EMAIL)   TYPE(*CHAR) LEN(50)
+             DCL        VAR(&EMLMSG)  TYPE(*CHAR) LEN(70)
+             DCL        VAR(&SQLSTM)  TYPE(*CHAR) LEN(256)
+             DCL        VAR(&COMMIT)  TYPE(*CHAR) LEN(5)
+             DCL        VAR(&JRNLSTS) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&QDATA)   TYPE(*CHAR) LEN(116)
+             DCL        VAR(&NO)      TYPE(*CHAR) LEN(3) VALUE('"N"')
+             DCL        VAR(&BLANK3)  TYPE(*CHAR) LEN(5) VALUE('"   "')
+             DCL        VAR(&GRPPRFL) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&COMPVAL) TYPE(*CHAR) LEN(10)
+
+             CHGJOB     LOG(4 99 *SECLVL) LOGCLPGM(*YES)
+             RTVJOBA    USER(&USER)
+
+             RTVUSRPRF  GRPPRF(&GRPPRFL)
+             SELECT
+             WHEN       COND(&GRPPRFL = 'SBDPGMR ') THEN(CHGVAR +
+                          VAR(&COMPVAL) VALUE('HPSLDPLNDV'))
+
+             OTHERWISE  CMD(CHGVAR VAR(&COMPVAL) VALUE('HPSLDPLNEM'))
+
+             ENDSELECT
+
+/* Copy HSP2082 to QTEMP for building the sequel viewpoint view            */
+             CPYF       FROMFILE(HSP2082) TOFILE(QTEMP/HSP2082) +
+                          MBROPT(*ADD) CRTFILE(*YES) INCREL((*IF +
+                          E1BOCD *EQ &BUSOFC))
+             MONMSG     MSGID(CPF0000)
+
+/* Hard Allocate on Editing File                                           */
+
+             ALCOBJ     OBJ((HSP196 *FILE *EXCL))
+
+/* If allocation error, send error message and quit process                */
+             MONMSG     MSGID(CPF0000) EXEC(DO)
+             SNDMSG     MSG('***** Cannot interface; the Scheduled +
+                          Load Planning file HSP196 is in use. +
+                          *****') TOUSR(&USER)
+             GOTO       CMDLBL(EXIT)
+                        ENDDO
+/* Call program to write to HPS files                                      */
+
+             CALL       PGM(HP2083) PARM(&NODATA &PERCLO &PERRUN +
+                          &EDITERR &BUSOFC)
+
+
+/* There is no data in the Editing file                                    */
+
+             IF         COND(&NODATA *EQ 'Y') THEN(DO)
+             SNDMSG     MSG('***** There were no Movements to +
+                          interface into HPS. Have you +
+                          received/edited the Uploaded Data? +
+                          *****') TOUSR(&USER)
+             GOTO       CMDLBL(EXIT)
+             ENDDO
+
+/* The data in the Editing file has not yet been edited                    */
+
+             IF         COND(&EDITERR *EQ 'Y') THEN(DO)
+             SNDMSG     MSG('***** You have not yet Edited the +
+                          Movement Data. You must Edit the Movement +
+                          Data at least 1 time before interfacing +
+                          into HPS. *****') TOUSR(&USER)
+             GOTO       CMDLBL(EXIT)
+             ENDDO
+
+/* A Scheduled Ship Date is in a closed period                             */
+
+             IF         COND(&PERCLO *EQ 'Y') THEN(DO)
+             SNDMSG     MSG('***** The Movement Interface was not +
+                          performed. A Scheduled Ship Date is in a +
+                          Period that has already been closed in +
+                          HPS. *****') TOUSR(&USER)
+             GOTO       CMDLBL(EXIT)
+             ENDDO
+
+/* A Scheduled Ship Date is in a Period that is currently being closed     */
+
+             IF         COND(&PERRUN *EQ 'Y') THEN(DO)
+             SNDMSG     MSG('***** The Movement Interface was not +
+                          performed. A Scheduled Ship Date is in +
+                          the Period that is currently being closed +
+                          in HPS. *****') TOUSR(&USER)
+             GOTO       CMDLBL(EXIT)
+             ENDDO
+
+/* If here, there are no errors.  Execute a SQL and email the results      */
+
+/*********************************************************************/
+/*  SETUP OPNQRY STATEMENTS FOR LOAD PLANNING OVERRIDES              */
+/*********************************************************************/
+
+/*  SETUP OPNQRY STATEMENT FOR LOAD PLANNING                         */
+
+ OPNQRYF:    CHGVAR     VAR(&QDATA) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA 1 12)) VALUE('LPBOCD *EQ "')
+             CHGVAR     VAR(%SST(&QDATA 13 5)) VALUE(&BUSOFC)
+             CHGVAR     VAR(%SST(&QDATA 18 60)) VALUE('" *AND LPCOCD +
+                          *NE "   " *AND LPRCFL *EQ "N"')
+
+             OVRDBF     FILE(HSP196) SHARE(*YES)
+             OPNQRYF    FILE((HSP196)) OPTION(*ALL) QRYSLT(&QDATA) +
+                          KEYFLD((LPBOCD) (LPMVSN) (LPHGCD))
+
+/*  Call Program to Populate the Delivery Sched Detail INT file    */
+
+             CALL       PGM(HP3101)
+
+/*********************************************************************/
+
+             /* Get Email distribution list */
+             IF         COND(&BUSOFC *EQ 'OKLIV') THEN(DO)
+             CHGVAR     VAR(&COMPANY) VALUE('350')
+             CHGVAR     VAR(&EMLMSG) VALUE('Load Planning for +
+                          Business Office: OKLIV')
+/*           CHGVAR     VAR(&SQLSTM) VALUE('UPDATE HSP196 +
+                          SET LPRCFL = ''Y'' WHERE LPRCFL = ''N'' +
+                          AND LPBOCD = ''OKLIV''')                  */
+             ENDDO
+
+             IF         COND(&BUSOFC *EQ 'IFLIV') THEN(DO)
+             CHGVAR     VAR(&COMPANY) VALUE('340')
+             CHGVAR     VAR(&EMLMSG) VALUE('Load Planning for +
+                          Business Office: IFLIV')
+/*           CHGVAR     VAR(&SQLSTM) VALUE('UPDATE HSP196 +
+                          SET LPRCFL = ''Y'' WHERE LPRCFL = ''N'' +
+                          AND LPBOCD = ''IFLIV''')                  */
+             ENDDO
+
+             CALL       PGM(PDGKXFR) PARM(&RETURN &COMPANY +
+                          &COMPVAL &EMAIL)
+
+             EXECUTE    VIEW(HPSLDPLAN) PCFMT(*XLS) +
+                          RECIPIENT(&EMAIL) EMLMSG(&EMLMSG) +
+                          SETVAR((&BUSOFF &BUSOFC))
+             MONMSG     MSGID(CPF0000)
+
+/*  Call Program to update the Processed flag in file HSP196       */
+/*  Delay the job for 15 seconds to allow the execute to complete  */
+
+             DLYJOB     DLY(15)
+
+             CALL       PGM(HP3102)
+
+             CLOF       OPNID(HSP196)
+
+/************************************************/
+/***** Commented out for enhancement E13021 *****/
+/************************************************/
+/* Update Record Processed Flag LPRCFL in Load Plan File HSP196            */
+/*           RTVOBJD    OBJ(HSP196) OBJTYPE(*FILE) JRNSTS(&JRNLSTS)        */
+/*           SELECT                                                        */
+/*           WHEN       COND(&JRNLSTS = '0') THEN(CHGVAR +
+                          VAR(&COMMIT) VALUE('*NONE'))                     */
+/*           WHEN       COND(&JRNLSTS = '1') THEN(CHGVAR +
+                          VAR(&COMMIT) VALUE('*CHG '))                     */
+/*           ENDSELECT                                                     */
+
+/*           RUNSQL     SQL(&SQLSTM) COMMIT(&COMMIT)                       */
+
+/* Call program to Update Delivery Schedule Detail Upload file             */
+             CALL       PGM(PWFIUPC)
+
+
+ EXIT:       DLCOBJ     OBJ((HSP196 *FILE *EXCL))
+             ENDPGM
+

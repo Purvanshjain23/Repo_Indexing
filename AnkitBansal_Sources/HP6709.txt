@@ -1,0 +1,707 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP6709-Order Requests On Hold Report
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     07/22/04
+      *
+      * Function:    This function lists the Request Detail Lines that have a status
+      *              of HOLD. The user may elect to print:
+      *                Version 1-Sort/print by Cell Manager
+      *                Version 2-Sort/print by Production Manager
+      *                Version 3-Sort/print by Work Order
+      *
+      *              The report can be generated on-demand and is also generated at
+      *              night from the Job Scheduler.
+      *
+      * NOTES: Be careful in changing the layout. Versions 1 & 2 can be e-mailed using
+      *        and ESEND file/command. The ESEND "Rules" file has been set up to scan
+      *        Line 17, Starting Position 1 for the "Manager Code". So, Version 3 (which
+      *        cannot be e-mailed) indents the first column so that it is excluded
+      *        from the scan. So, if "Manager Code" is moved from Line 17, Position 1,
+      *        then you need to change the logic in program HP8709 which builds the
+      *        ESEND "Rules" file.
+      *
+      *        Since HP6709 is also generated from HP4718 and HP3709CL, any changes to
+      *        the LDA here should be mirrored in HP4718 and checked in HP3709CL.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/13/04  LeAnne Fedor
+      *           Recompile only. Cost Per Unit Amount was changed from
+      *           9,2 to 9,4.
+      *
+      * 03/23/05  LeAnne Fedor
+      *           We now have 3 versions of this report and it can be e-mailed.
+      *           So, changed layout to accommodate.
+      *
+      * 05/12/05  LeAnne Fedor
+      *           Users wanted "available" moved to the right of "requested".
+      *           So, changed layout to accommodate.
+      *
+      * 01/21/21  ISE             TSN593
+      *           Replaced *loval with *start
+      *
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsl181d   if   e           k disk
+      *    Item
+      *
+      *
+     Fhsl193d   if   e           k disk
+      *    Request detail
+      *
+      *
+     Fhsj193e   if   e           k disk    rename(qdrec:qdrece)
+      *    Request detail + request header
+      *
+      *
+     Fhsp3709   if   e           k disk
+      *    Workfile: Order Request On Hold Report
+      *
+      *
+     Fqprint    o    f  132        printer oflind(*inof)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *----------------------------------------------------------------
+      * CONSTANTS
+      *----------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *----------------------------------------------------------------
+      * ARRAYS AND TABLES
+      *----------------------------------------------------------------
+      *
+      *----------------------------------------------------------------
+      * STANDALONE FIELDS
+      *----------------------------------------------------------------
+      *
+      * Standard fields
+      *
+     D dash            s            132    inz(*all'-')
+     d rtime           s              6  0
+      *
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D svcmgcd         s                   like(w1cmgcd)
+     D svpmgcd         s                   like(w1pmgcd)
+     D svfscd          s                   like(w1fscd)
+     D svcell          s                   like(w1cell)
+     D svwo            s                   like(w1wo)
+      *
+      *
+      * Parms
+      *
+     D xxbgqt          s                   like(qdrqqt)
+     D xxqt            s                   like(qdrqqt)
+      *
+      *
+      * Print fields
+      *
+     D hrpbflds        s              3
+     D hrverds         s             32
+     D l1avqt          s                   like(qdrqqt)
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Data areas
+      *---------------------------------------------------------------
+      *
+      * Local data area.
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldver                  1      1
+     D  ldemail                2      2
+     D  ldpbfl                 3      3
+      *
+     D  ldppcd                 4      8
+     D  ldcmgcd                9     13
+     D  ldpmgcd               14     18
+     D  ldcell                19     20  0
+     D  ldfscd                21     25  0
+     D  ldwo                  26     35
+      *
+     D  ldppds                36     65
+     D  ldcmgnm               66     90
+     D  ldpmgnm               91    115
+     D  ldfsnm               116    140
+     D  ld1stemail           141    141
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * Print headings
+     C                   except    hrhdr
+      *
+      * Read/print each record in the workfile. (File is keyed in open query
+      * depending on the Version the user has selected.)
+      *
+593  C*    *loval        setll     hsp3709
+593  C     *start        setll     hsp3709
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsp3709                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Break logic (by "Version")
+      *
+     C                   select
+     C                   when      ldver = '1'
+     C                   exsr      $break1
+      *
+     C                   when      ldver = '2'
+     C                   exsr      $break2
+      *
+     C                   when      ldver = '3'
+     C                   exsr      $break3
+     C                   endsl
+      *
+      * Calculate Available Quantity
+      *
+     C                   exsr      $avail
+      * Print Record
+     C                   exsr      $prtrec
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * EOF processing
+      *
+     C                   if        first = yes
+     C                   except    nodata
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Calculate available quantity
+      *---------------------------------------------------------------
+      *
+      * To determine available quantity, you have to have the requested quantity on:
+      *   1) Non-hold orders for this farm budget/budget item
+      *   2) Hold orders for this farm budget/budget item---other than the hold order
+      *      you are currently processing
+      *   3) Hold items for this farm budget/budget item on the hold order
+      *      you are currently processing that have a line number previous to the
+      *      line number you are on
+      *
+     C     $avail        begsr
+      *
+      * First, call the generic program to determine the available quantity.
+      *
+     C                   call      'HP8700'
+     C                   parm                    w1fbsn
+     C                   parm                    w1bgit
+     C                   parm                    w1rqdt
+     C                   parm      0             xxbgqt
+     C                   parm      0             xxqt
+     C                   parm      0             l1avqt
+      *
+      * If this item had 'volume' logic, do 'volume' conversion to get this
+      * value from the UOW measure to the UOM measure.
+      *
+     C                   if        w1vol > 0
+     C     l1avqt        div       w1vol         l1avqt
+     C                   endif
+      *
+      * Now, add logic to subtract out any quantities of this Budget Item on
+      * OTHER requisitions that are on HOLD against this same Farm Budget.
+      * Only include requisitions where the Work Order number is less than
+      * the Work Order you are Currently processing.
+      * (Quantities are already in the UOM measure.)
+      *
+      *
+     C     w1fbsn        setll     hsj193e
+     C                   dou       *in93 = *on                                  Do other req
+     C     w1fbsn        reade     hsj193e                                93
+     C                   if        *in93 = *off and                             If not EOF
+     C                             qdrqsn <> w1rqsn and
+     C                             qhwo < w1wo
+      *
+     C     w1bgit        chain     hsl181d                            92
+     C                   if        *in92 = *off and                             If item hit
+     C                             imbgit = w1bgit
+     C                   sub       qdrqqt        l1avqt
+     C                   endif                                                  If item hit
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do other req
+      *
+      * Now, add logic to subtract out any quantities of this Budget Item on
+      * ALL previous LINES on THIS requisition.
+      * (These quantities are already in the UOM measure.)
+      *
+     C     w1rqsn        setll     hsl193d
+     C                   dou       *in93 = *on or qdlnno > w1lnno               Do detail
+     C     w1rqsn        reade     hsl193d                                93
+     C                   if        *in93 = *off and                             If not EOF
+     C                             qdlnno < w1lnno
+      *
+     C     w1bgit        chain     hsl181d                            92
+     C                   if        *in92 = *off and                             If item hit
+     C                             imbgit = w1bgit
+     C                   sub       qdrqqt        l1avqt
+     C                   endif                                                  If item hit
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do detail
+      *
+      * If Available Quantity is negative, we just want to set it to zero.
+      *
+     C                   if        l1avqt < 0
+     C                   z-add     0             l1avqt
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print a record
+      *---------------------------------------------------------------
+      *
+     C     $prtrec       begsr
+      *
+      * Print headings if necessary
+      *
+     C                   if        *inof = *on                                  If headings
+     C                   except    hrhdr
+      *
+      * Set indicators to control printing of values in columns.
+      *
+     C                   select
+     C                   when      ldver = '3'
+     C                   seton                                        85
+     C                   other
+      *
+     C                   seton                                        818283
+     C                   seton                                        8485
+     C                   endsl
+     C                   endif                                                  If headings
+      *
+      * Print detail record
+      *
+     C                   except    l1dtl
+      *
+      * Set indicators to control printing of values in columns.
+      *
+     C                   select
+     C                   when      ldver = '3'
+     C                   setoff                                       85
+     C                   other
+      *
+     C                   setoff                                       818283
+     C                   setoff                                       8485
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Control break logic for Version 1
+      *---------------------------------------------------------------
+      *
+     C     $break1       begsr
+      *
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   move      w1cmgcd       svcmgcd
+     C                   move      w1pmgcd       svpmgcd
+     C                   z-add     w1cell        svcell
+     C                   z-add     w1fscd        svfscd
+     C                   move      w1wo          svwo
+     C                   seton                                        818283
+     C                   seton                                        8485
+      *
+      * Cell manager
+     C                   when      w1cmgcd <> svcmgcd
+     C                   move      w1cmgcd       svcmgcd
+     C                   move      w1pmgcd       svpmgcd
+     C                   z-add     w1cell        svcell
+     C                   z-add     w1fscd        svfscd
+     C                   move      w1wo          svwo
+     C                   seton                                        818283
+     C                   seton                                        8485
+     C                   if        ldpbfl = yes
+     C                   seton                                        of
+     C                   else
+     C                   except    blank
+     C                   endif
+      *
+      * Production manager
+     C                   when      w1pmgcd <> svpmgcd
+     C                   move      w1pmgcd       svpmgcd
+     C                   z-add     w1cell        svcell
+     C                   z-add     w1fscd        svfscd
+     C                   move      w1wo          svwo
+     C                   seton                                        828384
+     C                   seton                                        85
+      *
+      * Cell
+     C                   when      w1cell <> svcell
+     C                   z-add     w1cell        svcell
+     C                   z-add     w1fscd        svfscd
+     C                   move      w1wo          svwo
+     C                   seton                                        838485
+      *
+      * Farm
+     C                   when      w1fscd <> svfscd
+     C                   z-add     w1fscd        svfscd
+     C                   move      w1wo          svwo
+     C                   seton                                        8485
+      *
+      * Work order
+     C                   when      w1wo <> svwo
+     C                   move      w1wo          svwo
+     C                   seton                                        85
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Control break logic for Version 2
+      *---------------------------------------------------------------
+      *
+     C     $break2       begsr
+      *
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   move      w1pmgcd       svpmgcd
+     C                   move      w1cmgcd       svcmgcd
+     C                   z-add     w1cell        svcell
+     C                   z-add     w1fscd        svfscd
+     C                   move      w1wo          svwo
+     C                   seton                                        818283
+     C                   seton                                        8485
+      *
+      * Production manager
+     C                   when      w1pmgcd <> svpmgcd
+     C                   move      w1pmgcd       svpmgcd
+     C                   move      w1cmgcd       svcmgcd
+     C                   z-add     w1cell        svcell
+     C                   z-add     w1fscd        svfscd
+     C                   move      w1wo          svwo
+     C                   seton                                        818283
+     C                   seton                                        8485
+     C                   if        ldpbfl = yes
+     C                   seton                                        of
+     C                   else
+     C                   except    blank
+     C                   endif
+      *
+      * Cell manager
+     C                   when      w1cmgcd <> svcmgcd
+     C                   move      w1cmgcd       svcmgcd
+     C                   z-add     w1cell        svcell
+     C                   z-add     w1fscd        svfscd
+     C                   move      w1wo          svwo
+     C                   seton                                        828384
+     C                   seton                                        85
+      *
+      * Cell
+     C                   when      w1cell <> svcell
+     C                   z-add     w1cell        svcell
+     C                   z-add     w1fscd        svfscd
+     C                   move      w1wo          svwo
+     C                   seton                                        838485
+      *
+      * Farm site
+     C                   when      w1fscd <> svfscd
+     C                   z-add     w1fscd        svfscd
+     C                   move      w1wo          svwo
+     C                   seton                                        8485
+      *
+      * Work order
+     C                   when      w1wo <> svwo
+     C                   move      w1wo          svwo
+     C                   seton                                        85
+     C                   endsl
+      *
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Control break logic for Version 3
+      *---------------------------------------------------------------
+      *
+     C     $break3       begsr
+      *
+     C                   if        first = yes
+     C                   move      no            first
+     C                   move      w1wo          svwo
+     C                   seton                                        85
+     C                   endif
+      *
+      * Work order
+     C                   if        w1wo <> svwo
+     C                   move      w1wo          svwo
+     C                   seton                                        85
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Set up heading info.
+      *
+     C                   time                    rtime
+      *
+     C                   if        ldppcd = *blank
+     C                   seton                                        91
+     C                   endif
+      *
+     C                   if        ldcmgcd = *blank
+     C                   seton                                        95
+     C                   endif
+      *
+     C                   if        ldpmgcd = *blank
+     C                   seton                                        98
+     C                   endif
+      *
+     C                   if        ldcell = 0
+     C                   seton                                        97
+     C                   endif
+      *
+     C                   if        ldfscd = 0
+     C                   seton                                        94
+     C                   endif
+      *
+     C                   if        ldpbfl = yes
+     C                   eval      hrpbflds = 'Yes'
+     C                   else
+     C                   eval      hrpbflds = 'No '
+     C                   endif
+      *
+     C                   if        ldwo = *blank
+     C                   seton                                        96
+     C                   endif
+      *
+      * Version
+     C                   select
+     C                   when      ldver = '1'
+     C                   seton                                        88
+     C                   eval      hrverds = 'Sort/Print by Cell Manager'
+      *
+     C                   when      ldver = '2'
+     C                   seton                                        89
+     C                   eval      hrverds = 'Sort/Print by Production Manager'
+      *
+     C                   when      ldver = '3'
+     C                   seton                                        87
+     C                   eval      hrverds = 'Sort/Print by Work Order'
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oqprint    e            hrhdr          1 01
+     O                       sdpgm               10
+     O                                           85 'HOG PRODUCTION SYSTEM'
+     O                                          122 'DATE'
+     O                       udate         y    132
+      *
+     O          e            hrhdr          1
+     O                       sdusr               10
+     O                                           82 'ORDER REQUESTS ON HOLD'
+     O                                           89 ' REPORT'
+     O                                          122 'TIME'
+     O                       rtime              132 '  :  :  '
+      *
+     O          e            hrhdr          2
+     O               87      hrverds             95
+     O               88      hrverds             93
+     O               89      hrverds             91
+     O                                          122 'PAGE'
+     O                       page          z    132
+      *
+      *
+     O          e            hrhdr       0  1
+     O                                           19 'Production phase .:'
+     O                       ldppcd              26
+     O               91                          24 'All'
+     O              n91      ldppds              58
+      *
+      *
+     O          e            hrhdr       0  1
+     O                                           19 'Cell manager .....:'
+     O                       ldcmgcd             26
+     O               95                          24 'All'
+     O              n95      ldcmgnm             53
+      *
+      *
+     O          e            hrhdr       0  1
+     O                                           19 'Production manager:'
+     O                       ldpmgcd             26
+     O               98                          24 'All'
+     O              n98      ldpmgnm             53
+      *
+      *
+     O          e            hrhdr       0  1
+     O                                           19 'Cell .............:'
+     O                       ldcell        z     23
+     O               97                          24 'All'
+      *
+      *
+     O          e            hrhdr       0  1
+     O                                           19 'Page break .......:'
+     O                       hrpbflds            24
+      *
+     O
+     O          e            hrhdr       0  1
+     O                                           19 'Farm site ........:'
+     O                       ldfscd        z     26
+     O               94                          24 'All'
+     O              n94      ldfsnm              53
+      *
+      *
+     O          e            hrhdr       0  1
+     O                                           19 'Work order .......:'
+     O                       ldwo                31
+     O               96                          24 'All'
+      *
+      *-------------------------------------------------------------
+      * Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            hrhdr       0  1
+     O                                          132 '--BUDGET-'
+      *
+     O          e            hrhdr       0  1
+      * Version 1
+     O               88                           4 'Cell'
+     O               88                          11 'Prod'
+      * Version 2
+     O               89                           4 'Prod'
+     O               89                          11 'Cell'
+      * Version 3
+     O               87                          34 'Cell'
+     O               87                          41 'Prod'
+      * All versions
+     O                                           48 'Item'
+     O                                           99 'Requested Qty'
+     O                                          121 'Available Qty'
+     O                                          132 'From Date'
+      *
+     O          e            hrhdr       0  1
+      *
+      * Version 1 and Version 2
+      *
+     O              n87                           3 'Mgr'
+     O              n87                          10 'Mgr'
+     O              n87                          18 'Cell'
+     O              n87                          25 'Farm'
+     O              n87                          38 'W.O. Number'
+      * Version 3
+     O               87                          13 'W.O. Nbr'
+     O               87                          21 'Cell'
+     O               87                          28 'Farm'
+     O               87                          33 'Mgr'
+     O               87                          40 'Mgr'
+      *
+      * All versions
+     O                                           55 'Description'
+     O                                           84 'Req Date'
+     O                                           96 'Budget Nbr'
+     O                                          108 'Comment'
+     O                                          131 'To Date'
+      *
+     O          e            hrhdr       0  2
+     O                       dash               132
+      *
+      *
+      *-------------------------------------------------------------
+      * Detail line for Version 1
+      *-------------------------------------------------------------
+      *
+      * Version 1
+     O          e    88      l1dtl       0  0
+     O               81      w1cmgcd              5
+     O               82      w1pmgcd             12
+     O               83      w1cell        z     17
+     O               84      w1fscd        z     25
+     O               85      w1wo                37
+      *
+      * Version 2
+     O          e    89      l1dtl       0  0
+     O               81      w1pmgcd              5
+     O               82      w1cmgcd             12
+     O               83      w1cell        z     17
+     O               84      w1fscd        z     25
+     O               85      w1wo                37
+      *
+      * Version 3
+     O          e    87      l1dtl       0  0
+     O               85      w1wo                15
+     O                       w1cell        z     20
+     O                       w1fscd        z     28
+     O                       w1cmgcd             35
+     O                       w1pmgcd             42
+      *
+      * All versions
+     O          e            l1dtl       0  1
+     O                       w1itcd              69
+     O                       w1rqmdy             84 '  /  /  '
+     O                       w1rqqt        k    100
+     O                       l1avqt        jb   122
+     O                       w1bfmdy            132 '  /  /  '
+      *
+      *
+     O          e            l1dtl       0  2
+     O                       w1itds              84
+     O                       w1fbsn        z     93
+     O                       w1com              121
+     O                       w1btmdy            132 '  /  /  '
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank       2
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata      1
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'
+      /eject

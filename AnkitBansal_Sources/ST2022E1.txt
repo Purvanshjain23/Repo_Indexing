@@ -1,0 +1,951 @@
+     Z* CRTBNDRPG
+     Z* DFTACTGRP(*NO) BNDDIR(YBNDDIR) DBGVIEW(*SOURCE)
+     Z* CVTOPT(*DATETIME) ACTGRP(*CALLER) OPTIMIZE(*BASIC)
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      Transportation - Copied from ST2022
+      * PROGRAM:     ST2022 - Create Carrier Payables and AP entry vouchers from
+      *                       PowerPro into JDE.
+      * PROGRAMMER:  Barb Gutierrez / Rose Centonze
+      * CREATED:     03/23/10       /  3/27/2020
+      *
+      *  FUNCTION:   This program reads the header/detail file of invoices
+      *              generated out of power pro and creates the vouchers into JDE
+      *              ready for payment.
+      *
+      *              These vouchers are written under the user TRSSI as unposted.
+      *              It is the users responsibility to approve them and post them.
+      *              The user that approves/posts in JDE must have authority to
+      *              to approve/post batches for user TRSSI.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      * 2/8/2011  Barb Gutierrez
+      *           Fixed problem with account id and mcu/obj/sub not coinciding
+      *           with each other when written to JDE. Reqeust C01322.
+      *
+      * 5/6/2011  Barb Gutierrez
+      *           Changed to retrieve the payment instrument type from F0401 instead
+      *           of defaulting an "L".  An "L" is for checks only.  Some vendors
+      *           prefer ACH payments.  E00939.
+      *
+      *  3/27/2020 p16169 Rose Centonze
+      *                   Modified to use E1 programs & files:
+      *                   x0010  --> e1I0010 -> GET0010
+      *                   x0028  --> e1I0028 -> E10028A
+      *                   x0901  --> e1I0901
+      *                   x09031 --> e1I09031  - GET09031 - goes to bssv
+      *                   x0302  --> e1I0302   - DONT NEED TO DO THIS- E1 WILL CALC
+      *                   F0011  --> e10011L0   --> when wrt, also with e1b9cpp workfile E1LCXFR
+      *                   F0014  --> e10014L0  chg field prefix  pn to en
+      *                   F0101la--> e10101LA
+      *                   F0901  --> e10901
+      *                   F0401L0--> e10401L0
+      *                   F0411  --> e10411   - chg field prefix from RP to EL -new fields
+      *                   F0911  --> e10911   - new fields
+      *         1 set edi trans no to gldoc
+      *         2 GLKCO       - document company - leave blank
+      *         3 GLPKCO  GLOKCO  GLPSFX  - leave blank , not 000
+      *         4 glrcnd - reconciled-leave Blank
+      *         5 glaa - should has the amt for "V"ouchers, glag has the amount for "G" batches
+      *         6 icndo, icodcn- increment when get document
+      *   10/23/20 LOAD F0411.ELAN8 from F0101.ABAN8 and F0411.ELPYE from F0101.ABAN85.
+      *                     --> ALT PAYEE
+      *   01/18/22 sdn440  change co 390 to 355
+      /EJECT
+      ****************************************************************
+      * File specifications
+      ****************************************************************
+      *
+     Fstl203a   if   e           k disk
+      *    Hdr wrkf of carrier payables and ap entry  K= thsrcty, thinvno
+      *
+     Fstl204a   if   e           k disk
+      *    Dtl wrkf of carrier payables and ap entry  K= tdinvno, tdldid, tdaid
+      *
+     F*f0011     uf a e           k disk                                      P16169
+     FE10011L0  uf a e           k disk
+      *   JDE Batch control record
+      *
+     F*f0014     uf a e           k disk                                  P16169
+     FE10014l0  uf a e           k disk
+      *   JDE Payment terms
+      *
+     F*f09011b   if   e           k disk                                   P16169
+     FE10901lb  if   e           k disk
+      *   JDE Account Master
+      *
+     F*f0101la   if   e           k disk                                    P16169
+     FE10101la  if   e           k disk
+      *   JDE Vendor master
+      *
+     F*f0401     if   e           k disk                                     P16169
+     FE10401L0  if   e           k disk
+      *   JDE Supplier master
+      *
+     F*f0411     uf a e             disk                                      P16169
+     FE10411    uf a e             disk
+      *   JDE Accounts payable ledger
+      *
+     F*f0911     uf a e             disk                                       P16169
+     FE10911    uf a e             disk
+      *   JDE Account ledger
+      *
+      /EJECT
+      ****************************************************************
+      * Definition specifications
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D wkuser          c                   const('TRSSI     ')
+      *
+      *---------------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------------
+      *
+      * Control fields
+      *
+     d first           s              1    inz('Y')
+     d svaid           s                   like(tdaid)
+     d svsrcty         s                   like(thsrcty)
+     d svldid          s                   like(tdldid)
+      *
+      * Standard fields
+      *
+     d return          s              7
+      *
+      * Workfields
+      *
+     d*wkkco           s                   like(glco) inz('00390')
+     d wkkco           s                   like(glco) inz('00355')
+      *
+     d wkag            s                   like(elag)
+     d wkaa            s                   like(elag)
+     d wkgaa           s                   like(tddamt)
+     d wkindt          s              6
+     d wkicut          s                   like(glicut) inz('V ')
+     d wkhhmmss        s                   like(glticu)
+     d wkpdct          s                   like(glpdct) inz('OP')
+     d wkdct           s                   like(gldct) inz('PV')
+     d wkam            s                   like(glam) inz('2')
+     d wkbatcnt        s              5  0
+     d wkdoccnt        s              5  0
+     d wkaid           s              8
+     d wkani           s             29
+     d*wkbatval        s             15  0
+     d wkbatval        s             15  2                                      p16169 has decs
+     d jeamt           s                   like(tddamt)
+     d wkamt           s                   like(tddamt)
+     d wkglcode        s              8
+     D wkpsfx          s              3
+     D svglid          s              8
+     D svmcu           s             12
+     D svobj           s              6
+     D svsub           s              8
+     d wkco3           s              3  0
+      *
+     d wkmcu           s                   like(elmcu)
+     d wkobj           s                   like(elobj)
+     d wksub           s                   like(elsub)
+      *
+     d wktime          s             12  0
+     d wkdate          s              6
+     d wksidat         s              6
+     d wkmmddyy        s              6  0
+     d wkisodate       s               D   datfmt(*iso)
+     D xxsyssyndt      s              7  0
+     D xxccyymmdd      s              8  0
+      *
+      * Parm fields
+      *
+     d xxdivj          s              6
+     d xxddnj          s              6
+      *
+     d xxcalc          s              1
+     d xxdate          s              6  0
+     d xxpn            s                   like(glpn)
+     d xxfy            s                   like(glfy)
+     d xxctry          s                   like(glctry)
+     d xxedt           s              1
+     d xxdgsy          s              1
+      *
+     d xxsidat         s              6
+     d xxedat          s              6  0
+     d xxffmt          s              7
+     d xxtfmt          s              7
+     d xxsep           s              7
+     d xxertst         s              1
+     d xxctryalph      s              2
+      *
+     d xxedln          s                   like(gledln)                          edi line  number
+      *
+     d xxbatch         s                   like(glicu)
+     d xxbat8          s              8
+     d xxsy            s              4
+     d xxidx           s              2
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxerrm          s              4
+     d xxnumco         s              3  0
+     d xxacctco        s              3  0
+     d xxglcode        s              8
+     d xxsubtype       s              1
+     d xxbalsheet      s              1
+      *
+     d xxani           s                   like(glani)
+     d xxicu           s                   like(glicu)
+     d xxdoc           s                   like(gldoc)
+      *
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+     d i0901ds         ds           500
+     d xxco                                like(gmco)
+     d xxaid                               like(gmaid)
+     d xxmcu                               like(gmmcu)
+     d xxobj                               like(gmobj)
+     d xxsub                               like(gmsub)
+     d xxans                               like(gmans)
+     d xxdl01                              like(gmdl01)
+     d xxlda                               like(gmlda)
+     d xxbpc                               like(gmbpc)
+     d xxpec                               like(gmpec)
+     d xxbill                              like(gmbill)
+     d xxcrcd                              like(gmcrcd)
+     d xxum                                like(gmum)
+     d xxr001                              like(gmr001)
+     d xxr002                              like(gmr002)
+     d xxr003                              like(gmr003)
+     d xxr004                              like(gmr004)
+     d xxr005                              like(gmr005)
+     d xxr006                              like(gmr006)
+     d xxr007                              like(gmr007)
+     d xxr008                              like(gmr008)
+     d xxr009                              like(gmr009)
+     d xxr010                              like(gmr010)
+     d xxr011                              like(gmr011)
+     d xxr012                              like(gmr012)
+     d xxr013                              like(gmr013)
+     d xxr014                              like(gmr014)
+     d xxr015                              like(gmr015)
+     d xxr016                              like(gmr016)
+     d xxr017                              like(gmr017)
+     d xxr018                              like(gmr018)
+     d xxr019                              like(gmr019)
+     d xxr020                              like(gmr020)
+     d xxr021                              like(gmr021)
+     d xxr022                              like(gmr022)
+     d xxr023                              like(gmr023)
+     d xxobja                              like(gmobja)
+     d xxsuba                              like(gmsuba)
+     d xxwcmp                              like(gmwcmp)
+     d xxcct                               like(gmcct)
+     d xxerc                               like(gmerc)
+     d xxhtc                               like(gmhtc)
+     d xxqlda                              like(gmqlda)
+     d xxccc                               like(gmccc)
+     d xxfmod                              like(gmfmod)
+     d xxuser                              like(gmuser)
+     d xxpid                               like(gmpid)
+     d xxjobn                              like(gmjobn)
+     d xxupmj                              like(gmupmj)
+     d xxupmt                              like(gmupmt)
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *----------------------------------------------------------------
+      * MAINLINE
+      *---------------------------------------------------------------
+      *
+      * Read each record in the header file and write a voucher for each invoice.
+      *
+     C     *loval        setll     stl203a
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      stl203a                                90
+     C                   if        *in90 = *off                                 If not EOF
+     C*
+     C* Get new batch number when the source type changes.
+     C* Carrier payables source type (CP).  A/P entry source type (AP).
+     C*
+     C                   if        thsrcty <> svsrcty
+     C*
+     C                   if        wkbatval <> 0
+     c                   exsr      $f0011
+     C                   z-add     0             wkbatval
+     C                   endif
+     C*
+     c                   exsr      $batnbr
+     c                   move      thsrcty       svsrcty
+     C                   endif
+     C*
+     C* Get a new voucher number for every record in the header file.  There is one record per
+     C* invoice.
+     C*
+     C                   exsr      $docnbr
+     C*
+     C* Format invoice date into 6.0 to retrieve julian equivalent from jde.  Change format
+     C* from ccyymmdd to mmddyy.
+     C*
+     C     *iso          test(d)                 thindt                 80
+     C                   if        *in80 = *off
+     C                   move      thindt        wkisodate
+     C     *mdy          move      wkisodate     wkmmddyy
+     C                   else
+     C                   z-add     0             wkmmddyy
+     C                   endif
+     C*
+     C                   move      wkmmddyy      wkdate
+     C                   move      wkmmddyy      wkdaten           6 0
+      *
+     C     *mdy          movel     wkdaten       wkisodate
+     C                   movel     wkisodate     xxccyymmdd
+      *
+     C                   exsr      $fmtdte
+     C                   move      xxsidat       glivd
+     C                   move      xxsidat       eldivj
+     C*
+     C* Format process date into 6.0 to retrieve julian equivalent from jde.  Change
+     C* format from ccyymmdd to mmddyy.
+     C*
+     C     *iso          test(d)                 thprdt                 80
+     C                   if        *in80 = *off
+     C                   move      thprdt        wkisodate
+     C     *mdy          move      wkisodate     wkmmddyy
+     C                   else
+     C                   z-add     0             wkmmddyy
+     C                   endif
+     C*
+     C* Format process date into Julian date to use as GL date
+     C*
+     C                   move      wkmmddyy      wkdate
+     C                   move      wkmmddyy      wkdaten           6 0
+
+      *
+     C     *mdy          movel     wkdaten       wkisodate
+     C                   movel     wkisodate     xxccyymmdd
+     C                   exsr      $fmtdte
+     C                   move      xxsidat       wksidat
+      *
+      * Retrieve the Accounting Year/Period, etc. for the process Date by calling a
+      * JDE program.  Date needs to be in mm/dd/yy format (6.0) passed into this JDE pgm.
+      *
+     C*  P16169          call      'X09031'
+     C*                  call      'E1I09031'
+     C*                  parm      '1'           xxcalc
+     C*                  parm      wkkco         xxco
+     C*                  parm      wkmmddyy      xxdate
+     C*                  parm                    xxpn
+     C*                  parm                    xxfy
+     C*                  parm                    xxctry
+     C*                  parm                    xxedt
+     C*                  parm                    xxdgsy
+JEU56 * Begin of Added code for GET09031                                    p16169
+JEU56 * Retrieve Acct. Period                                     copied from smlgen/qrpgsrc/edenupr
+JEU56C                   MOVE      xxedat        #DG                             julian date
+     C                   move      wkkco         #CO
+MN04 C                   move      0             #CTRY             2 0
+MN04 C                   move      0             #FY               2 0
+      *
+MN04 C******             CALL      'GETFYPNO'
+MN04 C                   CALL      'GET09031'
+MN04 C                   PARM                    #CO               5
+MN04 C                   PARM                    #DG               6 0
+MN04 C                   PARM      0             #PN               2 0
+MD   C                   PARM      0             #FY               2 0
+MD   C                   PARM      0             #CTRY             2 0
+     C                   parm      ' '           BSSV              1
+MN04  *
+MN04  *
+     C                   z-add     #pn           xxpn                           period
+     C                   z-add     #fy           xxfy                           fiscal year
+     C                   z-add     #ctry         xxctry                         fiscal century
+      *
+      ******* End of code added for GET09031                                     p16169
+     C*
+     C* Retrieve the voucher detail..
+     C*
+     C                   move      yes           first
+     C                   exsr      $getdet
+     C*
+     C* After all voucher detail is procesed, write the voucher to F0411
+     C*
+     C                   exsr      $f0411
+     C*
+     C                   z-add     0             wkdoccnt
+     C*
+     C                   z-add     0             jeamt
+     C                   z-add     0             wkag
+     C                   z-add     0             wkgaa
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *-----------------------------
+      * EOF processing
+      *-----------------------------
+      *
+      * Last record processing for:
+      *  1) Batch Control Record file
+      *
+     C                   if        wkbatcnt <> 0
+     C                   exsr      $f0011
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve detail for voucher
+      *---------------------------------------------------------------
+      *
+     C     $getdet       begsr
+      *
+     C     thinvno       setll     stl204a                                      HAVE RECORD
+     C                   dou       *in91 = *on                                  Main do
+     C     thinvno       reade     stl204a                                91
+      *
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      *  If source type is Carrier payables, we want to summarize entries by
+      *  load id and account id.
+      *
+     C                   select
+     C                   when      svsrcty = 'CP'
+      *
+      * If first time for this invoice, save acct id and load id.
+      *
+     C                   if        first = yes
+     C                   move      tdaid         svaid
+     C                   move      tdmcu         svmcu
+     C                   move      tdobj         svobj
+     C                   move      tdsub         svsub
+     C                   move      tdldid        svldid
+     C                   move      no            first
+     C                   endif
+      *
+      * Only write records when the account id changes or the load id changes.
+      *
+     C                   if        tdaid <> svaid or tdldid <> svldid
+     C                   exsr      $f0911
+     C                   exsr      $save
+     C                   z-add     0             jeamt
+     C                   z-add     0             wkamt
+     C                   endif
+      *
+      * accumulate amount
+      *
+     C     tddamt        sub       tdcamt        jeamt
+     C                   add       jeamt         wkamt                          911 accum
+     C                   add       jeamt         wkgaa                          411 accum
+      *
+     C                   movel     svldid        glsbl                          subledger
+     C                   movel     'X '          glsblt                         subledger type
+     C                   movel     *blanks       glexr                          explanation 2
+      *
+      *  If source type is Accounts payable, we want to write out each detail
+      *  record so we can track the driver vendor number.
+      *
+      *
+     C                   when      svsrcty = 'AP'
+      *
+      * accumulate amount
+      *
+     C     tddamt        sub       tdcamt        jeamt
+     C                   move      jeamt         wkamt                          911 accum
+     C                   add       jeamt         wkgaa                          411 accum
+      *
+     C                   movel     tddrvnd       glsbl                          subledger
+     C                   movel     'A '          glsblt                         subledger type
+     C                   movel     tdexpl        glexr                          explanation 2
+      *
+      * move the detail account number fields into the save fields even though we're
+      * not saving them for any processing.  This will allow us to use the same code
+      * that we use for source type of CP.
+      *
+     C                   move      tdaid         svaid                          account id
+     C                   move      tdmcu         svmcu                          cost center
+     C                   move      tdobj         svobj                          object
+     C                   move      tdsub         svsub                          subcode
+      *
+     C                   exsr      $f0911
+     C                   ENDSL
+      *
+     C                   endif
+     C                   enddo
+      *
+      * write out last record
+      *
+     C                   if        svsrcty = 'CP'
+     C                   exsr      $f0911
+     C                   exsr      $save
+     C                   endif
+     C                   z-add     0             jeamt
+     C                   z-add     0             wkamt
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve a document number from JDE
+      *---------------------------------------------------------------
+      *
+     C     $docnbr       begsr
+      *
+     C*  P16169          call      'X0010 '
+     C*                  call      'E1I0010 '
+     C*                  parm      '04  '        xxsy
+     C*                  parm      '01'          xxidx
+     C*                  parm                    xxdoc
+      *
+     C                   call      'GET0010 '
+     C                   parm      '04  '        xxsy
+     C                   parm      '01'          xxidx
+     C                   parm                    spsnbr           15 0
+     C                   PARM      ' '           bssv
+     C                   z-add     spsnbr        xxdoc                          document number
+     C                   add       1             wkbatcnt                       no of docs
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Save control fields
+      *---------------------------------------------------------------
+      *
+     C     $save         begsr
+      *
+     C                   move      tdaid         svaid
+     C                   move      tdldid        svldid
+     C                   move      tdmcu         svmcu
+     C                   move      tdobj         svobj
+     C                   move      tdsub         svsub
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve a batch number from JDE
+      *---------------------------------------------------------------
+      *
+     C     $batnbr       begsr
+      *
+     C*  P16169          call      'X0010 '
+     C*                  call      'E1I0010 '
+     C*                  parm      '00  '        xxsy
+     C*                  parm      '01'          xxidx
+     C*                  parm                    xxbatch
+     C*                  move      xxbatch       xxbat8
+     c*
+
+     C                   call      'GET0010 '
+     C                   parm      '00  '        xxsy
+     C                   parm      '01'          xxidx
+     C                   parm      0             spsnbr           15 0          chg from xxbatch
+     C                   parm      ' '           bssv              1            added parm
+     c                   move      spsnbr        xxbatch                        batch no.
+     c                   move      xxbatch       xxbat8                         batch no.
+     C                   z-add     0             wkbatcnt                       no of docs
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Execute subroutine to format dates into Julian dates.
+      *---------------------------------------------------------------
+      *
+     C     $fmtdte       begsr
+      *
+     C*                  move      '*MDY   '     xxffmt
+      *
+     C*  P16169          call      'X0028'
+     C*                  call      'E1I0028'
+     C*                  parm      wkdate        xxsidat
+     C*                  parm      blank         xxedat
+     C*                  parm                    xxffmt
+     C*                  parm      '*JUL   '     xxtfmt
+     C*                  parm      '*NONE'       xxsep
+     C*                  parm      *blank        xxertst
+     C*                  parm      *blank        xxctryalph
+      *
+     C                   call      'E10028A'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxedat
+      *
+     C                   move      xxedat        xxsidat
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write detail records to the account ledger file
+      *---------------------------------------------------------------
+      *
+     C     $f0911        begsr
+      *
+      * Populate fields that have constant values
+      *
+     C                   move      wkkco         glpkco
+     C                   move      wkpdct        glpdct
+     C                   move      wkicut        glicut                         batch type
+     C***                move      wkkco         glkco                          document co #
+     C                   move      *blanks       glkco                          document co #
+     C                   move      wkdct         gldct                          document type
+     C                   z-add     xxdoc         gldoc                          document number
+      *
+     C                   z-add     xxbatch       glicu                          batch number
+      *
+     C                   move      wksidat       gldgj                          G/L date
+     C                   move      wksidat       gldicj                         Batch date
+     C                   move      wksidat       gldsyj                         Batch System date
+     C                   move      wksidat       gldsvj                         Service/Tax Date
+     C                   z-add     wkhhmmss      glticu                         Batch Time
+      *
+     C                   move      wkkco         glco                           Company
+     C                   move      wkam          glam                           Account Mode
+      *
+     C                   z-add     xxpn          glpn                           Period Number
+     C                   z-add     xxctry        glctry                         Century
+     C                   z-add     xxfy          glfy                           Fiscal year
+      *
+     C***                move      '000'         glpsfx                         PO Suffix
+     C                   move      '   '         glpsfx                         PO Suffix
+     C**                 move      sdusr         gltorg                         Transaction Origin
+     C                   move      wkuser        gltorg                         Transaction Origin
+     C                   move      sdpgm         glpid                          Program ID
+     C                   movel     sdjob         gljobn                         Workstation ID
+      *
+     C                   move      xxsidat       glupmj                         Date Updated
+     C                   z-add     wkhhmmss      glupmt                         Time Last Updated
+     C                   move      'AA'          gllt                           Ledger Type
+      *
+      * Move fields from detail file to JDE Account ledger record
+      *
+     C                   move      wkuser        gluser
+     C                   z-add     thvndno       glan8
+     C                   movel     svldid        glpo
+     C                   movel     thinvno       glvinv
+      *
+      * P16169 added for new fields in e10911
+     C                   movel     gluser        gledus                         edi user id
+     C                   movel     glicu         gledbt                         edi batch no
+     C                   movel     xxdoc         gledtn                         edi trans ->uniq/inv
+     C                   add       1             xxedln                         edi line no
+     C                   z-add     xxedln        gledln                         edi line no
+     C                   movel     '0'           gledsp                         edi success procd
+     C                   movel     'A'           gledtc                         edi trans action
+     C                   movel     'V'           gledtr                         edi trans type
+     C                   move      xxsyssyndt    glabdt                         Date updated
+     C                   z-add     wkhhmmss      glabtm                         Time Last Updated
+     C                   movel     'ST2022E1'    glakvn                         pgm  Last Updated
+     C                   movel     gluser        glajvn                         user id created
+     C                   movel     'B'           gleder                          send/rec/both
+     C                   movel     'D'           glcrrm                          currency-For/Dom
+     C                   movel     'USD'         glcrcd                          currency code-from
+      *
+      *
+      * Retrieve vendor name
+      *
+     C                   move      *blanks       glexa                          explanation
+     C*    glan8         chain     i0101                              92         P16169
+     C     glan8         chain     i0101LA                            92
+     C                   if        *in92 = *off                                 If found
+     C                   movel     abalph        glexa                          explanation
+     C                   Z-ADD     ABAN85        XXPYE             8 0          ADR PAYEE 411
+     C                   else                                                   Not found
+     C                   move      *blanks       glexa                          explanation
+     C                   Z-ADD     0             XXPYE                          ADR PAYEE 411
+     C                   endif                                                  If found
+      *
+      * Get Amount into the JDE non-decimal format by multiplying by 100.
+      *  P16169 JDE HAS DECIMALS NOW
+     C**   100           mult      wkamt         wkaa
+     C                   z-add     wkamt         wkaa
+     C*
+     C                   Z-ADD     wkaa          glaa
+     C**                 Z-ADD     wkaa          glag
+      *
+     C                   move      svmcu         glmcu
+     C                   move      svobj         globj
+     C                   move      svsub         glsub
+     C                   move      svaid         glaid
+      *
+      * Retrieve JDE unstructured account number
+      *
+     C*  P16169          call      'X0901'
+     C                   call      'E1I0901'
+     C                   parm                    xxsym
+     C                   parm      '2'           xxomod
+     C                   parm      '1'           xximod
+     C     wkani         parm      svaid         xxani
+     C                   parm                    xxmcu
+     C                   parm                    xxobj
+     C                   parm                    xxsub
+     C                   parm      *blank        xxerrm
+     c                   parm                    i0901ds
+      *
+     C                   if        xxerrm = *blank
+     C                   move      wkani         glani
+     C                   else
+     C                   move      *blank        glani
+     C                   endif
+      *
+      * Increment the counters of a) the batch and b) the document group
+      *
+     C****               add       1             wkbatcnt     increment when get doc nbr
+     C                   add       1             wkdoccnt
+     C                   z-add     wkdoccnt      gljeln
+      *
+      * Accumulate the value for the batch header 'amount entered' field.
+      *
+     C                   if        glaa > *zero                                 credit amount
+     C                   add       glaa          wkbatval
+     C**                 if        glag > *zero                                 credit amount
+     C**                 add       glag          wkbatval
+     C                   endif                                                  credit amount
+      *
+     C                   write     i0911
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write 1 record per invoice to the Accounts Payable Ledger file
+      *---------------------------------------------------------------
+      *
+     C     $f0411        begsr
+      *
+     C                   move      wkkco         elkco                          Document Company
+     C                   z-add     xxdoc         eldoc                          Document Number
+     C                   move      wkdct         eldct                          Document Type
+     C                   move      '001'         elsfx                          Pay Item
+     C                   z-add     glan8         elan8                          Vendor Number
+     C**                 z-add     glan8         elpye                          Payee Address #
+     C                   z-add     xxpye         elpye                          Payee Addr 10-23-20
+      *
+     C                   move      wksidat       eldsvj                         Service/Tax Date
+     C                   move      wksidat       eldgj                          G/L Date
+     C                   z-add     xxctry        elctry                         Century
+     C                   z-add     xxfy          elfy                           Fiscal Year
+     C                   z-add     xxpn          elpn                           Period Number
+     C                   move      wkkco         elco                           Company #
+      *
+     C                   z-add     xxbatch       elicu                          Batch #
+     C                   move      wkicut        elicut                         Batch Type
+     C                   move      wksidat       eldicj                         Batch Date
+     C                   move      'Y'           elbalj                         Balanced JE's
+     C                   move      'A'           elpstc                         Pay Status
+      *
+      * New Fields for E10411  - P16169
+      *
+     C                   movel     gluser        eledus                         edi user id
+     C                   movel     glicu         eledbt                         edi batch no
+     C                   movel     xxdoc         eledtn                         edi trans ->uniq/inv
+     C                   add       1             xxedln                         edi line no
+     C                   z-add     xxedln        eledln                         edi line no
+     C                   movel     '0'           eledsp                         edi success procd
+     C                   movel     'A'           eledtc                         edi trans action
+     C                   movel     'V'           eledtr                         edi trans type -Vchr
+     C                   move      xxsyssyndt    elabdt                         Date updated
+     C                   z-add     wkhhmmss      elabtm                         Time Last Updated
+     C                   movel     'ST2022E1'    elakvn                         pgm  Last Updated
+     C                   movel     gluser        elajvn                         user id created
+     C                   movel     'B'           eleder                          send/rec/both
+     C                   movel     'D'           elcrrm                          currency-For/Dom
+     C                   movel     'USD'         elcrcd                          currency code-from
+      *
+      * Get Amount into the JDE non-decimal format by multiplying by 100.
+      *
+     C***  100           mult      wkgaa         wkag                           p16169 use decs now
+     c                   z-add     wkgaa         wkag
+     C                   z-add     wkag          elag                           Gross Amount
+     C                   z-add     wkag          elaap                          Open Amount
+      *
+     C                   move      wkam          elam                           Account Mode
+     C                   move      '         391'elmcu                          Cost Center
+      *
+     C                   move      wkuser        eluser                         User ID
+     C                   movel     glvinv        elvinv                         Invoice Number
+     C                   move      wkkco         elpkco                         PO Document Co #
+      *
+      * Move load id into po number
+      *
+     C                   move      svldid        elpo                           PO number
+     C                   move      wkpdct        elpdct                         PO Document Type
+      *
+     C************       move      'L'           elpyin                         Payment Instr type
+      *
+     C***                move      sdusr         eltorg                         Transaction origin
+     C                   move      wkuser        eltorg                         Transaction origin
+     C                   move      sdpgm         elpid                          Program id
+     C                   move      xxsidat       elupmj                         Date updated
+     C                   z-add     wkhhmmss      elupmt                         Time Last Updated
+     C                   movel     sdjob         eljobn                         Job number
+      *
+      * execute subroutine to calculate the due date, terms and discount.
+      *
+     C                   exsr      $duedate
+      *
+      * Get account ID from pkcwrel5 for the bank account.
+      *
+     C                   eval      svglid  = *blanks                             Account ID
+     C                   eval      wkglcode = 'TRBANK'                           GL acct Code
+     C                   move      wkkco         wkco3
+      *
+      * Retrieve Account I.D. associated with G/L Code.
+      *
+     C                   call      'PKTIXFR'
+     C                   parm                    return
+     C                   parm      wkco3         xxnumco
+     C                   parm      wkglcode      xxglcode
+     C     svglid        parm      *blank        xxaid
+     C                   parm      *blank        xxsubtype
+     C                   parm      *blank        xxbalsheet
+     C                   parm      *zeros        xxacctco
+      *
+     C                   move      svglid        elglba
+      *
+     C                   write     i0411
+      *
+      * Clear accumulator for gross amount
+      *
+     C                   z-add     0             wkag
+     C                   z-add     0             wkgaa
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Get the due date, etc
+      *---------------------------------------------------------------
+      *
+     C     $duedate      begsr
+      *
+      * Retrieve the vendor's 'payment terms' from the Supplier Master file.
+      *
+     C*    thvndno       chain     f0401                              92
+     C     thvndno       chain     E10401L0                           92          P16169
+     C                   if        *in92 = *off                                 If found
+      *
+      * Retrieve discount% associated with payment terms and calc two
+      * fields: discount available and discount taken
+      *
+     C**   a6trap        chain     F0014                              92
+     C     a6trap        chain     E10014L0                           92         P16169
+     C                   if        *in92 = *off                                 If disc hit
+     C     elag          mult(h)   endcp         eladsa
+     C                   z-add     eladsa        eladsc
+     C                   endif                                                  If disc hit
+      *
+     C                   move      a6trap        elptc                          payment terms
+     C                   move      a6pyin        elpyin                         payment instrument
+     C                   move      eldivj        xxdivj                         invoice date
+      *
+      * Make calls/calcs to arrive at the due dates for the invoice
+      *
+     C*  P16169          call      'X0302 '
+     C*                  call      'E1I0302 '
+     C*                  parm                    xxdivj                         invoice/due date
+     C*                  parm      '000000'      xxddnj                         discount due date
+     C*                  parm                    a6trap                         payment terms
+     C*                  parm      *blank        xxerrm
+     C*                  move      xxdivj        elddj                          due date
+     C*                  move      xxddnj        elddnj                         discount due date
+      * LEAVE BLANK - E1 WILL CALC
+     C                   Z-ADD     0             elddj                          due date
+     C                   Z-ADD     0             elddnj                         discount due date
+      *
+      * If 'discount due date' is zero, then move Invoice Due Date into the field.
+      *
+     C                   if        elddnj = 0
+     C                   z-add     elddj         elddnj
+     C                   endif
+      *
+     C                   move      elddj         eldsvj                         service/tax date
+      *
+     C                   endif                                                  If found
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a batch record
+      *---------------------------------------------------------------
+      *
+     C     $f0011        begsr
+      *
+      * Write a batch header record to batch control file
+      *
+     C*    key01         chain     f0011                              92          P16169
+     C     key01         chain     E10011L0                           92
+     C                   if        *in92 = *on                                  If no hit
+     C                   z-add     wkbatcnt      icndo
+     C                   z-add     wkbatcnt      icdocn
+     C***                z-add     0             icaicu
+     C                   move      wkbatval      icaicu                         added 9-10-20
+     C                   z-add     wkbatval      icame
+      *
+     C                   z-add     xxbatch       icicu
+     C                   move      *blank        icist
+     C                   movel     wkuser        icuser
+     C                   move      wkicut        icicut
+     C                   move      wksidat       icdicj
+     C                   move      'A'           iciapp
+     C                   move      'Y'           icbal
+     C                   move      ' '           icbalj
+     C                   move      'N'           icpob
+     C                   move      *blank        iciboi
+      *
+     C                   write     i0011L0
+     C*
+     C* WRITE RUN LOG HEADER WORKFILE - WILL BE READ IN CL pdwaupr TO PUSH BATCHES TO ZPROCESSOR
+     C*
+     C                   call      'E1LCXFR'
+     c                   parm                    RETURN            7
+     C                   parm                    icICUT                         BATCH TYPE
+     C                   parm                    icICU                          BATCH NUMBER
+     C                   parm                    icuser                         USER
+     C                   parm                    wkkco                          company
+     C                   endif                                                  If no hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm Lists
+      *
+     C     *entry        plist
+     C                   parm                    xxbat8
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    wkicut
+     C                   kfld                    xxbatch
+      *
+      * Save the system time for populating fields.
+      *
+     C                   time                    wkhhmmss
+      *
+      *
+      * Put system date into an 7,0 workfield for updating the 911 / 411 rcds
+      *
+     C     *mdy          movel     udate         wkisodate
+     C                   movel     wkisodate     xxccyymmdd
+     C                   call      'HP8008'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxsyssyndt
+     C                   endsr
+      /eject

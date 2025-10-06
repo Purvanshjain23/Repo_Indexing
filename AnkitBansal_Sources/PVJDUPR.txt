@@ -1,0 +1,159 @@
+**Free
+Ctl-Opt Debug
+        DftActGrp( *No ) ActGrp( *Caller )
+        Option( *ShowCpy: *SrcStmt: *NoDebugIO );
+//--------------------------------------------------------------------------------------------------
+//‚Program Name. . . . . : PVJDUPR
+//‚Program Description . : Fix city,state in consignee address
+//‚Date Created. . . . . : 01/21/2025
+//‚Programmer. . . . . . : Jagdish Mistry
+//--------------------------------------------------------------------------------------------------
+//‚Files:
+//--------------------------------------------------------------------------------------------------
+Dcl-F PDMMREL1 Disk Usage(*Input) Keyed;
+Dcl-F OPBFCPL1 Disk Usage(*Input) Keyed;
+
+//-------------------------------------------------------------------------------------------
+//‚Program prototypes
+//-------------------------------------------------------------------------------------------
+   Dcl-PR FixAddr   ExtPgm('PVJDUPR');
+     p_mode Char(1);
+   End-PR;
+   dcl-pr PVJAXFR Extpgm;
+     wk_Blank    Char(7)    ;
+     wk_comp     Packed(3:0);
+     wk_order    Packed(7:0);
+     wk_docType  Char(1)    ;
+     wk_Country  Char(6);
+     p_mode      Char(1)    ;
+     p_report    Char(1)    ;
+   end-pr;
+
+   Dcl-PI FixAddr   ;
+     p_mode Char(1);
+   End-PI;
+
+//-------------------------------------------------------------------------------------------
+//‚Variables
+//-------------------------------------------------------------------------------------------
+   dcl-s  wk_Blank    Char(7)    ;
+   dcl-s  wk_mode     Char(1)    ;
+   dcl-s  wk_comp     Packed(3:0);
+   dcl-s  wk_order    Packed(7:0);
+   dcl-s  wk_docType  Char(1)    ;
+   dcl-s  wk_Country  Char(6)    ;
+   dcl-s  p_report    Char(1)    ;
+   dcl-s  wk_taxCode  Char(1)    ;
+   dcl-s  wk_selOrder Char(1)    ;
+   dcl-s  wk_Addr1    Char(63)   ;
+   dcl-s  wk_Addr2    Char(63)   ;
+   dcl-s  wk_Addr3    Char(63)   ;
+   dcl-s  wk_Addr4    Char(63)   ;
+   dcl-s  wk_pre_order Packed(7:0);
+
+//-------------------------------------------------------------------------------------------
+//‚Main Program
+//-------------------------------------------------------------------------------------------
+   Exec Sql SET OPTION COMMIT = *NONE, CLOSQLCSR = *ENDMOD,
+     DLYPRP = *YES, DATFMT = *ISO, TIMFMT = *ISO, ALWBLK = *READ ;
+
+   Exec Sql Declare FixOrder Cursor For
+     SELECT
+       B.COMPANY_NUMBER,
+       B.ORDER_NUMBER,
+       B.ED_EXPORT_DOCUMENT_TYPE,
+       B.COUNTRY_CODE,
+       B.ED_CONSIGNEE_ADDR_3,
+       B.ED_CONSIGNEE_ADDR_4,
+       A.CONSIGNEE_ADDRESS_LINE_3,
+       A.CONSIGNEE_ADDRESS_LN4CITY
+     From POA2REP A, PDMRREP B
+     Where
+       (A.CREATE_DATE > 1241020
+          OR A.CHANGE_DATE > 1241020 )
+          AND A.RECORD_STATUS = 'A'
+          AND A.CONSIGNEE_CONSIGNOR_TYPE = 'E'
+          AND A.CONSIGNEE_NAME = B.ED_CONSIGNEE_NAME
+          AND A.CONSIGNEE_ADDRESS_LINE_1 = B.ED_CONSIGNEE_ADDR_1
+          AND (( A.CONSIGNEE_POSTAL = B.ED_CONSIGNEE_POSTAL
+                 OR A.ADDRESS_COUNTRY_CODE = B.COUNTRY_CODE )
+          AND  (A.CONSIGNEE_ADDRESS_LN4CITY <> B.ED_CONSIGNEE_ADDR_4
+               AND A.CONSIGNEE_ADDRESS_LN4CITY <> ' '
+               AND B.Job_date > 1241020));
+
+     Exec Sql Open FixOrder;
+
+     Exec Sql Fetch FixOrder Into
+                                  :wk_comp   ,
+                                  :wk_order  ,
+                                  :wk_docType,
+                                  :wk_Country,
+                                  :wk_Addr1  ,
+                                  :wk_Addr2  ,
+                                  :wk_Addr3  ,
+                                  :wk_Addr4  ;
+
+     Dow SqlCode = 0;
+       p_report ='Y';
+       If wk_pre_order = wk_order;
+         p_report ='N';
+       EndIf;
+
+       Chain (wk_comp:'A':wk_Country) PDMMREL1;
+       If %Found(PDMMREL1) And  MMC2SX = 'Y';
+
+       Chain (wk_comp:wk_docType:wk_Country) PDMMREL1;
+       //If %Found(PDMMREL1) And  MMC2SX = 'Y';
+       If %Found(PDMMREL1) ;
+         ExSr $searchTaxCode;
+         If wk_selOrder = 'Y';
+           If wk_taxCode = 'Y';
+           Else;
+             PVJAXFR (wk_Blank  :
+                      wk_comp   :
+                      wk_order  :
+                      wk_docType:
+                      wk_Country:
+                      p_mode    :
+                      p_report  );
+           EndIf;
+         EndIf;
+       EndIf;
+
+       EndIf;
+       wk_pre_order = wk_order;
+     Exec Sql Fetch FixOrder Into
+                                  :wk_comp   ,
+                                  :wk_order  ,
+                                  :wk_docType,
+                                  :wk_Country,
+                                  :wk_Addr1  ,
+                                  :wk_Addr2  ,
+                                  :wk_Addr3  ,
+                                  :wk_Addr4  ;
+     EndDo;
+
+     Exec Sql Close FixOrder;
+     *Inlr = *On;
+
+     BegSr $searchTaxCode;
+       wk_selOrder= *Blanks;
+       wk_taxCode = *Blanks;
+       Chain (wk_Comp:wk_Order) OPBFCPL1;
+       If %Found(OPBFCPL1) And
+         (BEGWST = 'A' Or BEGWST = 'E' Or BEGWST = 'H' Or BEGWST = 'L');
+         wk_selOrder= 'Y';
+       Else;
+         LeaveSr;
+       EndIf;
+       If %Scan('RFC':wk_Addr1:1) > *Zeros Or
+          %Scan('RFC':wk_Addr2:1) > *Zeros Or
+          %Scan('RFC':wk_Addr3:1) > *Zeros Or
+          %Scan('RFC':wk_Addr4:1) > *Zeros Or
+          %Scan('SFC':wk_Addr1:1) > *Zeros Or
+          %Scan('SFC':wk_Addr2:1) > *Zeros Or
+          %Scan('SFC':wk_Addr3:1) > *Zeros Or
+          %Scan('SFC':wk_Addr4:1) > *Zeros ;
+          wk_taxCode = 'Y';
+       EndIf;
+     EndSr;

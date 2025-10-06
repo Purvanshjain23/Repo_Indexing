@@ -1,0 +1,490 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * ENVIRONMENT:  PORK DIVISION
+      * SYSTEM:       AS/400
+      * PROGRAM:      MP301
+      * DESCRIPTION:  MP2: Write Receiving to Purchase Order Header/Detail Files
+      * PROGRAMMER:   LeAnne Fedor
+      * DATE:         03/19/02
+      *
+      *
+      * FUNCION:     This program reads each record from the Receiving File that is built by
+      *              the Corp I.S. people. They populate it with transaction records from
+      *              the MP2 System.
+      *
+      *              This program breaks each record into pieces and populates a P.O. header
+      *              and a P.O. detail file.  No editing is performed.
+      *
+      *              This program: writes each receiving record to a history file
+      *                            deletes records out of the Receiving file
+      *
+      **************************************************************************************
+      * MODIFICATIONS:
+      **************************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/21/02  LeAnne Fedor
+      *           The same records were coming up multiple times from the MP2 p.c. system.
+      *           So, we added a check on the p.o. detail file; we now write a record to the
+      *           p.o. detail file if 1 does not already exist. (We always write to the
+      *           history file for debugging purposes.)
+      *
+      * 03/12/08  LeAnne Ramsey
+      *           Added new field 'Purchasing Center ID' to files:
+      *                     Transaction Receiving
+      *                     Historical Transaction Receiving
+      *           Added code to move the new field from the Receiving file to Historical
+      *           file.
+      *
+      * 03/29/11  Barb Gutierrez
+      *           Increased qty and rate in database.  Recompile only.  E001398.
+      *
+      * 03/04/14  LeAnne Ramsey (E2992)
+      *           We will now be uploading MP2 data for the plant (Company 360). So, I am adding
+      *           the Accounting Company to the PO Header (MPP102) and PO Detail (MPP103) files.
+      *           I am also adding the MP2 Purchasing Center to the PO Header file (MPP102).
+      *           We will use the new Accounting Company in all the places that, to date, we
+      *           have used the Company from data area DAMP2CONO.
+      *
+      *           To avoid hardcoding, I have created a new I.S.-controlled file of the companies
+      *           that we upload. That file is MPP108. It holds Accounting Company and the
+      *           associated MP2 Purchasing Center ID.
+      *                In library PRKFLIB:
+      *                   WH   = 350
+      *                   GUYP = 360
+      *                In library HPBFLIB:
+      *                   BIO  = 361
+      *
+      * 03/26/19  Brad Baden     (E14631)
+      *           Change "move" to "movel" to PHPCID field.
+      *           Modified to process additional Purchasing Centers
+      *           340, 373, and 375.
+      *
+      * 01/09/20  Danny Nguyen   (S16033)
+      *           Convert the Purchasing Center ID from lower case to upper case in the
+      *           MPP101 file before writing it to MPP102 file.
+      *           The Purchasing Center ID will be in it's original state when writing to
+      *           the MPP901 file.
+      *           In $mcublank SR, do not allow length to go 0 otherwise program will error
+      *           with 'length/start position is out of range'.
+      *           In $mcuvalue SR, check if 'length'is 0 to prevent program error.
+      *
+      * 05/21/21  Danny Nguyen   (S17068)
+      *           DBFC on MPP101, MPP103 & MPP901 files. TRITEMRT field length changed
+      *           from 9.4 to 11.4.
+      *           Recompile only.
+      *
+      /eject
+      ***************************************************************************************
+      * FILE SPECIFICATIONS
+      ***************************************************************************************
+      *
+     Fmpp101    uf   e           k disk
+      *  MP2: Transaction receiving
+      *
+      *
+     Fmpl102a   uf a e           k disk
+      *  MP2: Purchase order header
+      *
+      *
+     Fmpp103    uf a e           k disk
+      *  MP2: Purchase order detail
+      *
+      *
+     Fmpl108a   if a e           k disk
+      *  MP2: Upload companies
+      *
+      *
+     Fmpp901    o    e           k disk    rename(trrec:trrec901) prefix(p1)
+      *  MP2: Historical transaction receiving
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+16033D upper           c                   'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+16033D lower           c                   'abcdefghijklmnopqrstuvwxyz'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D start           s              2  0
+     D length          s              2  0
+     D period          s              2  0
+      *
+      *
+      * Work fields
+      *
+     d wkcono          s                   like(pdcono)
+16033d wkpcid          s                   like(trpcid)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------------------------
+      * Definition for external data area 'DAHGSN' for assigning the next group number
+      *---------------------------------------------------------------------------------
+      *
+     Dnextposn         s              7  0 dtaara(damp2posn)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Process each record in the Purchase Order Receiving file.
+      *
+     C     *loval        setll     mpp101
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      mpp101                                 90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Clear record formats
+      *
+     C                   clear                   phrec
+     C                   clear                   pdrec
+      *
+      * Extract Company number. It is supposed to be in the first 3 non-blank
+      * positions of 1) the 'cost center' field or 2) the account field.
+      *
+     C                   move      *blank        wkcono
+      *
+      * S16033-Ensure Purchasing Center ID is converted from lower to upper case.
+16033C     lower:upper   xlate     trpcid        wkpcid
+      *
+     C                   select
+     C                   when      trmcu <> *blank
+     C     ' '           check     trmcu         start
+     C                   if        start > 0
+     C                   if        start <= 10
+     C                   eval      wkcono = %subst(trmcu:start:3)
+     C                   else
+     C                   eval      wkcono = %subst(trmcu:start)
+     C                   endif
+     C                   endif
+     C                   other
+      *
+     C     ' '           check     trmpacc       start                    92
+     C                   if        start > 0
+     C                   if        start <= 17
+     C                   eval      wkcono = %subst(trmpacc:start:3)
+     C                   else
+     C                   eval      wkcono = %subst(trmpacc:start)
+     C                   endif
+     C                   endif
+      *
+     C                   endsl
+      *
+      * The values in the receiving file for cost center and account are not straight-forward.
+      * The logic is different when A) cost center is blank and B) cost center is not blank.
+      *
+     C                   select
+     C                   when      trmcu = *blank
+     C                   exsr      $mcublank
+     C                   other
+     C                   exsr      $mcuvalue
+     C                   endsl
+      *
+      *
+      * Write the following records:
+      *  1) purchase order header (if header does not already exist)
+      *  2) purchase order detail (if record does not already exist)
+      *  3) history
+      *
+     C                   exsr      $write102
+     C                   exsr      $write103
+     C                   exsr      $write901
+      *
+      *
+      * Always delete the record from the receiving file.
+      *
+     C                   delete    trrec
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Logic for when Cost Center is Blank
+      *---------------------------------------------------------------
+      *
+      * When Cost Center is blank, we will break apart the Account field as follows:
+      *     When the Account field has no decimals:
+      *         do nothing
+      *     When the Account field has 2 decimals:
+      *         center.obj.sub
+      *     When the Account field has 1 decimal:
+      *         center.obj
+      *
+     C     $mcublank     begsr
+      *
+      * If there is not at least one '.' in the Account field, leave all 3 fields
+      * (cost center, object, subsidiary blank...because we don't know what we have!)
+      *
+     C     '.'           scan      trmpacc       period                   92
+     C                   if        *in92 = *off                                 If no period
+     C                   else
+      *
+      * Take all values that precede this first period and move them to the Cost Center.
+      * You must always right-justify cost center with leading blanks...you will be
+      * receiving it as left-justified with trailing blanks.
+      *
+     C                   eval      length = period - 1
+      *
+      * S16033-If 'period' is in the first position then use Accouting Company as Cost Center.
+16033C                   if        length = 0
+  |  C     wkpcid        chain     MPL108A
+  |  C                   if        %found
+  |  C                   move      upacono       pdmcu
+  |  C                   endif
+16033C                   else
+      *
+     C                   eval      start = 12 - length + 1
+     C                   eval      %subst(pdmcu:start:length) =
+     C                             %subst(trmpacc:1:length)
+      *
+      * Find the next '.'
+      *
+     C     period        add       1             start
+     C     '.'           scan      trmpacc:start period                   92
+     C                   if        *in92 = *off                                 If no period 2
+      *
+      * There is no second '.'; so, there is no subsidiary. SO;
+      *  1) move all values after the first period to the Object field
+      *     (subsidiary will be blank)
+      *
+     C                   eval      pdobj = %subst(trmpacc:start)
+     C                   else
+      *
+      * There is a second '.'; so, there is a subsidiary. SO;
+      *  1) move all values between period 1 and period 2 to the Object field
+      *  2) make all values after period 2 to the Subsidiary field
+      *
+     C                   eval      length = period - start
+     C                   eval      pdobj = %subst(trmpacc:start:length)
+      *
+     C     period        add       1             start
+     C                   eval      pdsub = %subst(trmpacc:start)
+      *
+     C                   endif                                                  If no period 2
+16033C                   endif                                                  If length = 0
+     C                   endif                                                  If no period
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Logic for when Cost Center is NOT blank
+      *---------------------------------------------------------------
+      *
+     C     $mcuvalue     begsr
+      *
+      * Right-justify cost center with leading blanks...you will be
+      * receiving it as left-justified with trailing blanks.
+      *
+     C     ' '           checkr    trmcu         length
+     C                   eval      start = 12 - length + 1
+     C                   eval      %subst(pdmcu:start:length) =
+     C                             %subst(trmcu:1:length)
+      *
+      * You have to extract 1) object and 2) subsidiary (optional) from the incoming
+      * Account field. The incoming Account field is 19 long. In this scenario, we
+      * expect the 'object' to be all values before any '.' and the subsidiary, if there
+      * is one, to be after the '.'   We will only code for finding a single '.' There
+      * will not be a '.' if there is no subsidiary.
+      *
+      * Find the position of the '.'
+      *
+     C     '.'           scan      trmpacc       period                   92
+      *
+      * If there is no '.', then there is no subsidiary; so,
+      *   Move the Account field to the Object field (subsididary will be blank)
+      *
+     C                   if        *in92 = *off                                 If no period
+     C                   movel(p)  trmpacc       pdobj
+     C                   else
+      *
+      * When there is a '.', then there is a subsidiary; so,
+      *   Move all values before the '.' to the Object field
+      *   Move all values after the '.' to the Subsidiary field
+      *
+     C                   eval      length = period - 1
+      *
+      * S16033-If 'period' is in the first position then do nothing. This is to prevent
+      *        a program error when doing a substring.
+16033C                   if        length = 0
+16033C                   else
+      *
+     C                   eval      pdobj = %subst(trmpacc:1:length)
+      *
+     C                   eval      start  = period + 1
+     C                   eval      pdsub = %subst(trmpacc:start)
+16033C                   endif                                                  If length = 0
+     C                   endif                                                  If no period
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write receiving records to the P.O. header file
+      *---------------------------------------------------------------
+      *
+     C     $write102     begsr
+      *
+      * Determine if a header record already exists for this vendor/p.o. number.
+      * If it exists, do nothing. If it does not, write a header record.
+      *
+     C     key01         chain     mpl102a                            92
+     C                   if        *in92 = *off                                 If exists
+     C                   else
+     C                   move      trpono        phpono
+     C*** E14631  JBB    move      trpcid        phpcid
+16033C***                movel     trpcid        phpcid
+16033C                   movel     wkpcid        phpcid
+     C                   z-add     trmpvnno      phmpvnno
+     C                   move      trmpvnnm      phmpvnnm
+     C                   z-add     trmpvnno      phjdvnno
+     C                   move      trmpvnnm      phjdvnnm
+     C                   move      no            pherfl
+      *
+      * In March 2014 we began to upload MP2 data for Company 360 as well as 350.
+      * So, we have added "accounting company" to our database. I created a new
+      * I.S.-controlled file to hold the valid companies and their associated
+      * MP2 Purchasing Center IDs. So, based on that ID, retrieve the Accounting
+      * Company.
+      *
+     C     phpcid        chain     mpl108a                            92
+     C                   if        *in92 = *off                                 If exists
+     C                   z-add     upacono       phacono
+     C                   else
+     C                   z-add     0             phacono
+     C                   move      yes           pherfl
+     C                   endif                                                  If exists
+      *
+      * Retrieve system-assigned I.D. number to uniquely identify this record.
+      * I'm trying this because a requirement is to allow the user to change
+      * the vendor...which was part if the unique key.
+      *
+     C     *lock         in        nextposn
+     C                   add       1             nextposn
+     C                   eval      phposn = nextposn
+     C                   out       nextposn
+      *
+     C                   write     phrec
+     C                   endif                                                  If exists
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write Receiving records to the Purchase Order detail file
+      *---------------------------------------------------------------
+      *
+     C     $write103     begsr
+      *
+      * Determine if this detail record already exists.
+      * If it exists, do nothing. If it does not, write a detail record.
+      *
+     C     key02         chain     mpp103                             92
+     C                   if        *in92 = *off                                 If exists
+     C                   else
+      *
+     C                   z-add     phposn        pdposn
+     C                   z-add     phacono       pdacono
+     C                   move      wkcono        pdcono
+     C                   move      trttcd        pdttcd
+     C                   movel     trtrdt        pdtrdt
+     C                   z-add     trrcno        pdrcno
+     C                   z-add     trserno       pdserno
+     C                   z-add     trseqno       pdseqno
+     C                   z-add     trtrqt        pdtrqt
+     C                   move      tritemno      pditemno
+     C                   move      tritemds      pditemds
+     C                   z-add     tritemrt      pditemrt
+     C                   move      *blank        pdcom
+     C                   move      no            pdpofl
+      *
+     C                   if        pdacono = 0
+     C                   move      yes           pderfl
+     C                   else
+     C                   move      no            pderfl
+     C                   endif
+      *
+     C                   write     pdrec
+     C                   endif                                                  If exists
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write the receiving record to the history file
+      *---------------------------------------------------------------
+      *
+     C     $write901     begsr
+      *
+     C                   move      trpcid        p1trpcid
+     C                   move      trpono        p1trpono
+     C                   z-add     trmpvnno      p1trmpvnno
+     C                   move      trmpvnnm      p1trmpvnnm
+     C                   z-add     trrcno        p1trrcno
+     C                   z-add     trserno       p1trserno
+     C                   z-add     trseqno       p1trseqno
+     C                   move      trttcd        p1trttcd
+     C                   move      trtrdt        p1trtrdt
+     C                   z-add     trtrqt        p1trtrqt
+     C                   move      tritemno      p1tritemno
+     C                   move      tritemds      p1tritemds
+     C                   z-add     tritemrt      p1tritemrt
+     C                   move      trmcu         p1trmcu
+     C                   move      trmpacc       p1trmpacc
+      *
+     C                   write     trrec901
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    trmpvnno
+     C                   kfld                    trpono
+      *
+      *
+     C     key02         klist
+     C                   kfld                    phposn
+     C                   kfld                    trrcno
+     C                   kfld                    trserno
+      *
+     C                   endsr
+      /eject

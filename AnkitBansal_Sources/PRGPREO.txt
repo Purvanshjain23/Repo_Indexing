@@ -1,0 +1,216 @@
+/***************************************************************** */
+/*  PROGRAM NUMBER:  PRGPREO                                       */
+/*  PROGRAM NAME:    PRE-PURGE SETUP FOR THE FILE IN &FILE         */
+/*  PROGRAMMER:      ROSE CENTONZE                                 */
+/*  CREATE DATE:     12/15/99                                      */
+/***************************************************************** */
+/*  PARAMETERS:                                                    */
+/*  &PCGCODE - PURGE CODE (ARS,CMK,HPE,INV,OMS,TRC,ETC)            */
+/*  &PRODLIB - PRODUCTION LIBRARY THAT IS BEING PURGED             */
+/*  &PCAPPLIC - APPLICATION OR GROUP CODE BEING PURGED             */
+/*  &PRODFILE - PRODUCTION FILE BEING PURGED, A COPY OF THIS IS    */
+/*              CREATED IN THE PURGE LIB TO WRITE PURGED RECS TO   */
+/*  &PRODLGL - LOGICAL OVER PROD FILE IN PURGE LIBRARY USED TO     */
+/*             WRITE PURGED RECS TO PURGE LIB                      */
+/*  &PRGTAPEF - PURGE TAPE FILE IN PURGE LIBRARY (ENDS ...PRG)     */
+/*  &RTNCODE - RETURN CODE, BLANK IF NO ERROR, ELSE ERROR CODE     */
+/*  &PCFIELD - NOT CURRENTLY USED                                  */
+/*  &PRGLIB - PURGE LIBRARY, TAKES THE PLACE OF QTEMP              */
+/*                                                                 */
+/*   1. CREATE A PURGE FILE IN THE NEW PURGE LIBRARY.              */
+/*   2. THE PURGE TAPE PHYSICAL FILE IS IN THE PURGE CONTROL FILE  */
+/*      AND THE FILE NAME TO USE WILL BE PASSED INTO THIS PGM.     */
+/*   3. 'Z' MEMBERS WILL BE CREATED IN THIS FILE AND THE DATA      */
+/*      WILL BE COPIED HERE PRIOR TO THE PURGE.                    */
+/*   4. CREATE AN EMPTY COPY OF THE FILE BEING PURGED INTO THE     */
+/*      PURGE LIBRARY.                                             */
+/*   5. CREATE A DUPLICATE OF THE PURGE LOGICAL INTO THE PURGE     */
+/*      LIBRARY.                                                   */
+/*   6. COPY THE ENTIRE CONTENTS OF THE FILE BEING PURGED INTO     */
+/*      THE FIRST MEMBER OF THE PURGE TAPE PHYSICAL FILE. THIS     */
+/*      WILL BE REMOVED AFTER THE 'Z' MEMBER IS COPIED TO TAPE     */
+/***************************************************************** */
+/* ***** THIS PROCESS WAS REWRITTEN                                */
+/* 08/07/2007 LJB FP1009 - PASS PARMS FROM THE PURGE CONTROL       */
+/*   FILE TO USE TO CREATE THE REQUIRED FILES                      */
+/* 10/16/2007 - DON'T DUPLICATE THE TRIGGERS OR CONSTRAINTS OR     */
+/*   THE PROGRAM WON'T RUN.                                        */
+/* 01/29/2008 - POST INSTALL CHANGE - STOP THE PROCESS OF          */
+/*   WRITING THE PURGED RECORDS TO QTEMP. ADD TEST TO CHECK IF THE */
+/*   PURGE TAPE FILE IS IN THE NEW SAVE LIBRARY, IF NOT CREATE IT. */
+/*   ADD TEST TO CHECK IF A COPY OF THE PRODUCTION FILE IS IN      */
+/*   THE NEW SAVE LIBRARY, IF NOT CREATE IT. ALSO ADD THE UPDATE   */
+/*   INDEX. (COPY OF PROD FILE WILL BE CLEARED IN THE POST PGM)    */
+/* 05/12/2008 - POST INSTALL CHANGE - ADD MEMBER IF THERE IS NONE. */
+/* 01/22/2009 - POST INSTALL CHANGE - STOP COPYING THE ENTIRE      */
+/*   PRODUCTION FILE INTO THE PURGE LIBRARY. ONLY THE RECORDS      */
+/*   THAT ARE BEING PURGED WILL BE COPIED IN.                      */
+/* 01/12/2010 - ADD ADDITIONAL MONMSG TO THE CHKOBJ AND THE DUP    */
+/*   OBJ FOR THE LOGICAL FILES.                                    */
+/* R15035 DN  06/05/19 - Added 'TEST' verbiage to SNDPGRMSG when   */
+/*   running job in TEST env. If new Update Index for Purge was    */
+/*   added to the Purge Control File (PDLQREP) then allow it to    */
+/*   CRTDUPOBJ & if it's successful then do not set the &RTNCODE.  */
+/***************************************************************** */
+             PGM        PARM(&PCGCODE &PRODLIB &PCAPPLIC &PRODFILE +
+                          &PRODLGL &PRGTAPEF &PCFIELD &RTNCODE  +
+                          &PRGLIB)
+
+             DCL        VAR(&PCGCODE) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&PRODLIB) TYPE(*CHAR) LEN(10) /* PROD LIB */
+             DCL        VAR(&PCAPPLIC) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&PRODFILE) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PRODLGL) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PRGTAPEF) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&RTNCODE) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&PCFIELD) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&FDSC) TYPE(*CHAR) LEN(50)
+             DCL        VAR(&PRGLIB) TYPE(*CHAR) LEN(10) /* PURGE LIB */
+             DCL        VAR(&DTALIB) TYPE(*CHAR) LEN(10)
+
+
+    /* R15035 - Get System Value For Data File Library to Determine Whether in +
+         PROD or TEST Environment */
+             CALL       PGM(PPJXXFR) PARM(' ' 'DTALIB' &DTALIB)
+
+
+             RTVOBJD    OBJ(&PRODLIB/&PRODFILE) OBJTYPE(*FILE) +
+                          TEXT(&FDSC)
+
+/* IF THE PURGE TAPE FILE DOESN'T EXIST, CREATE IT IN THE PURGE LIB */
+/* THEN CHANGE IT TO *NOMAX SO ADDITIONAL MEMBERS CAN BE ADDED.     */
+/* 'Z' MEMBERS WILL CONTAIN PURGED RECORDS THAT WILL BE WRITTEN     */
+/* TO TAPE. IF ONE ALREADY EXISTS, THEN IT HASN'T BEEN BACKED UP    */
+/* YET SO A NEW MEMBER WILL BE ADDED FOR THE NEXT GROUP OF RECORDS  */
+             CHKOBJ     OBJ(&PRGLIB/&PRGTAPEF) OBJTYPE(*FILE)
+             MONMSG     MSGID(CPF0001) EXEC(DO) /* NAME IS BLANK */
+             CHGVAR     VAR(&RTNCODE) VALUE('CPF0001')
+             GOTO       CMDLBL(CRTDUPERR)
+             ENDDO
+
+/* IF FILE OR MEMBER DOESN'T EXIST, ADD IT                          */
+/* CLEAR IF FILE OR MEMBER WAS ADDED, DON'T CLEAR "Z" MEMBER(S)     */
+             MONMSG     MSGID(CPF9801 CPF3142) EXEC(DO)  /* FNF MNF */
+             CPYF       FROMFILE(&PRODLIB/&PRODFILE) +
+                          TOFILE(&PRGLIB/&PRGTAPEF) FROMMBR(*FIRST) +
+                          TOMBR(&PRGTAPEF) MBROPT(*REPLACE) +
+                          CRTFILE(*YES) NBRRCDS(1)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CRTDUPERR))
+             CLRPFM     FILE(&PRGLIB/&PRGTAPEF) MBR(&PRGTAPEF)
+             ENDDO
+
+/* IF MEMBER DOESN'T EXIST, ADD ONE                                 */
+             MONMSG     MSGID(CPF9815) EXEC(ADDPFM +
+                          FILE(&PRGLIB/&PRGTAPEF) MBR(&PRGTAPEF))
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(ADDMBRERR))
+
+             CHGPF      FILE(&PRGLIB/&PRGTAPEF) MAXMBRS(*NOMAX) +
+                          SIZE(*NOMAX)
+
+/* COPY PRODUCTION FILE TO PURGE LIB BEFORE PURGING IT              */
+/* (STOP THIS STEP    1/22/2009)                                    */
+/********    CPYF       FROMFILE(&PRODLIB/&PRODFILE) +
+                          TOFILE(&PRGLIB/&PRGTAPEF) MBROPT(*REPLACE) +
+                          CRTFILE(*YES)                            +
+             MONMSG     MSGID(CPF2817) /* COPY ENDED IN ERROR      +
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CRTDUPERR))**/
+
+/* VERIFY A COPY OF THE FILE BEING PURGED IS IN THE SAVE LIBRARY.   */
+/* DUPLICATE IT FROM PRODUCTION IF IT IS NOT THERE.                 */
+/* PURGED RECORDS WILL BE WRITTEN TO THIS FILE PRIOR TO BEING       */
+/* PURGED. ALSO, THE BACK UP PROGRAM WILL COPY THE RECORDS FROM     */
+/* HERE TO THE "Z" MEMBER IN THE PURGE TAPE FILE, THEN CLEAR THIS.  */
+/* (TRIGGERS *NO OR THE PROGRAM WON'T RUN)                          */
+             CHKOBJ     OBJ(&PRGLIB/&PRODFILE) OBJTYPE(*FILE) +
+                          MBR(*FIRST)
+             MONMSG     MSGID(CPF0001) EXEC(DO) /* NAME IS BLANK */
+             CHGVAR     VAR(&RTNCODE) VALUE('CPF0001')
+             GOTO       CMDLBL(CRTDUPERR)
+             ENDDO
+
+             MONMSG     MSGID(CPF9801) EXEC(CRTDUPOBJ OBJ(&PRODFILE) +
+                          FROMLIB(&PRODLIB) OBJTYPE(*FILE) +
+                          TOLIB(&PRGLIB) CST(*NO) TRG(*NO))
+             MONMSG     MSGID(CPF2130) EXEC(GOTO CMDLBL(DUPOK))
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CRTDUPERR))
+
+             CHGPF      FILE(&PRGLIB/&PRODFILE) MAXMBRS(*NOMAX) +
+                          SIZE(*NOMAX)
+
+/* VERIFY A COPY OF THE UPDATE INDEX IS IN THE SAVE LIBRARY.        */
+/* DUPLICATE IT FROM PRODUCTION IF IT IS NOT THERE.                 */
+/* (TRIGGERS *NO OR THE PROGRAM WON'T RUN)                          */
+ DUPOK:      CHKOBJ     OBJ(&PRGLIB/&PRODLGL) OBJTYPE(*FILE) +
+                          MBR(*FIRST)
+             MONMSG     MSGID(CPF0001 CPF2105 CPF2103) EXEC(DO) /* +
+                          NAME IS BLANK or logical is missing */
+             CHGVAR     VAR(&RTNCODE) VALUE('CPF2105')
+             GOTO       CMDLBL(CRTDUPERR)
+             ENDDO
+
+             MONMSG     MSGID(CPF9801) EXEC(DO)
+             CRTDUPOBJ  OBJ(&PRODLGL) FROMLIB(&PRODLIB) +
+                          OBJTYPE(*FILE) TOLIB(&PRGLIB) CST(*NO) +
+                          TRG(*NO)
+/* R15035 - Moved MONMSG to Here. Only Set &RTNCODE if Error on CRTDUPOBJ */
+             MONMSG     MSGID(CPF0000 CPF2130) EXEC(DO)
+             CHGVAR     VAR(&RTNCODE) VALUE('CPF2130')
+         /*  MONMSG     MSGID(CPF0000 CPF2130) EXEC(GOTO +
+                          CMDLBL(CRTDUPERR))        Original Code  */
+             GOTO       CMDLBL(CRTDUPERR)
+             ENDDO
+
+             ENDDO
+
+             GOTO       CMDLBL(ENDPGM)
+
+/*------------------------------------------------------------------*/
+/* R15035 - Added 'TEST' Verbiage to Message if from TEST Env. */
+ CRTDUPERR:  IF         COND(&DTALIB *NE 'PRKFLIB') THEN(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Create Duplicate Object +
+                          Error for --' *BCAT &PRODLIB *TCAT '/' +
+                          *CAT &PRODFILE *BCAT &PCGCODE *BCAT +
+                          &PCAPPLIC *BCAT &FDSC *BCAT '- TEST') +
+                          CONFMSG(*NO)
+             ENDDO
+             ELSE       CMD(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Create Duplicate Object +
+                          Error for --' *BCAT &PRODLIB *TCAT '/' +
+                          *CAT &PRODFILE *BCAT &PCGCODE *BCAT +
+                          &PCAPPLIC *BCAT &FDSC) CONFMSG(*NO)
+             ENDDO
+             CHGVAR     VAR(&RTNCODE) VALUE('CPF0001')
+             GOTO       CMDLBL(ERROR)
+
+/*------------------------------------------------------------------*/
+/* R15035 - Added 'TEST' Verbiage to Message if from TEST Env. */
+ ADDMBRERR:  IF         COND(&DTALIB *NE 'PRKFLIB') THEN(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Add member Error for +
+                          --' *BCAT &PRGLIB *TCAT '/' *CAT +
+                          &PRGTAPEF *BCAT &PCGCODE *BCAT &PCAPPLIC +
+                          *BCAT &FDSC *BCAT '- TEST') CONFMSG(*NO)
+             ENDDO
+             ELSE       CMD(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Add member Error for +
+                          --' *BCAT &PRGLIB *TCAT '/' *CAT &PRGTAPEF +
+                          *BCAT &PCGCODE *BCAT &PCAPPLIC *BCAT +
+                          &FDSC) CONFMSG(*NO)
+             ENDDO
+
+/*------------------------------------------------------------------*/
+ ERROR:      CHGVAR     VAR(&RTNCODE) VALUE('Y2U9999')
+/* R15035 - Added 'TEST' Verbiage to Message if from TEST Env. */
+             IF         COND(&DTALIB *NE 'PRKFLIB') THEN(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Data Purge Ended +
+                          Abnormally --' || &FDSC *BCAT '- TEST') +
+                          CONFMSG(*NO)
+             ENDDO
+             ELSE       CMD(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Data Purge Ended +
+                          Abnormally --' || &FDSC) CONFMSG(*NO)
+             ENDDO
+
+/*------------------------------------------------------------------*/
+ ENDPGM:     CHGJOB     LOG(4 00 *SECLVL) LOGCLPGM(*YES)
+
+             ENDPGM

@@ -1,0 +1,1101 @@
+      *****************  RPG PROGRAM HEADING  ***********************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP137
+      * TITLE:       REVISE CARCASS DATA AND MAINTAIN PREMIUM/DISCOUNT
+      * PROGRAMMER:  ROSE CENTONZE
+      * CREATED:     06/02/94
+      *
+      * FUNCTION: THIS PROGRAM USES A SUBFILE TO MAINTAIN PREMIUM/
+      *           DISCOUNT RECORDS FOR EACH CHECK DETAIL LINE.  AND,
+      *           CARCASS DATA IS KEYED INTO THE CONTROL RECORD.
+      *
+      *           THIS PROGRAM IS CALLED FROM:
+      *                HP136-MAINTAIN CHECK DETAIL
+      *
+      *           IT DOES NOT HAVE SELECTORS OR POSITIONERS.
+      *           IT HAS F4-PROMPT LOGIC.
+      *           IT USES THE STANDARD MESSAGE HANDLING PROGRAM.
+      *           IT HAS STANDARD SUBFILE OPTION EDITING.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      * 07/19/94  R. CENTONZE   CHANGED MOVEMENT STATUS (MHHSCD) 'PP'
+      *                         TO 'NC'
+      *
+      * 07/25/94  R. CENTONZE   CHANGED EDIT FOR STATUS (MHHSCD) TO
+      *                         NOT ALLOW CREATE/REVISE FOR STATUS
+      *                         CODES 'PG','PP'.(WAS REQUIRED TO BE
+      *                         NC OR SH.) NEW MSG 'HS00343'.
+      *
+      * 07/26/94  R. CENTONZE   WHEN UPDATING OLD MOVEMENT POINTER,
+      *                         IF HEAD COUNT GOES TO 0, UPDATE THE
+      *                         DATE RECEIVED WITH THE ORIGIN POINTER
+      *                         SHIP DATE. IF HEAD COUNT IS N= 0,UPDATE
+      *                         THE DATE RECEIVED WITH THE LATEST CHECK
+      *                         HEAD RCVD DATE FOR THIS MOVEMENT.
+      *
+      * 07/27/94  R. CENTONZE   ADDED ROUTINE $ANYCH TO CHECK FOR ANY
+      *                         MORE CHECKS WHEN UPDATING HDR STATUS
+      *
+      * 08/02/94  R. MARTIN     REMOVE REFERENCE TO CHECK B/O & HEAD
+      *                         RECEIVED DATE.
+      *
+      * 09/24/94  LEANNE FEDOR
+      *           ADDED EDITS, CHANGED SUBFILE PROCESSING, CLEANED UP
+      *           CODE, CHANGED MESSAGES.
+      *
+      * 09/27/94  LEANNE FEDOR
+      *           RECOMPILE ONLY. REMOVED THE FOLLOWING UNUSED
+      *           DATABASE FIELDS FROM THE CHECK FILES:
+      *             HSP063-CHECK HEADER        CHCHBO CHHRDT
+      *             HSP064-CHECK DETAIL        CDCHBO CDCSAM
+      *             HSP065-CHECK ADJUSTMENTS   CJCHBO
+      *
+      * 11/03/94  LEANNE FEDOR
+      *           AS REQUESTED BY ALICE B. REMOVED THE EDIT THAT
+      *           PREVENTED THE USER FROM ASSIGNING A MOVEMENT WHICH
+      *           HAD A 'DISPOSED' ORIGIN GROUP.
+      *
+      * 11/16/94  LEANNE FEDOR
+      *           FIXED BUG IN RESETTING THE MOVEMENT HEADER STATUS.
+      *
+      * 01/13/95  LEANNE FEDOR
+      *           RECOMPILE ONLY. SEX ADDED TO HOG GROUP FILE.
+      *
+      * 03/01/95  LEANNE FEDOR
+      *           REMOVED DATE/TIME STAMP.
+      *
+      * 03/13/95  LEANNE FEDOR
+      *           RECOMPILE ONLY. ORIGIN BGF FARM SITE AND ORIGIN
+      *           NURSERY FARM SITE ADDED TO HOG GROUP FILE.
+      *
+      * 04/25/95  LEANNE FEDOR
+      *           CHANGED FARM SITE CODE FROM ALPHA TO NUMERIC.
+      *
+      * 06/15/95  LEANNE FEDOR
+      *           CHANGED LOGIC FOR MOVEMENT REWRITE.
+      *
+      * 09/25/95  LEANNE FEDOR
+      *           FIXED BUG WHERE CHECK DETAIL RECORD FIELDS WERE NOT
+      *           DISPLAYED THE SECOND TIME INTO THIS PROGRAM WHEN
+      *           CREATING A DETAIL LINE.
+      *
+      * 01/26/96  LEANNE FEDOR
+      *           REMOVED ALL ACCESS/UPDATING OF CHECK DETAIL RECORDS
+      *           FROM THIS PROGRAM. THE CHECK DETAIL VALUES IN THIS
+      *           PROGRAM ARE PASSED IN/OUT AS PARMS WITH THE ACTUAL
+      *           UPDATING OF THE RECORD OCCURING IN HP136.
+      *
+      * 10/10/97  LEANNE FEDOR
+      *           CHANGED F10=ACCEPT TO F9=ACCEPT SO THAT THE ACCEPT KEY
+      *           IS PHYSICALLY ON THE KEYBOARD FARTHER FROM THE F11
+      *           DELETE KEY.
+      *
+      * 03/02/98  LeAnne Fedor
+      *           Added condemned and yard dead values (head and pounds)
+      *           as output on screens.
+      *
+      * 07/07/09  LeAnne Ramsey
+      *           Add "reality range" checks to 3 Carcass Data fields:
+      *            Lean percent, Average backfat, Average loin eye
+      *
+      * 11/09/17  Brad Baden    E010812
+      *           Added Business Office as an input parameter to
+      *           display on the screen.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHPD137    CF   E             WORKSTN SFILE(HP137S1:HDRRN1)
+     F                                     INFDS(IOFEED)
+      *
+      *
+     FHSP045    IF   E           K DISK
+      *    PREMIUM/DISCOUNT CODES
+      *
+      *
+     FHSP065    UF A E           K DISK    COMMIT
+      *    CHECK ADJUSTMENTS
+      *
+      /EJECT
+      ****************************************************************
+      * Definition Specifications
+      ****************************************************************
+      *
+      ****************************************************************
+      * TABLE AND ARRAY SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * PREMIUM/DISCOUNT ARRAY TO VALIDATE THAT A CODE IS ONLY ENTERED
+      * IN THE SUBFILE ONE TIME
+      *---------------------------------------------------------------
+      *
+     D PDC             S              5    DIM(50)                              PREM/DISCOUNT
+      *
+      *---------------------------------------------------------------
+      * STANDARD ERROR MESSAGE HANDLING DATA STRUCTURES
+      *---------------------------------------------------------------
+      *
+      * FOR ERROR MESSAGE HANDLING, A PACKED INDEX (E) IS REQUIRED.
+      * FOR PROGRAM READABILITY, DEFINE A CORRESPONDING ERROR COUNT
+      * FIELD CALLED 'ERROR'. ALSO DEFINE CURSOR LOCATION FIELDS.
+      *
+     D                 DS                  INZ
+     D  ERROR                  1      2P 0
+     D  E                      1      2P 0
+      *
+      * THIS DATA STRUCTURE SUPPLIES THE NAME OF THE MESSAGE FILE TO
+      * THE MESSAGE HANDLING CL PROGRAM.  THE FIELD NAME MSGFIL MUST BE
+      * CONSTANT. THE VALUE IN QUOTES IS THE NAME OF THE SPECIFIC
+      * MESSAGE FILE CONTAINING THE USER DEFINED MESSAGES.
+      *
+     D                 DS                  INZ
+     D  MSGFIL                 1     10    INZ('HSMSGF    ')
+      *
+      * THE FOLLOWING 3 DATA STRUCTURES ARE USED TO SPEED MESSAGE
+      * HANDLING SINCE IT IS FASTER TO CLEAR DATA STRUCTURES THAN
+      * ARRAYS.  EACH IS ASSOCIATED WITH A STANDARD MESSAGE ARRAY.
+      *
+     D MGI             DS           140    INZ
+     D  MGID                   1    140
+     D                                     DIM(20)                              MSG ID ARRAY
+      *
+     D MGD             DS          1000    INZ
+     D  MGDT                   1   1000
+     D                                     DIM(20)                              MSG PARMS
+      *
+     D MGWK            DS            50    INZ
+     D  MGW                    1     50
+     D                                     DIM(50)                              MSG WORK PARMS
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *---------------------------------------------------------------
+      * STANDARD WORKSTATION INFORMATION DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTWSFR (RECORD FORMAT: UTIDFRR)
+     D IOFEED        E DS                  EXTNAME(UTWSFR)
+      *
+      *---------------------------------------------------------------
+      * STANDARD DATABASE FILE INFORMATION DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTDBFR (RECORD FORMAT: FDBCKD)
+     D DBFEED        E DS                  EXTNAME(UTDBFR)
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D CREATE          C                   CONST('CREATE')
+     D REVISE          C                   CONST('REVISE')
+     D DELETE          C                   CONST('DELETE')
+     D SET1            C                   CONST('SET1  ')
+     D EDIT1           C                   CONST('EDIT1 ')
+     D SCRN1           C                   CONST('SCRN1 ')
+     D EXIT            C                   CONST('EXIT  ')
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *----------------------------------------------------------------
+      * MAINLINE
+      *----------------------------------------------------------------
+      *
+     C                   MOVEL     SET1          ROUTNE
+      *
+     C     *INLR         DOWEQ     *OFF                                         MAIN DO LOOP
+     C     ROUTNE        CASEQ     SET1          $SET1
+     C     ROUTNE        CASEQ     SCRN1         $SCRN1
+     C     ROUTNE        CASEQ     EDIT1         $EDIT1
+     C     ROUTNE        CASEQ     EXIT          $EXIT
+     C                   ENDCS
+     C                   ENDDO                                                  MAIN DO LOOP
+      /EJECT
+      *----------------------------------------------------------------
+      * SET ENVIRONMENT FOR SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $SET1         BEGSR
+      *
+      *  CALCULATE THE 'HUNDRED WEIGHT' EQUIVALENT OF
+      *  THE CARCASS POUNDS FOR USE IN LOADING THE SUBFILE
+      *  WITH THE 'PER CWT DOLLAR RATE' OF ANY PREMIUMS/DISCOUNTS
+      *
+     C     C1CRLB        DIV(H)    100           WKCWT
+      *
+      *  CLEAR/FILL THE SUBFILE
+      *
+     C                   EXSR      $CLR1
+     C                   EXSR      $FRSH1
+      *
+      *
+      *  SET ROUTINE TO DISPLAY SCREEN 1
+      *
+     C                   MOVEL     SCRN1         ROUTNE
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * PERFORM OPERATOR I/O FOR SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $SCRN1        BEGSR
+      *
+      * SET THE PAGE OF SUBFILE TO DISPLAY WHEN IT IS CARCASS
+      *
+     C                   SELECT
+     C     WKFLOW        WHENEQ    0
+     C     ERROR         ANDEQ     0
+     C                   Z-ADD     1             HDPAG1
+      *
+     C     RESET         WHENEQ    YES
+     C     WKFLOW        IFGT      HDRRN1
+     C                   ELSE
+     C                   Z-ADD     WKFLOW        HDPAG1
+     C                   ENDIF
+     C                   ENDSL
+      *
+      * IF THE USER HAS EDITED THE DATA, THEN ISSUE THE 'ACCEPT
+      * ENTRIES' MESSAGE.
+      *
+     C     ERROR         IFEQ      0
+     C     EDITFL        ANDEQ     YES
+     C                   Z-ADD     1             ERROR
+     C                   MOVEL     'HS09026'     MGID(E)
+     C                   ENDIF
+      *
+      * IF THE USER IS IN CREATE MODE, SET THE INDICATOR THAT
+      * PREVENTS THE DISPLAY AND AVAILABILITY OF THE DELETE KEY.
+      *
+     C     MODE          IFEQ      CREATE
+     C                   SETON                                        61
+     C                   ENDIF
+      *
+      * WRITE THE ERROR MESSAGES FROM THE ERROR ARRAYS TO THE
+      * ERROR MESSAGE SUBFILE
+      *
+     C                   EXSR      $WRMSG
+      *
+      *  WRITE SCREEN 1 TO CRT
+      *
+     C                   WRITE     HP137K1
+     C                   WRITE     HP137EC
+     C                   EXFMT     HP137C1
+      *
+      * RETRIEVE THE LOWEST SUBFILE RRN ON THE SCREEN FROM THE DSPF
+      * FEEDBACK AREA (IDFLOW) AND MOVE IT TO A WORK FIELD.  THIS VALUE
+      * WILL BE USED LATER TO CONTROL THE REPOSITIONING OF THE SUBFILE.
+      *
+     C                   Z-ADD     IDFLOW        WKFLOW
+     C                   MOVEL     NO            RESET
+     C                   MOVEL     NO            EDITFL
+      *
+      * CLEAR ALL MESSAGES
+      *
+     C                   EXSR      $CLMSG
+      *
+      * GET USER'S ENTRY AND RESET STANDARD RESPONSE
+      *
+     C                   SELECT
+      *
+     C     *IN03         WHENEQ    *ON                                          F3-EXIT
+     C                   MOVEL     '03'          RTNCD
+     C                   MOVEL     EXIT          ROUTNE
+      *
+     C     *IN04         WHENEQ    *ON                                          F4-PROMPT
+     C                   EXSR      $F4S1
+     C                   MOVEL     SCRN1         ROUTNE
+      *
+     C                   when      *in05 = *on                                  F5-REFRESH
+     C                   eval      reset = yes
+     C                   eval      c1crlb = svcrlb
+     C                   eval      c1lnpr = svlnpr
+     C                   eval      c1bfam = svbfam
+     C                   eval      c1leam = svleam
+     C                   eval      routne = set1
+      *
+      * WHEN UPDATING, BE SURE TO MOVE THE SCREEN VALUES
+      * FOR THE CARCASS DATA TO THE SAVED FIELDS SO THAT
+      * THEY WILL BE RETURNED AS PARM VALUES FOR THE HIDDEN
+      * FIELDS IN THE CHECK DETAIL SUBFILE RECORD THAT THE
+      * USER CAME FROM.
+      *
+     C     *IN09         WHENEQ    *ON                                          F9-ACCEPT
+     C                   EXSR      $EDIT1
+     C     ERROR         IFEQ      0
+     C                   EXSR      $DLTPD
+     C                   EXSR      $CRTPD
+     C                   Z-ADD     C1CRLB        SVCRLB
+     C                   Z-ADD     C1LNPR        SVLNPR
+     C                   Z-ADD     C1BFAM        SVBFAM
+     C                   Z-ADD     C1LEAM        SVLEAM
+     C                   Z-ADD     C1PDAM        SVPDAM
+     C                   MOVEL     EXIT          ROUTNE
+     C                   MOVEL     '00'          RTNCD
+     C                   ELSE
+     C                   MOVEL     SCRN1         ROUTNE
+     C                   ENDIF
+      *
+      * WHEN DELETING, SET THE SAVED CARCASS DATA FIELDS
+      * TO ZERO--THEY ARE RETURNED AS PARM VALUES FOR THE HIDDEN
+      * FIELDS IN THE CHECK DETAIL SUBFILE RECORD THAT THE
+      * USER CAME FROM. ALSO, SET THE SCREEN FIELDS TO ZERO
+      * FOR THE UPDATE LOGIC FOR THE CHECK DETAIL RECORD.
+      *
+     C     *IN11         WHENEQ    *ON                                          F11-DELETE
+     C                   Z-ADD     0             SVCRLB
+     C                   Z-ADD     0             SVLNPR
+     C                   Z-ADD     0             SVBFAM
+     C                   Z-ADD     0             SVLEAM
+     C                   Z-ADD     0             SVPDAM
+     C                   Z-ADD     0             C1CRLB
+     C                   Z-ADD     0             C1LNPR
+     C                   Z-ADD     0             C1BFAM
+     C                   Z-ADD     0             C1LEAM
+     C                   EXSR      $DLTPD
+     C                   MOVEL     EXIT          ROUTNE
+     C                   MOVEL     '00'          RTNCD
+      *
+     C     *IN12         WHENEQ    *ON                                          F12-PREVIOUS
+     C                   MOVEL     '12'          RTNCD
+     C                   MOVEL     EXIT          ROUTNE
+      *
+     C     *IN25         WHENEQ    *ON                                          F25-ROLLUP
+     C     IDFLOW        ADD       WKPLIN        WKDIFF
+     C     HDRRN1        IFGE      WKDIFF                                       IF SOMETHING
+     C                   ELSE
+     C                   Z-ADD     COUNT         HDRRN1
+     C                   EXSR      $CLRLN
+     C                   DO        WKPLIN                                       DO FILL
+     C                   EXSR      $BLANK
+     C                   ENDDO                                                  DO FILL
+     C                   ENDIF                                                  IF SOMETHING
+     C                   OTHER
+      *
+      * USER PRESSED 'ENTER'
+      *
+     C                   EXSR      $EDIT1
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * EDITS ON SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $EDIT1        BEGSR
+      *
+     C                   MOVEL     YES           EDITFL
+      *
+      * CLEAR ACCUMULATORS FOR CONTROL RECORD
+      *
+     C                   Z-ADD     0             C1PDAM
+     C                   Z-ADD     0             C1PCWT
+      *
+      * ALWAYS EDIT THE CONTROL RECORD FIELDS
+      *
+     C                   EXSR      $EDC1
+      *
+      * EDIT THE SUBFILE IF THERE WERE NO ERRORS IN THE CONTROL
+      *
+     C     ERROR         IFEQ      0
+     C                   EXSR      $EDS1
+     C                   ENDIF
+      *
+     C                   MOVEL     SCRN1         ROUTNE
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * EDIT ALL CHANGED SUBFILE RECORDS
+      *----------------------------------------------------------------
+      *
+     C     $EDS1         BEGSR
+      *
+      * INITIALIZE THE PREMIUM/DISCOUNT CODE ARRAY AND INDEXES.
+      * THIS ARRAY IS USED TO VERIFY THAT A CODE IS ONLY ENTERED
+      * ONE TIME IN THE SUBFILE AND, THEREFORE, FOR A SPECIFIC
+      * CHECK DETAIL LINE.
+      *
+     C                   MOVE      *BLANK        PDC
+     C                   Z-ADD     0             Y
+     C                   Z-ADD     0             X
+      *
+      *
+      * READ ALL THE CHANGED SUBFILE RECORDS PROCESSING THE SUBFILE
+      * SELECTION
+      *
+     C                   SETOFF                                       80
+     C     *IN80         DOUEQ     *ON                                          DO PROCESS
+     C                   READC     HP137S1                                80
+     C     *IN80         IFEQ      *OFF                                         IF REC READ
+      *
+      * SETON MDT
+     C                   SETON                                        85
+      *
+      * SET OFF THE ERROR INDICATORS
+      *
+     C                   SETOFF                                       313335
+     C                   SETOFF                                       51
+      *
+      * ONLY EDIT IF A PREMIUM/DISCOUNT CODE OR AMOUNTS
+      * ARE ENTERED.
+      *
+     C     DFPDCD        IFEQ      *BLANK
+     C     DFPDAM        ANDEQ     0
+     C     DFPCWT        ANDEQ     0
+     C                   EXSR      $CLRLN
+     C                   ELSE
+      *
+      * PREMIUM/DISCOUNT CODE
+      *
+     C                   EXSR      $PDCD
+      *
+      * VALIDATE AMOUNT
+      *
+     C                   SELECT
+     C     DFPDAM        WHENEQ    0
+     C     DFPCWT        ANDEQ     0
+     C                   SETON                                        3335
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00398'     MGID(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+      *
+     C     DFPDAM        WHENNE    0
+     C     DFPCWT        ANDNE     0
+     C     HDPDAM        ANDEQ     0
+     C     HDPCWT        ANDEQ     0
+     C                   SETON                                        3335
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00409'     MGID(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+      *
+     C     DFPDAM        WHENNE    0
+     C     DFPCWT        ANDEQ     0
+     C                   Z-ADD     DFPDAM        HDPDAM
+     C                   Z-ADD     0             HDPCWT
+      *
+     C     DFPDAM        WHENEQ    0
+     C     DFPCWT        ANDNE     0
+     C                   Z-ADD     0             HDPDAM
+     C                   Z-ADD     DFPCWT        HDPCWT
+     C                   ENDSL
+      *
+      * CALCULATE ONE OF THE FOLLOWING
+      *     AMOUNT FROM CWT VALUE ENTERED BY USER
+      *     CWT VALUE FROM AMOUNT KEYED BY USER
+      *
+     C     *IN33         IFEQ      *OFF                                         IF GOOD $
+     C     *IN35         ANDEQ     *OFF
+      *
+     C                   SELECT
+     C     HDPDAM        WHENEQ    0
+     C     DFPCWT        MULT(H)   WKCWT         DFPDAM
+     C                   OTHER
+     C     WKCWT         IFNE      0
+     C     DFPDAM        DIV(H)    WKCWT         DFPCWT
+     C                   ENDIF
+     C                   ENDSL
+      *
+      * ACCUMULATE AMOUNT FOR CONTROL RECORD
+      *
+     C                   ADD       DFPDAM        C1PDAM
+     C                   ADD       DFPCWT        C1PCWT
+     C                   ENDIF                                                  IF GOOD 4
+     C                   ENDIF                                                  IF ENTRY
+      *
+     C                   UPDATE    HP137S1
+      *
+     C                   SETOFF                                       313335
+     C                   SETOFF                                       51
+      *
+     C                   ENDIF                                                  IF REC READ
+     C                   ENDDO                                                  DO PROCESS
+      * SET MDT
+     C                   SETOFF                                       85
+      *
+     C                   ENDSR
+      *
+      /EJECT
+      *----------------------------------------------------------------
+      * VALIDATE PREMIUM/DISCOUNT CODE
+      *----------------------------------------------------------------
+      *
+     C     $PDCD         BEGSR
+      *
+     C                   MOVE      *BLANK        DFPDDS
+     C     DFPDCD        IFEQ      *BLANK                                       IF BLANK
+     C                   SETON                                        31
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09001'     MGID(E)
+     C                   ENDIF
+     C                   EXSR      $ERR1
+     C                   ELSE
+      *
+     C     DFPDCD        CHAIN     HSP045                             91
+     C     *IN91         IFEQ      *ON                                          IF BAD CODE
+     C                   SETON                                        31
+     C                   MOVEL     'UNKNOWN'     DFPDDS
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00358'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     DFPDCD        MGW(1)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+     C                   EXSR      $ERR1
+     C                   ELSE
+      *
+      * SEE IF CODE HAS ALREADY BEEN ENTERED ONCE IN THE SUBFILE.
+      *
+     C                   Z-ADD     1             X
+     C     DFPDCD        LOOKUP    PDC(X)                                 98
+     C     *IN98         IFEQ      *ON
+     C                   SETON                                        31
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00648'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     DFPDCD        MGW(1)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   ENDIF
+      *
+      * NO ERRORS WERE FOUND ON THE PREMIUM DISCOUNT CODE
+      *  1) MOVE CODE TO THE ARRAY
+      *
+     C     *IN31         IFEQ      *OFF                                         IF ALL OK
+     C                   MOVEL     PDPDDS        DFPDDS
+     C                   ADD       1             Y
+     C                   MOVEL     DFPDCD        PDC(Y)
+     C                   ENDIF                                                  IF ALL OK
+     C                   ENDIF                                                  IF BAD CODE
+     C                   ENDIF                                                  IF BLANK
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * CLEAR THE SUBFILE ON SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $CLR1         BEGSR
+      *
+     C                   eval      c1pdam = 0
+     C                   eval      c1pcwt = 0
+     C                   Z-ADD     0             HDRRN1
+     C                   Z-ADD     0             COUNT
+      *
+     C                   CLEAR                   HP137S1
+     C                   SETON                                        83        SFLCLR
+     C                   WRITE     HP137C1
+     C                   SETOFF                                       818283
+      *                                                    81=SFLDSP
+      *                                                    82=SFLEND
+      *                                                    83=SFLCLR
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * REFRESH/FILL THE SUBFILE ON SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $FRSH1        BEGSR
+      *
+      * LOADING THE SUBFILE IN THIS PROGRAM IS DIFFERENT THAN IN THE
+      * SHELL PROGRAMS. ALWAYS LOAD ALL OF THE DATABASE RECORDS AND
+      * FINISH THE PAGE OUT WITH BLANK LINES.
+      *
+      * SET POSITION IN DATABASE FILE HSP065-CHECK ADJUSTMENTS
+      *
+     C     K1P065        SETLL     HSP065
+     C     *IN82         DOUEQ     *ON
+     C                   EXSR      $LOAD1
+     C                   ENDDO
+     C                   SETOFF                                       82
+      *
+      * FILL UP THE SUBFILE PAGE WITH BLANK LINES IF NECESSARY
+      *
+     C     WKPLIN        IFNE      0
+     C     WKPLIN        ANDNE     COUNT
+     C     COUNT         DIV       WKPLIN        WKFLD
+     C                   MVR                     WKRMDR
+     C     WKPLIN        SUB       WKRMDR        WKDIFF
+     C                   EXSR      $CLRLN
+     C                   DO        WKDIFF
+     C                   EXSR      $BLANK
+     C                   ENDDO
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * LOAD THE SUBFILE ON SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $LOAD1        BEGSR
+      *
+      * RETRIEVE PREMIUMS/DISCOUNTS FOR THE CHECK DETAIL LINE
+      *
+     C     K1P065        READE(N)  HSP065                                 82
+     C     *IN82         IFEQ      *OFF                                         IF NOT EOF
+     C     CJCJFL        ANDEQ     'P'
+     C                   SETON                                        85
+      *
+     C                   EXSR      $CLRLN
+      *
+      *  FILL SUBFILE FIELDS FROM DATABASE FILE
+      *
+     C                   MOVEL     CJCJCD        DFPDCD
+     C                   Z-ADD     CJCJAM        DFPDAM
+     C                   Z-ADD     CJCJAM        HDPDAM
+     C                   ADD       CJCJAM        C1PDAM
+      *
+      * CALCULATE DOLLAR AMOUNT PER CWT
+      *
+     C     WKCWT         IFNE      0
+     C     CJCJAM        DIV(H)    WKCWT         DFPCWT
+     C                   ADD       DFPCWT        C1PCWT
+     C                   ENDIF
+      *
+      * RETRIEVE PREMIUM/DISCOUNT DESCRIPTION
+      *
+     C     DFPDCD        CHAIN     HSP045                             87
+     C     *IN87         IFEQ      *OFF
+     C                   MOVEL     PDPDDS        DFPDDS
+     C                   ELSE
+     C                   MOVEL     'UNKNOWN'     DFPDDS
+     C                   ENDIF
+      *
+     C                   ADD       1             COUNT
+     C                   ADD       1             HDRRN1
+      *
+     C                   WRITE     HP137S1
+     C                   SETON                                        81
+      *
+      * TO CONTROL THE PAGE OF THE SUBFILE TO DISPLAY, SET THE VALUE
+      * FOR THE DSPF SFLRCDNBR FIELD TO BE EQUAL TO THE SFL HIDDEN RRN
+      *
+     C                   Z-ADD     HDRRN1        HDPAG1
+     C                   ENDIF                                                  IF NOT EOF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * INITIALIZE SUBFILE LINE
+      *----------------------------------------------------------------
+      *
+     C     $CLRLN        BEGSR
+      *
+     C                   MOVE      *BLANK        DFPDCD
+     C                   MOVE      *BLANK        DFPDDS
+     C                   Z-ADD     0             DFPDAM
+     C                   Z-ADD     0             DFPCWT
+     C                   Z-ADD     0             HDPDAM
+     C                   Z-ADD     0             HDPCWT
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * LOAD BLANK SUBFILE RECORDS FOR SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $BLANK        BEGSR
+      *
+     C                   ADD       1             COUNT
+     C                   ADD       1             HDRRN1
+      *
+     C                   WRITE     HP137S1
+     C                   SETON                                        81
+     C                   Z-ADD     HDRRN1        HDPAG1
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * EDIT THE CONTROL RECORD INFO ON SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $EDC1         BEGSR
+      *
+      * CARCASS POUNDS ARE REQUIRED
+      *
+     C                   SELECT
+     C     C1CRLB        WHENEQ    0
+     C                   SETON                                        32
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09001'     MGID(E)
+     C                   ENDIF
+      *
+     C     C1CRLB        WHENLT    0
+     C                   SETON                                        32
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09000'     MGID(E)
+     C                   ENDIF
+      *
+     C     C1CRLB        WHENGT    C1LVLB
+     C                   SETON                                        32
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00647'     MGID(E)
+     C                   ENDIF
+     C                   ENDSL
+      *
+      *  CALCULATE A WORKFIELD FOR POUNDS TO BE USED LATER
+      *  IN CALCULATIONS
+      *
+     C     C1CRLB        IFGT      0
+     C     C1CRLB        DIV(H)    100           WKCWT
+     C                   ELSE
+     C                   Z-ADD     0             WKCWT
+     C                   ENDIF
+      *
+      * Lean percent must be in the range of 40.00% to 60.00%
+      *
+     C                   if        c1lnpr < 40 or c1lnpr > 60                   If lean error
+     C                   SETON                                        37
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00361'     MGID(E)
+     C                   ENDIF
+     C                   ENDIF                                                  If lean error
+      *
+      *
+      * Average Backfat must be in the range of 0.50 to 1.20
+      *
+     C                   if        c1bfam < .50 or c1bfam > 1.20                If bad backfat
+     C                   SETON                                        30
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00362'     MGID(E)
+     C                   ENDIF
+     C                   ENDIF                                                  If bad backfat
+      *
+      *
+      * Average Loin Eye must be in the range of 1.80 to 2.80
+      *
+     C                   if        c1leam < 1.80 or c1leam > 2.80               If loin eye error
+     C                   SETON                                        34
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00363'     MGID(E)
+     C                   ENDIF
+     C                   ENDIF                                                  If loin eye error
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * DELETE ALL PREMIUM/DISCOUNTS FOR A CHECK DETAIL RECORD
+      *----------------------------------------------------------------
+      *
+     C     $DLTPD        BEGSR
+      *
+     C     K1P065        SETLL     HSP065
+      *
+     C     *IN93         DOUEQ     *ON                                          DO DETAIL
+     C     K1P065        READE     HSP065                                 93
+     C     *IN93         IFEQ      *OFF                                         IF FOUND
+     C     CJCJFL        ANDEQ     'P'
+     C                   DELETE    CJREC
+     C                   ENDIF                                                  IF FOUND
+     C                   ENDDO                                                  DO DETAIL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * WRITE PREMIUM DISCOUNT RECORDS
+      *----------------------------------------------------------------
+      *
+     C     $CRTPD        BEGSR
+      *
+      * READ SUBFILE TO WRITE PREMIUM/DISCOUNT RECORDS
+      *
+     C                   Z-ADD     SVCHDT        CJCHDT
+     C                   Z-ADD     SVCVNO        CJCVNO
+     C                   Z-ADD     SVCHNO        CJCHNO
+     C                   Z-ADD     SVLNNO        CJLNNO
+     C                   MOVEL     'P'           CJCJFL
+      *
+     C     *IN80         DOUEQ     *ON                                          DO READ C
+     C                   READC     HP137S1                                80
+     C     *IN80         IFEQ      *OFF                                         IF REC READ
+     C     DFPDCD        ANDNE     *BLANK
+     C                   MOVEL     DFPDCD        CJCJCD
+     C                   Z-ADD     DFPDAM        CJCJAM
+     C                   WRITE     CJREC
+     C                   ENDIF                                                  IF REC READ
+     C                   ENDDO                                                  DO READ C
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * F4 PROMPT FOR SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $F4S1         BEGSR
+      *
+     C                   SELECT
+      *
+      *  IF PREMIUM/DISCOUNT CODE
+      *
+     C     FLD           WHENEQ    'DFPDCD'
+     C                   CALL      'HP539'
+     C                   PARM                    XXPDCD
+     C                   PARM                    XXPDDS
+     C                   EXSR      $RRN1
+      *
+     C     *IN97         IFEQ      *OFF                                         IF CHAIN OK
+     C     XXPDCD        IFNE      *BLANK                                       IF SELECTED
+     C                   MOVEL     XXPDCD        DFPDCD
+     C                   MOVEL     XXPDDS        DFPDDS
+     C                   ENDIF                                                  IF SELECTED
+     C                   SETON                                        51
+     C                   UPDATE    HP137S1
+      *
+      * RESET THE SUBFILE RELATIVE RECORD NUMBER TO WHAT IT WAS BEFORE
+      * THE USER TOOK F4 (IT WILL BE OUT-OF-SYNC IF THE USER HAS
+      * SELECTED A RECORD THUS CAUSING THE SUBFILE RECORD TO BE
+      * RETRIEVED AND UPDATED.)  BUT, SET THE PAGE OF THE SUBFILE TO
+      * BE DISPLAYED TO THE PAGE ON WHICH THE USER TOOK F4.
+      *
+     C                   Z-ADD     HDRR1         HDPAG1
+     C                   SETOFF                                       51
+     C                   ENDIF                                                  IF CHAIN OK
+     C                   OTHER
+      *
+      * F4 NOT VALID FOR THIS FIELD SO ISSUE MESSAGE
+      *
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09011'     MGID(E)
+     C                   ENDIF
+      *
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * SET THE SUBFILE TO REDISPLAY AT THE FIRST RECORD THAT HAS ERRORS
+      *----------------------------------------------------------------
+      *
+     C     $ERR1         BEGSR
+      *
+     C     ERROR         IFEQ      1
+     C                   Z-ADD     HDRRN1        HDPAG1
+     C                   ENDIF
+      *
+     C                   ENDSR
+      *
+      *----------------------------------------------------------------
+      * SET ON LR AND END JOB
+      *----------------------------------------------------------------
+      *
+     C     $EXIT         BEGSR
+      *
+     C                   SETON                                        LR
+      *
+     C                   ENDSR
+      *
+      *----------------------------------------------------------------
+      * WRITE ERROR MESSAGES
+      *----------------------------------------------------------------
+      *
+     C     $WRMSG        BEGSR
+      *
+     C                   CALL      'UT80045J'                           43
+     C                   PARM                    MGID
+     C                   PARM                    MGDT
+     C                   PARM                    ERROR
+     C                   PARM      SDPGM         PGM
+     C                   PARM      MSGFIL        MSGFL
+      *
+      * IF CALL TO UT80045J FAILED, A MESSAGE HARDCODED IN THE DSPF
+      * COMMAND KEY RECORD WILL BE SET ON. SO, REDISPLAY SCREEN TO USER
+      *
+     C     *IN43         IFEQ      *ON
+     C                   MOVEL     SET1          ROUTNE
+     C                   ENDIF
+      *
+     C                   ENDSR
+      *
+      *----------------------------------------------------------------
+      * CLEAR MESSAGES
+      *----------------------------------------------------------------
+      *
+     C     $CLMSG        BEGSR
+      *
+     C                   CALL      'UT80045J'                           43
+     C                   PARM      *BLANK        MGI
+     C                   PARM      *BLANK        MGD
+     C                   PARM      *ZERO         ERROR
+     C                   PARM      SDPGM         PGM
+     C                   PARM      MSGFIL        MSGFL
+      *
+      * IF CALL TO UT80045J FAILED, A MESSAGE HARDCODED IN THE DSPF
+      * COMMAND KEY RECORD WILL BE SET ON. SO, REDISPLAY SCREEN TO USER
+      *
+     C     *IN43         IFEQ      *ON
+     C                   MOVEL     SET1          ROUTNE
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * FIND/RETRIEVE THE SUBFILE RECORD TO UPDATE
+      *          WHEN RETURNING FROM A SELECT PROGRAM ON SCREEN 1
+      *----------------------------------------------------------------
+      *
+      * HDRR1 IS THE HIDDEN FIELD ASSOCIATED WITH THE KEYWORD SFLCSRRRN
+      * ON THE CONTROL RECORD IN THE DSPF.
+      * HDRRN1 IS THE VALUE ASSOCIATED WITH THE KEYWORD 'KSFILE' IN
+      * THE F-SPECS FOR THE WORKSTATION.
+      *
+     C     $RRN1         BEGSR
+      *
+     C                   SETOFF                                       97
+      *
+     C     HDRR1         IFNE      0
+     C                   Z-ADD     HDRR1         HDRRN1
+     C     HDRRN1        CHAIN     HP137S1                            97
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * INITIALIZATION SUBROUTINE
+      *----------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      * KEY FOR FILE HSP064-CHECK DETAIL
+      *
+     C     K1P065        KLIST
+     C                   KFLD                    SVCHDT
+     C                   KFLD                    SVCVNO
+     C                   KFLD                    SVCHNO
+     C                   KFLD                    SVLNNO
+      *
+      * PARM LISTS
+      *
+     C     *ENTRY        PLIST
+     C                   PARM                    C1BOCD
+     C                   PARM                    C1CVNO
+     C                   PARM                    C1CNAM
+     C                   PARM                    C1CHNO
+      *
+     C                   PARM                    SVLNNO
+     C                   PARM                    C1MVSN
+     C                   PARM                    C1HGCD
+     C                   PARM                    C1TANO
+     C                   PARM                    C1LVHD
+     C                   PARM                    C1LVLB
+     C                   PARM                    C1CDHD
+     C                   PARM                    C1CDLB
+     C                   PARM                    C1YDHD
+     C                   PARM                    C1YDLB
+     C                   PARM                    C1GRAM
+      *
+     C     C1CRLB        PARM                    SVCRLB
+     C     C1LNPR        PARM                    SVLNPR
+     C     C1BFAM        PARM                    SVBFAM
+     C     C1LEAM        PARM                    SVLEAM
+     C                   PARM                    SVPDAM
+      *
+     C                   PARM                    SVCVNO
+     C                   PARM                    SVCHNO
+     C                   PARM                    SVCHDT
+     C                   PARM                    RTNCD
+      *
+     C     *LIKE         DEFINE    C1CRLB        SVCRLB
+     C     *LIKE         DEFINE    C1LNPR        SVLNPR
+     C     *LIKE         DEFINE    C1BFAM        SVBFAM
+     C     *LIKE         DEFINE    C1LEAM        SVLEAM
+      *
+     C     *LIKE         DEFINE    CJCHNO        SVCHNO
+     C     *LIKE         DEFINE    CJCVNO        SVCVNO
+     C     *LIKE         DEFINE    CJCJAM        SVPDAM
+     C     *LIKE         DEFINE    CJCHDT        SVCHDT
+     C     *LIKE         DEFINE    CJLNNO        SVLNNO
+      *
+      * GLOBAL DEFINES
+      *
+     C                   MOVE      *BLANK        PGM              10            USED IN MSG
+     C                   MOVE      *BLANK        MSGFL            10            USED IN MSG
+     C                   MOVE      *BLANK        ROUTNE            6            ROUTINE
+     C                   Z-ADD     0             MAXRRN            4 0          REPOSITION
+     C                   MOVEL     NO            RESET             1            REPOSITION
+     C                   MOVE      '00'          RTNCD             2            RETURN CODE
+     C     *LIKE         DEFINE    DFMODE        MODE
+     C     *LIKE         DEFINE    IDFLOW        WKFLOW                         SFL POSITION
+      *
+      * ARRAY INDEXES
+     C                   Z-ADD     0             X                 3 0
+     C                   Z-ADD     0             Y                 3 0
+      *
+     C                   Z-ADD     0             COUNT             2 0
+     C     *LIKE         DEFINE    COUNT         WKDIFF
+     C     *LIKE         DEFINE    COUNT         WKRMDR
+     C     *LIKE         DEFINE    COUNT         WKFLD
+      *
+      * ALPHA FIELDS FOR USE AS PARMS
+      *
+     C     *LIKE         DEFINE    PDPDCD        XXPDCD
+     C     *LIKE         DEFINE    PDPDDS        XXPDDS
+      *
+      * CONTROL FIELDS, FLAGS, COUNTERS, WORK FIELDS, SAVE FIELDS
+      *
+     C                   Z-ADD     0             WKCWT             7 2
+     C                   MOVEL     NO            EDITFL            1
+      *
+      *
+      * IF THE INCOMING CARCASS POUNDS ARE ZERO, THEN YOU ARE IN
+      * 'CREATE' MODE; OTHERWISE YOU ARE IN 'REVISE' MODE.
+      *
+     C                   SELECT
+     C     SVCRLB        WHENEQ    0
+     C                   MOVEL     'CREATE'      MODE
+     C                   MOVEL     'CREATE'      DFMODE
+     C                   OTHER
+     C                   MOVEL     'REVISE'      MODE
+     C                   MOVEL     'REVISE'      DFMODE
+     C                   ENDSL
+      *
+      * TO SUPPORT F5-REFRESH, LOGIC REQUIRES THE NUMBER OF LINES ON
+      * THE SUBFILE PAGE AND ALSO THE NUMBER OF LINES LESS 1.  BY
+      * SETTING THESE VALUES UP AS CONSTANT WORK FIELDS, THE PROCESSING
+      * LOGIC CAN BE STANDARDIZED BETWEEN PROGRAMS.
+      *
+     C                   Z-ADD     03            WKPLIN            2 0          SFLPAG(0003)
+     C     WKPLIN        SUB       1             WKRLIN            2 0          SFLPAG - 1
+      *
+      * THE FOLLOWING STANDARD CODE MUST BE INCLUDED TO MAKE THE
+      * STANDARD ERROR MESSAGE HANDLING PROGRAM FUNCTION PROPERLY.
+      * THIS CODE SETS AND CLEARS THE PROGRAM MESSAGE QUEUE.
+      *
+     C                   Z-ADD     20            MAXMSG            2 0
+     C                   MOVEL     '*'           MSGPGM                         SET QUEUE
+     C                   EXSR      $CLMSG                                       CLEAR MSG
+      *
+     C                   ENDSR
+      /EJECT

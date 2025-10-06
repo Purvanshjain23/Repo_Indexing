@@ -1,0 +1,887 @@
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Resource Optimization
+      * PROGRAM:     RO232
+      * TITLE:       Byproduct --- Skirt Meat (41132, 41322, NNNNN, and IS 720/712/718)
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     07/10/08
+      *
+      * FUNCTION:    When Spareribs are produced, we get byproduct items that are
+      *              referred to as "skirt meat". These items are coded to the T72A Meat Cost
+      *              Group and the TF Classification of BP7.
+      *              So, all of the Production Pounds/Dollars are reported under BP7.
+      *              The users want some of these Pounds/Dollars split to regular MIX
+      *              Adjustments (ie: NVA, CVA).
+      *
+      *              To do this split, we sum up all of the RIB production (from TFP010) for
+      *              the Week to get a RIB Total. We also subset (sum) the RIBS into 4
+      *              groups: Small Commodity Ribs
+      *                      Medium Commodity Ribs
+      *                      Converted Brisket Off Ribs
+      *                      Trim Producing Rib Products
+      *
+      *              We find a % of RIB production that each subset represents for
+      *              the week and use it to split/move the pounds/dollars from the BP7
+      *              Classification to the NVA/CVA classifications.
+      *
+      *              We will write a set of exception records in this program for each 'split from'
+      *              Item (items in ItemStructure 720/712/718) that has produced lbs for the week.
+      *              In each set, we will:
+      *                   1) decrease the 'split from' Item (Items in 720/712/718)
+      *                   2) For Small Commodity Ribs,  increase (split to) Item 41132
+      *                   3) For Medium Commodity Ribs, increase (split to) Item 41322
+      *                   4) For Converted Brisket, increase (split to):
+      *                        a) the SBD Item with the most produced lbs
+      *                        b) the TF Item with the most produced lbs
+      *
+      ***************************************************************************************
+      * MODIFICATIONS:
+      ***************************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 07/30/08  Alice Brownfield
+      *           add the call to RO220 to write the BP record to the Byproduct Detail file
+      *
+      * 09/11/08  LeAnne Ramsey
+      *           Recompile only. Export/Domestic Flag was added to TFP010-
+      *           Weekly Product Revenue Detail file.
+      *
+      * 11/21/08  LeAnne Ramsey
+      *           As part of synchronizing the LDAs between the TFS Margin Adjustment Close
+      *           and the Meat Costing, we changed the LDA positions.
+      *
+      * 12/31/08  LeAnne Ramsey
+      *           Changed code to populate Meat Cost SubGroup.
+      *
+      * 08/04/10  LeAnne Ramsey
+      *           Prior to this change, we 'split from' hardcoded Item 44112. Now, Damon wants
+      *           to 'split from' each Item in Item Structure 720/712/718. (At this time, there
+      *           are 3 Items in this Structure: 44112, 44113, 44114.)
+      *           I want separate sets of Splits...a set for each FROM Item; so, I will change
+      *           this code to loop thru all the processing for each Item.
+      *
+      * 09/23/10  LeAnne Ramsey (E1025)
+      *           We will now exclude Meat Cost/LB from the calc of the 'Split To' dollars.
+      *
+      * 01/20/11  LeAnne Ramsey (E1292)
+      *           Recompile only.
+      *           When they installed th PA changes last summer, Damon G. had to start entering
+      *           WPs as Consumed Items in the BOM. The up-front Meat Costing edits are
+      *           kicking out the Items that consume WPs. So, Damon G. will now start
+      *           entering in the BOM the true RM/Base Items that an Item consumes. He will set
+      *           these up with a BOM Meat Cost Consumed% <> 0. (He will set the consumed WPs
+      *           up with a BOM Meat Cost Consumed% of zero.)
+      *
+      *           As part of this change, BOM logical file PDIORELE was changed to select
+      *           only those records where the BOM Meat Cost Consumed% is not zero. (Note:
+      *           It already selects only Active/Consumed records. Only 3 programs use this
+      *           LF: RO213, RO214, RO232.)
+      *
+      * 03/28/11  LeAnne Ramsey (E1445)
+      *           Up until now, we hardcoded Item 42173 for our "Split TO" Item for the Converted
+      *           Brisket. BUT, neither TF or SBD are making this Item. So, Damon wants to "split"
+      *           to the 300/320/313 Item that has the most produced pounds for each Company.
+      *           So, I added a subroutine ($brisket) to find the Item with the most produced lbs.
+      *           I also changed the hardcoded 'Splt to 41132 41322 42173' comment to be
+      *           'Splt to 41132 41322 NNNNN' since the Item will not be the same for Seaboard and
+      *           Triumph.
+      *
+      * 03/08/12  LeAnne Ramsey (E1984)
+      *           We will now allocate to our 3 "categories/subsets" conditionally depending on the
+      *           Yes/No values that Damon G. maintains in our 6 new Flag Fields.
+      *           We added 6 new Skirt Meat Allocation Flag fields to ROP100. These will let Damon
+      *           designate which "categories" program RO232 will allocate Skirt Meat to. These
+      *           are Yes/No flags:
+      *                             Skirt Meat Allocation   SBF   TF
+      *                             ---------------------   ---   --
+      *                                   Small commodity    Y    N
+      *                                  Medium commodity    N    N
+      *                                 Converted Brisket    Y    Y
+      *
+      * 11/14/17  Danny Nguyen  (R12011A-Weekly Product Revenue)
+      *           Recompile only. Added 25 STF fields to TFP010 file.
+      *
+      * 05/17/22  Danny Nguyen  (DO2484 - WI 479 STF Variance Reporting)
+      *           Recompile only. Added 2 STF fields to TFP010 file.
+      *           PRXYPC   - STF STD YIELD %
+      *           PRXPMPPC - STF PUMP %
+      *
+      * W105621 RMC 10/10/2022 INCREASE FIELD SIZES TO HANDLE PRICES > 999.99
+      *         CHANGE @@ANPRPR TO SIZE 10.6
+      *           CHANGES PRANPRPR IN TFP010
+      *
+      *
+      /EJECT
+      ***************************************************************************************
+      * FILE SPECIFICATION
+      ***************************************************************************************
+      *
+     fombyrel1  if   e           k disk
+      *  Item default
+      *
+      *
+     fombyrel7  if   e           k disk
+      *  Item default
+      *
+      *
+     fomfarel1  if   e           k disk
+      *  Product class
+      *
+      *
+     fpdiorele  if   e           k disk
+      * Item bill of material
+      * (Note: LF selects Active/Consumed Items where BOM Meat Cost Consumed% <> 0)
+      *
+      *
+     fpdiorel4  if   e           k disk
+      * Item bill of material
+      * (Note: the Logical file selects only Active/Produced records.)
+      *
+      *
+     frop100    if   e           k disk
+      * Resource optimazation header
+      *
+      *
+     ftfp010    if   e           k disk
+      *  Weekly product revenue detail
+      *
+      *
+     ftfl010h   if   e           k disk    rename(prrec:prrech)
+      *  Weekly product revenue detail
+      *
+      *
+     ftfp019    o    e           k disk
+      *  TF Product exceptions
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control
+      *
+     D svistycd        s                   like(pristycd) inz(720)
+     D svisgrcd        s                   like(prisgrcd) inz(712)
+     D svisclcd        s                   like(prisclcd) inz(718)
+      *
+     D svsprcd         s                   like(prprcd)
+     D svtprcd         s                   like(prprcd)
+      *
+      * Workfields
+      *
+     D wkalph7         s              7
+      *
+     D wkisgrcd        s                   like(prisgrcd)
+     D wkisclcd        s                   like(prisclcd)
+      *
+     D wkprcd          s                   like(prprcd)
+     D wkpco           s                   like(prpco)
+     D wksubset        s              2
+      *
+     D wkpump          s              9  6
+     D wkrate          s              9  6
+     D wksrate         s              9  6
+     D wktrate         s              9  6
+      *
+     D wksexpuam       s                   like(prapuam)
+     D wksexpulb       s                   like(prapulb)
+     D wkspuam         s                   like(prapuam)
+     D wkspulb         s                   like(prapulb)
+     D wkspuslb        s                   like(prapulb)
+     D wkssclb         s                   like(prapulb)
+     D wksmclb         s                   like(prapulb)
+     D wkscblb         s                   like(prapulb)
+     D wkstrlb         s                   like(prapulb)
+      *
+     D wktexpuam       s                   like(prapuam)
+     D wktexpulb       s                   like(prapulb)
+     D wktpuam         s                   like(prapuam)
+     D wktpulb         s                   like(prapulb)
+     D wktpuslb        s                   like(prapulb)
+     D wktsclb         s                   like(prapulb)
+     D wktmclb         s                   like(prapulb)
+     D wktcblb         s                   like(prapulb)
+     D wkttrlb         s                   like(prapulb)
+      *
+      *
+      * Parms
+      *
+     D xxsn            s              7  0
+     D xxpfcd          s              1
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwedt                29     36  0
+      *
+     D  ldcono                82     84  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *********************************************************************************************
+      * Mainline
+      *********************************************************************************************
+      *
+      * Process each Skirt Meat Item (Item Structure 720/712/718) in the Item Default file.
+      * If it had Produced Pounds in the Revenue file for the week, perform the split logic.
+      *
+     C     key04         setll     ombyrel7
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C     key04         reade     ombyrel7                               90
+     C                   if        *in90 = *off                                 If not eof
+      *
+     C                   z-add     byhgcd        wkprcd
+     C                   eval      wkalph7 = %triml(%editc(wkprcd: 'Z'))
+      *
+     C                   z-add     0             wkpco
+     C                   z-add     0             wkspulb
+     C                   z-add     0             wkspuam
+     C                   z-add     0             wksexpulb
+     C                   z-add     0             wksexpuam
+     C                   z-add     0             wktpulb
+     C                   z-add     0             wktpuam
+     C                   z-add     0             wktexpulb
+     C                   z-add     0             wktexpuam
+      *
+      * Key: Product
+      *      WeekEnding Date
+      *
+     C     key01         setll     tfp010
+     C                   dou       *in91 = *on                                  Do revenue
+     C     key01         reade     tfp010                                 91
+     C                   if        *in91 = *off                                 If more rev
+     C                   add       prspulb       wkspulb
+     C                   add       prspuam       wkspuam
+     C                   add       prtpulb       wktpulb
+     C                   add       prtpuam       wktpuam
+     C                   eval      wkpco = prlco + prkco + prico + proco
+     C                   endif                                                  If more rev
+     C                   enddo                                                  Do revenue
+      *
+      * If there was any "skirt meat" produced this week for this Item, process.
+      *
+     C                   if        wkspulb = 0 and wktpulb = 0
+     C                   else
+     C                   exsr      $process
+     C                   endif
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Main do
+      *
+      *
+      * EOF processing
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------------------------------
+      * Process each 'split from' Item that has pounds for the week
+      *---------------------------------------------------------------------------------------
+      *
+     C     $process      begsr
+      *
+      * Get a Product Exception Number  (system-assigned)
+      * (We will use a single number for all exception records).
+      *
+     C                   call      'TF810'
+     C                   parm      ldpfcd        xxpfcd
+     C                   parm      0             xxsn
+      *
+      * Write 3 "TO" Exception records to increase Dollars/Pounds.
+      * Write one "FROM" Exception record to decrease Dollars/Pounds.
+      *
+     C                   exsr      $increase
+     C                   exsr      $decrease
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------
+      * Write 3 Exception records to "increase" dollars/pounds for some Items
+      *---------------------------------------------------------------------------
+      *
+      * Write "TO" Exception records to increase Dollars/Pounds for:
+      *      1) Item 41132--use Small Commodity values
+      *      2) Item 41322--use Medium Commodity values
+      *      3) Item NNNNN--use Converted Briskets values where NNNNN is the Item with the
+      *                     most produced lbs for the week for Seaboard or Triumph
+      *
+     C     $increase     begsr
+      *
+      *-------------------
+      * Small Commodity
+      *-------------------
+     C                   z-add     0             wksrate
+     C                   z-add     0             wktrate
+      *
+      *      Calculate the % of RIBS that Small Commodity represents:
+      *            SBD:
+     C                   if        wkspuslb <> 0 and ohsscfl = yes
+     C                   eval(h)   wksrate = wkssclb / wkspuslb
+     C                   endif
+      *            TF:
+     C                   if        wktpuslb <> 0 and ohtscfl = yes
+     C                   eval(h)   wktrate = wktsclb / wktpuslb
+     C                   endif
+      *
+     C                   z-add     41132         peprcd
+     C                   eval      peexcom = 'From Skirt Meat ' + wkalph7
+     C                   exsr      $calc
+      *
+      *-------------------
+      * Medium Commodity
+      *-------------------
+     C                   z-add     0             wksrate
+     C                   z-add     0             wktrate
+      *
+      * Calculate the % of RIBS that Medium Commodity represents:
+      *             SBD:
+     C                   if        wkspuslb <> 0 and ohsmcfl = yes
+     C                   eval(h)   wksrate = wksmclb / wkspuslb
+     C                   endif
+      *             TF:
+     C                   if        wktpuslb <> 0 and ohtmcfl = yes
+     C                   eval(h)   wktrate = wktmclb / wktpuslb
+     C                   endif
+      *
+     C                   z-add     41322         peprcd
+     C                   eval      peexcom = 'From Skirt Meat ' + wkalph7
+     C                   exsr      $calc
+      *
+      *-------------------
+      * Converted Brisket
+      *-------------------
+     C                   z-add     0             wksrate
+     C                   z-add     0             wktrate
+      *
+      * Calculate the % of RIBS that Converted Brisket represents:
+      *             SBD:
+     C                   if        wkspuslb <> 0 and ohscbfl = yes
+     C                   eval(h)   wksrate = wkscblb / wkspuslb
+     C                   endif
+      *             TF:
+     C                   if        wktpuslb <> 0 and ohtcbfl = yes
+     C                   eval(h)   wktrate = wktcblb / wktpuslb
+     C                   endif
+      *
+      * In March 2011 (E1445) Damon G. had me remove the hardcoded SplitTo Item 42173
+      * because neither Seaboard nor Triumph was making this Item. He asked that I find/use
+      * the Item that Seaboard or Triumph produced the most of for the week in the 300/320/313
+      * Item Structure. So, I changed the code to write 2 records when the "most produced" Item
+      * was not the same for SBD/TF. If it was the same, I left the logic writing a single record.
+      * BUT, since Triumph is making Skirt Meat Item 44113 and Seaboard is making Skirt Meat
+      * Item 44114.......we still just get 1 record!
+      *
+     C                   if        svsprcd = svtprcd                            If same Item
+     C                   z-add     svsprcd       peprcd
+     C                   eval      peexcom = 'From Skirt Meat ' + wkalph7
+     C                   exsr      $calc
+     C                   else
+      *
+     C                   z-add     svsprcd       peprcd
+     C                   eval      peexcom = 'From Skirt Meat ' + wkalph7
+     C                   exsr      $calcsbd
+      *
+     C                   z-add     svtprcd       peprcd
+     C                   eval      peexcom = 'From Skirt Meat ' + wkalph7
+     C                   exsr      $calctf
+     C                   endif                                                  If same Item
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Calc the values for this "TO" Exception record
+      *-------------------------------------------------------------------------------
+      *
+     C     $calc         begsr
+      *
+      * Calc Exception Pounds as:
+      *   rate * produced pounds of Skirt Meat Item
+      *
+     C                   eval(h)   pesexpulb = wksrate * wkspulb
+     C                   eval(h)   petexpulb = wktrate * wktpulb
+      *
+      * Calc Exception Amount as:
+      *   rate * produced value amount of Skirt Meat Item
+      *
+     C                   eval(h)   pesexpuam = wksrate * wkspuam
+     C                   eval(h)   petexpuam = wktrate * wktpuam
+      *
+     C                   if        pesexpulb <> 0 or pesexpuam <> 0 or          If write
+     C                             petexpulb <> 0 or petexpuam <> 0
+      *
+      * Accumulate values for eventually writing the "Split From" record.
+      *
+     C                   add       pesexpulb     wksexpulb
+     C                   add       pesexpuam     wksexpuam
+     C                   add       petexpulb     wktexpulb
+     C                   add       petexpuam     wktexpuam
+      *
+     C                   exsr      $wrt019
+     C                   endif                                                  If write
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Calc the values for this Converted Brisket "split to" record for Seaboard only
+      *-------------------------------------------------------------------------------
+      *
+     C     $calcsbd      begsr
+      *
+      * Calc Exception Pounds as:
+      *   rate * produced pounds of Skirt Meat Item
+      *
+     C                   eval(h)   pesexpulb = wksrate * wkspulb
+      *
+      * Calc Exception Amount as:
+      *   rate * produced value amount of Skirt Meat Item
+      *
+     C                   eval(h)   pesexpuam = wksrate * wkspuam
+      *
+     C                   if        pesexpulb <> 0 or pesexpuam <> 0             If write
+      *
+      * Accumulate values for eventually writing the "Split From" record.
+      *
+     C                   add       pesexpulb     wksexpulb
+     C                   add       pesexpuam     wksexpuam
+      *
+     C                   exsr      $wrt019
+     C                   endif                                                  If write
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Calc the values for this Converted Brisket "split to" record for Triumph only
+      *-------------------------------------------------------------------------------
+      *
+     C     $calctf       begsr
+      *
+      * Calc Exception Pounds as:
+      *   rate * produced pounds of Skirt Meat Item
+      *
+     C                   eval(h)   petexpulb = wktrate * wktpulb
+      *
+      * Calc Exception Amount as:
+      *   rate * produced value amount of Skirt Meat Item
+      *
+     C                   eval(h)   petexpuam = wktrate * wktpuam
+      *
+     C                   if        petexpulb <> 0 or petexpuam <> 0             If write
+      *
+      * Accumulate values for eventually writing the "Split From" record.
+      *
+     C                   add       petexpulb     wktexpulb
+     C                   add       petexpuam     wktexpuam
+      *
+     C                   exsr      $wrt019
+     C                   endif                                                  If write
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------
+      * Write one Exception record to "decrease" the dollars/pounds for Skirt Meat
+      *---------------------------------------------------------------------------
+      *
+     C     $decrease     begsr
+      *
+     C                   eval      peexcom = 'Splt to 41132 41322 NNNNN'
+     C                   z-add     wkprcd        peprcd
+      *
+      * We will take all costs (Packaging/Labor/Ingredient/Other) out of
+      * the dollars on this one.
+      *
+      *     Dollars
+     C                   eval      wksexpuam = wksexpuam - (wksexpulb * wkpco)
+     C                   eval      wktexpuam = wktexpuam - (wktexpulb * wkpco)
+      *
+     C                   z-sub     wksexpuam     pesexpuam
+     C                   z-sub     wktexpuam     petexpuam
+      *     Pounds
+     C                   z-sub     wksexpulb     pesexpulb
+     C                   z-sub     wktexpulb     petexpulb
+      *
+      * If you have pounds/amount:
+      *   1) Write a Product Exception record
+      *   2) Call the program to write this Product Exception record to the
+      *      ByProduct Detail file.
+      *
+     C                   if        pesexpulb <> 0 or pesexpuam <> 0 or
+     C                             petexpulb <> 0 or petexpuam <> 0
+     C                   exsr      $wrt019
+      *
+     C                   call      'RO220'
+     C                   parm                    xxsn
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Write a Product Exception record
+      *-------------------------------------------------------------------------------
+      *
+     C     $wrt019       begsr
+      *
+      * Hardcoded values
+     C                   move      'Y'           pesysfl
+     C                   eval      pepgm = sdpgm
+      * LDA values
+     C                   z-add     ldyr          peyr
+     C                   z-add     ldwk          pewk
+     C                   z-add     ldwedt        pewedt
+      *
+     C                   z-add     xxsn          pepesn
+      *
+      * Retrieve various values for this Item from the Revenue Detail file
+      *
+     C                   exsr      $rtv010
+      *
+      * Retrieve Description for Item Structure Class Code.
+      *
+     C     peisclcd      chain     omfarel1                           92
+     C                   if        *in92 = *off
+     C                   eval      peisclds = fadetx
+     C                   endif
+      *
+     C                   write     perec
+     C                   clear                   perec
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Retrieve the various values from the Weekly Produce Revenue Detail file
+      *-----------------------------------------------------------------------------------
+      *
+     C     $rtv010       begsr
+      *
+      * Key values:
+      *  Product Code
+      *  WeekEnding Date
+      *
+     C     key02         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   move      prvolfl       pevolfl
+     C                   move      prtfclcd      petfclcd
+     C                   move      prtfcgcd      petfcgcd
+     C                   move      prcgcd        pecgcd
+     C                   move      prcgcd        pesgcd
+     C                   move      prmixfl       pemixfl
+     C                   movel     pritycd       peitycd
+     C                   z-add     pristycd      peistycd
+     C                   z-add     prisgrcd      peisgrcd
+     C                   z-add     prisclcd      peisclcd
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------------------
+      * Accumulate Produced Values for the Week (do 1 time)
+      *---------------------------------------------------------------------------------------
+      *
+      * Read each record in the Weekly Product Revenue Detail file where:
+      *   1.  WeekEnding Date is the week we are processing
+      *   2.  Item Structure Type Code is 300 = RIBS
+      *   3.  TF Class Group Code is NV or CV or VA-not CoOwned
+      *   4.  Product Exempt Flag is NO
+      *
+     C     $accum        begsr
+      *
+     C     ldwedt        setll     tfl010h
+      *
+     C                   dou       *in91 = *on                                  Do revenue
+     C     ldwedt        reade     tfl010h                                91
+     C                   if        *in91 = *off and pristycd = 300              If not eof
+     C                             and (prtfcgcd = 'NV' or prtfcgcd = 'CV' or
+     C                                 (prtfcgcd = 'VA' and prcoownfl = no))
+     C                             and prprexfl = no
+      *
+      * Only process Items that are not "seconds"
+      *
+     C     prprcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off and byx5st = no                 If process
+      *
+      * Clear "start weight" accumulators for the Item
+      *
+     C                   z-add     0             wktpuslb
+     C                   z-add     0             wkspuslb
+      *
+      *----------------------------------------------------
+      * SUBSET STEP 1: Initialize the "subset" that this Item will go in based
+      *                on its Item Structure "Group" and "Class"
+      *
+     C                   z-add     prisgrcd      wkisgrcd
+     C                   z-add     prisclcd      wkisclcd
+     C                   exsr      $subset
+      *
+      * SUBSET STEP 2: If this Item is a WP, override its "subset" using the
+      *                Item Structure of the Item it Consumes.
+      *
+     C                   if        pritycd = 'WP '
+     C                   exsr      $consumed
+     C                   endif
+      *
+      * SUBSET STEP 3: Override the subset to TRIM when the Item "produces" any trim.
+      *                We do this for both FG and WP Items.
+      *                If the Item produces (check its BOM) any "trim" items (ie: BP7 items)
+      *                   push it into the subset: Trim Producing Rib Products
+      *
+      *                Note: If the Item is already TRIM, there is no need to do this.
+      *                      Do not do this for the Items we are "splitting to".
+      *
+     C                   if        wksubset = 'TR' or
+     C                             prprcd = 41132 or
+     C                             prprcd = 41322 or
+     C                             prprcd = svsprcd or
+     C                             prprcd = svtprcd
+     C                   else
+     C                   exsr      $produced
+     C                   endif
+      *
+      *----------------------------------------------------
+      *
+      * Calculate the "produced start weight":
+      *   1) Get Pump Percent into a "rate" field (and add 1 to it)
+      *   2) Get Yield Percent into a "rate" field
+      *   3) Produced Start Weight = (produced pounds / yield rate) / pump rate
+      *
+     C                   eval      wkpump = (prpumppc / 100) + 1
+     C                   eval      wkrate = prypc / 100
+      *
+     C                   if        wkrate <> 0 and wkpump <> 0
+     C                   eval(h)   wkspuslb = ((prspulb / wkrate) / wkpump)
+     C                   eval(h)   wktpuslb = ((prtpulb / wkrate) / wkpump)
+     C                   endif
+      *
+      * Accumulate the Start Weights into 1 of our four "subsets"
+      *
+     C                   select
+      * Small Commodity
+     C                   when      wksubset = 'SC'
+     C                   add       wkspuslb      wkssclb
+     C                   add       wktpuslb      wktsclb
+      * Medium Commodity
+     C                   when      wksubset = 'MC'
+     C                   add       wkspuslb      wksmclb
+     C                   add       wktpuslb      wktmclb
+      * Converted Brisket
+     C                   when      wksubset = 'CB'
+     C                   add       wkspuslb      wkscblb
+     C                   add       wktpuslb      wktcblb
+      * Trim Producing
+     C                   when      wksubset = 'TR'
+     C                   add       wkspuslb      wkstrlb
+     C                   add       wktpuslb      wkttrlb
+     C                   endsl
+      *
+     C                   endif                                                  If process
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do revenue
+      *
+      * Total the accumulated Seaboard and Triumph "produced start weights":
+      *
+     C                   eval      wkspuslb = wkssclb + wksmclb + wkscblb +
+     C                                        wkstrlb
+      *
+     C                   eval      wktpuslb = wktsclb + wktmclb + wktcblb +
+     C                                        wkttrlb
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------
+      * Determine a "subset" for this Item to go into
+      *---------------------------------------------------------------------------
+      *
+     C     $subset       begsr
+      *
+     C                   select
+      * Small Commodity
+     C                   when      wkisgrcd = 310 and wkisclcd = 311
+     C                   move      'SC'          wksubset
+      * Medium Commodity
+     C                   when      wkisgrcd = 320 and wkisclcd = 311
+     C                   move      'MC'          wksubset
+      * Converted Brisket
+     C                   when      wkisgrcd = 320 and wkisclcd = 313
+     C                   move      'CB'          wksubset
+     C                   other
+      * Trim Producing
+     C                   move      'TR'          wksubset
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------
+      * "Subset" override logic for WPs only
+      *---------------------------------------------------------------------------
+      *
+      * Override the WPs "subset" using its BOM Consumed Item's Item Structure.
+      *
+     C     $consumed     begsr
+      *
+      * Retrieve a "consumed" Item for this WP from the BOM.
+      * (Note: LF selects Active/Consumed Items where BOM Meat Cost Consumed% <> 0)
+      *
+     C     key03         chain     pdiorele                           92
+     C                   if        *in92 = *off                                 If consumed
+      *
+      * Retrieve the Consumed Item's Item Structure from the Item Default file.
+      * If the "consumed" Item is a RIB, override the WPs "subset".
+      *
+     C     ioc9nb        chain     ombyrel1                           92
+     C                   if        *in92 = *off and byrgnb = 300                If RIB
+     C                   z-add     byrhnb        wkisgrcd
+     C                   z-add     byrinb        wkisclcd
+     C                   exsr      $subset
+     C                   endif                                                  If RIB
+      *
+     C                   endif                                                  If consumed
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * More "subset" override logic for both FG and WP Items
+      *------------------------------------------------------------------------------------
+      *
+      * Override the "subset" when any item this Item "produces" is for TRIM (ie: BP7).
+      *
+     C     $produced     begsr
+      *
+     C     key03         setll     pdiorel4
+      *
+     C                   dou       *in93 = *on or wksubset = 'TR'               Do produced
+     C     key03         reade     pdiorel4                               93
+     C                   if        *in93 = *off and ioc9nb <> iohgcd            If not itself
+      *
+      * Retrieve the Produced Item's Item TF Classifcation Code from the
+      * Item Default file
+      *
+     C     ioc9nb        chain     ombyrel1                           92
+     C                   if        *in92 = *off and bytcst = 'BP7'              If TRIM
+     C                   move      'TR'          wksubset
+     C                   endif                                                  If TRIM
+      *
+     C                   endif                                                  If not itself
+     C                   enddo                                                  Do produced
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------------
+      * Find the Converted Brisket Item (Seaboard and Triumph) with the Most Produced Lbs
+      *------------------------------------------------------------------------------------------
+      *
+     C     $brisket      begsr
+      *
+     C     ldwedt        setll     tfl010h
+      *
+     C                   dou       *in91 = *on                                  Do brisket
+     C     ldwedt        reade     tfl010h                                91
+     C                   if        *in91 = *off and pristycd = 300              If not eof
+     C                             and prisgrcd = 320 and prisclcd = 313
+     C                             and prprexfl = no
+      *
+      * Seaboard Converted Brisket Item with the most Produced Lbs for the Week
+      *
+     C                   if        prspulb > wkspulb
+     C                   z-add     prprcd        svsprcd
+     C                   z-add     prspulb       wkspulb
+     C                   endif
+      *
+      * Triumph Converted Brisket Item with the most Produced Lbs for the Week
+      *
+     C                   if        prtpulb > wktpulb
+     C                   z-add     prprcd        svtprcd
+     C                   z-add     prtpulb       wktpulb
+     C                   endif
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do brisket
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    wkprcd
+     C                   kfld                    ldwedt
+      *
+     C     key02         klist
+     C                   kfld                    peprcd
+     C                   kfld                    ldwedt
+      *
+     C     key03         klist
+     C                   kfld                    ldcono
+     C                   kfld                    prprcd
+      *
+     C     key04         klist
+     C                   kfld                    svistycd
+     C                   kfld                    svisgrcd
+     C                   kfld                    svisclcd
+      *
+     C     key05         klist
+     C                   kfld                    ldcono
+     C                   kfld                    ldwedt
+      *
+      * For our 'Split To' Item for Converted Brisket, Damon wants us to "split to" the
+      * 300/320/313 Item with the most Produced Pounds...it may not be the same Item for
+      * Seaboard and Triumph. So, for our Brisket logic, go find the Item with the most
+      * produced lbs for the Week.
+      *
+     C                   exsr      $brisket
+      *
+      * Accumulate Produced Values for the Week for RIBS.
+      *
+     C                   exsr      $accum
+      *
+      * Retrieve the Skirt Meat Allocation Flag values that Damon G. maintains for the
+      * "split to categories". These are in the Resource Optimization Header.
+      *
+      *                 Skirt Meat Allocation   SBF   TF
+      *                       Small commodity    Y    N
+      *                      Medium commodity    Y    N
+      *                     Converted Brisket    Y    N
+      *
+     C     key05         chain     rop100                             92
+     C                   if        *in92 = *off
+     C                   endif
+      *
+     C                   endsr
+      /eject

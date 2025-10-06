@@ -1,0 +1,1569 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP343
+      * TITLE:       BUILD WORKFILES
+      * TITLE:       DEATHS AND CULL SALES BY WEEK REPORT (ALL GROUPS)
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     07/16/96
+      *
+      *  FUNCTION:   THIS BATCH PROGRAM IS CALLED FROM HP443CL.
+      *              IT BUILDS FOUR WORKFILES:
+      *                 HSP355 - WEEKS
+      *                 HSP303 - GROUP DETAIL
+      *                 HSP304 - GROUP TOTAL
+      *                 HSP305 - FARM TOTAL
+      *                 HSP306 - PHASE TOTAL
+      *
+      *              THE USER'S SUBMISSION CRITERIA ARE PASSED IN THE
+      *              LDA FROM HP443.  OPEN QUERIES ARE USED TO MAKE AN
+      *              INITIAL SELECTION OF DATA.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 09/07/99  LeAnne Fedor
+      *           Added logic for 8 additional weeks.  Report will now have
+      *           28 weeks instead of 28.
+      *
+      * 11/03/99  LeAnne Fedor
+      *           Building/room were added to the group total file.  Added
+      *           logic to populate the fields.
+      *
+      * 08/21/00  LeAnne Fedor
+      *           Added logic to populate the new workfile field 'adjusted
+      *           transfer in head'.  Also, changed dead/cull percent to
+      *           used this 'adjusted' value instead of the normal transfer
+      *           in head.
+      *
+      * 07/18/02  LeAnne Fedor
+      *           Changed farm/phase total logic to accommodate the fact that a farm
+      *           can now contain groups with various phases.
+      *
+      * 07/02/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSP018    IF   E           K DISK
+      *    FARM SITE
+      *
+     FHSP034    IF   E           K DISK
+      *    HOG GROUP
+      *    (RECORDS SELECTED BY OPEN QUERY)
+      *
+     FHSL068D   IF   E           K DISK
+      *    KILLED/DEAD HOGS
+      *
+     FHSP074    IF   E           K DISK
+      *    TRANSFER MOVEMENT HEADER
+      *
+     FHSL075C   IF   E           K DISK
+      *    TRANSFER MOVEMENT DETAIL
+      *
+     FHSP084    IF   E           K DISK
+      *    SALES MOVEMENT HEADER
+      *
+     FHSL085B   IF   E           K DISK
+      *    SALES MOVEMENT DETAIL
+      *
+     FHSP355    UF A E           K DISK
+      *  WORKFILE OF 28 WEEKS
+      *
+     FHSP303    UF A E           K DISK
+      *  WORKFILE FOR GROUP DETAIL
+      *
+     FHSP304    O    E           K DISK
+      *  WORKFILE FOR GROUP TOTAL
+      *
+     FHSL304B   IF   E           K DISK    RENAME(WGREC:WGRECB)
+      *  WORKFILE FOR GROUP TOTAL
+      *
+     FHSP305    O    E           K DISK
+      *  WORKFILE FOR FARM TOTAL
+      *
+     FHSL305A   IF   E           K DISK    RENAME(WFREC:WFRECA)
+      *  WORKFILE FOR FARM TOTAL
+      *
+     FHSP306    O    E           K DISK
+      *  WORKFILE FOR PHASE TOTAL
+      /EJECT
+      ****************************************************************
+      * INPUT SPECS
+      ****************************************************************
+      *----------------------------------------------------------------
+      * LDA - REPORT SELECTIONS
+      *----------------------------------------------------------------
+      *
+     D                UDS
+     D  LDFSBO                 1      5
+     D  LDFYMD                 6     13  0
+     D  LDTYMD                14     21  0
+     D  LDPPCD                22     26
+     D  LDFSCD                27     31  0
+     D  LDPTCD                48     52
+     D  LDHGSN                53     59  0
+     D  LDFMDY                60     65  0
+     D  LDTMDY                66     71  0
+     D  LDBSCD                72     76
+     D  LDCELL                77     78  0
+     D  LDRPFL                80     80
+     D  LDPPFL                81     81
+     D  LDTDFL                82     82
+     D  LDSDFL                83     83
+     D  LDDDFL                84     84
+     D  LDCSFL                85     85
+      *
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkcymdiso       s               D   datfmt(*iso)
+     D wkrptdtiso      s               D   datfmt(*iso)
+      *
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * CREATE THE 28 WEEK RECORDS WITH BEGINNING/ENDING DATES IN THE
+      * WEEKS WORKFILE.
+      *
+     C                   EXSR      $28WKS
+      *
+      * READ EACH HOG GROUP SELECTED BY THE OPNQRY
+      *
+     C     *IN90         DOUEQ     *ON                                          MAIN DO
+     C                   READ      HSP034                                 90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C                   MOVEL     YES           PROCFL
+      *
+      * IF THE USER HAS SELECTED A SPECIFIC CELL, DETERMINE
+      * IF THIS GROUP IS IN THE CELL SELECTED.
+      *
+     C     LDCELL        IFNE      0                                            IF CELL SELECTED
+     C     HGFSCD        CHAIN     HSP018                             92
+     C     *IN92         IFEQ      *OFF                                         IF CELL MATCH
+     C     FSCELL        ANDEQ     LDCELL
+     C                   ELSE
+     C                   MOVEL     NO            PROCFL
+     C                   ENDIF                                                  IF CELL MATCH
+     C                   ENDIF                                                  IF CELL SELECTED
+      *
+      *
+     C     PROCFL        IFEQ      YES                                          IF PROCESS
+      *
+      * THERE ARE SEVERAL STEPS FOR PROCESSING EACH GROUP:
+      *  1) WRITE 28 GROUP DETAIL WORKFILE RECORDS--1 FOR EACH WEEK
+      *     WITH THE BEGINNING/ENDING WEEK DATES.
+      *  2) IF THE USER HAS ELECTED TO INCLUDE THE DAILY DEADS,
+      *     FIND THE DAILY DEADS FOR THE GROUP AND SUM THEM
+      *     INTO THE APPROPRIATE WEEK RECORD.
+      *  3) IF THE USER HAS ELECTED TO INCLUDE THE DOAS FROM
+      *     TRANSFERS, RETRIEVE THE DOAS FROM TRANSFERS AND UPDATE
+      *     THE APPROPRIATE WEEK RECORD.
+      *  4) IF THE USER HAS ELECTED TO INCLUDE THE DOAS FROM
+      *     SALES, RETRIEVE THE DOAS FROM SALES AND UPDATE
+      *     THE APPROPRIATE WEEK RECORD.
+      *  5) IF THE USER HAS ELECTED TO INCLUDE THE CULL SALES,
+      *     RETRIEVE THE 'LIVE' HEAD FROM CULL SALES AND UPDATE
+      *     THE APPROPRIATE WEEK RECORD.
+      *  6) AFTER ALL VALUES ARE ACCUMULATED FOR THE 28 WEEKS,
+      *     WRITE ONE TOTAL RECORD FOR THE GROUP.
+      *
+      *
+      * SET UP THE 28 WEEKLY RECORDS FOR THIS GROUP WITH
+      * BEGINNING/ENDING DATES
+      *
+     C                   EXSR      $GRPWK
+      *
+      * ACCUMULATE THE DAILY DEADS BY WEEK IF THE USER HAS
+      * ELECTED TO SEE DAILY DEADS
+      *
+     C     LDDDFL        IFEQ      'X'
+     C                   EXSR      $DEADS
+     C                   ENDIF
+      *
+      * ACCUMULATE THE DOAS FROM TRANSFERS IF THE USER ELECTED
+      * TO SEE TRANSFER DOAS
+      *
+     C     LDTDFL        IFEQ      'X'
+     C                   EXSR      $TDOAS
+     C                   ENDIF
+      *
+      * ACCUMULATE THE DOAS FROM SALES IF THE USER ELECTED
+      * TO SEE SALES DOAS
+      *
+     C     LDSDFL        IFEQ      'X'
+     C                   EXSR      $SDOAS
+     C                   ENDIF
+      *
+      * ACCUMULATE THE 'LIVE' HEAD FROM CULL SALES IF THE
+      * USER ELECTED TO SEE CULL SALES
+      *
+     C     LDCSFL        IFEQ      'X'
+     C                   EXSR      $CULLS
+     C                   ENDIF
+      *
+      * YOU HAVE NOW ACCUMULATED ALL DATA FOR A GROUP IN THE
+      * 28 WEEKLY RECORDS IN THE GROUP DETAIL FILE. REREAD THESE
+      * RECORDS AND SETUP YOUR TOTAL RECORD FOR THE GROUP.
+      *
+     C                   EXSR      $GROUP
+      *
+     C                   ENDIF                                                  IF PROCESS
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  MAIN DO
+      *
+      *----------------------------------------------------------------
+      * EOF PROCESSING
+      *----------------------------------------------------------------
+      *
+      * THERE ARE TWO STEPS TO THE EOF PROCESSING:
+      *    1) CREATE FARM TOTAL WORKFILE RECORDS
+      *    2) CREATE PHASE TOTAL WORKFILE RECORDS
+      *
+     C                   EXSR      $FARM
+     C                   EXSR      $PHASE
+      *
+     C                   SETON                                        LR
+      /EJECT
+      *----------------------------------------------------------------
+      * $DEADS - SUM THE DAILY DEADS FOR A GROUP BY WEEK
+      *----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE WILL READ ALL THE DAILY DEADS FOR A GROUP AND
+      * SUM THEM INTO THE APPROPRIATE WEEK IN THE GROUP DETAIL
+      * WORKFILE. BEFORE PROCESSING, MAKE SURE THE DEAD DATE FALLS IN
+      * THE 28-WEEK PERIOD BEING REPORTED.
+      *
+     C     $DEADS        BEGSR
+      *
+     C     HGHGSN        SETLL     HSL068D
+      *
+     C     *IN91         DOUEQ     *ON                                          DO DEADS
+     C     HGHGSN        READE     HSL068D                                91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+     C     KDKDDT        ANDGE     LDFYMD
+     C     KDKDDT        ANDLE     LDTYMD
+     C                   Z-ADD     KDKDDT        WKCYMD
+     C                   Z-ADD     KDKDHD        WKHD
+     C                   EXSR      $ACCUM
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO DEADS
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $TDOAS - ACCUMULATE THE DOAS FROM TRANSFERS FOR THIS GROUP
+      *----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE WILL READ ALL DOAS FROM TRANSFERS FOR A GROUP
+      * AND SUM THEM INTO THE APPROPRIATE WEEK IN THE GROUP DETAIL
+      * WORKFILE.
+      *
+      * THE 'RECEIVE DATE' OF THE MOVEMENT WILL BE RETRIEVED AND USED
+      * FOR DETERMINING THE 'DATE' OF THE DOA HEAD. BEFORE PROCESSING,
+      * CHECK THAT THIS DATE FALLS IN THE SELECTED 28-WEEK PERIOD.
+      *
+     C     $TDOAS        BEGSR
+      *
+     C     HGHGSN        SETLL     HSL075C
+      *
+     C     *IN91         DOUEQ     *ON                                          DO TRAN DOA
+     C     HGHGSN        READE     HSL075C                                91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+     C     MDDOHD        ANDNE     0
+      *
+     C     MDMVSN        CHAIN     HSP074                             92
+     C     *IN92         IFEQ      *OFF                                         IF IN RANGE
+     C     MHRCDT        ANDGE     LDFYMD
+     C     MHRCDT        ANDLE     LDTYMD
+     C                   Z-ADD     MHRCDT        WKCYMD
+     C                   Z-ADD     MDDOHD        WKHD
+     C                   EXSR      $ACCUM
+     C                   ENDIF                                                  IF IN RANGE
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO TRAN DOA
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $SDOAS - ACCUMULATE THE DOAS FROM SALES FOR THIS GROUP
+      *----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE WILL READ ALL DOAS FROM SALES FOR A GROUP
+      * AND SUM THEM INTO THE APPROPRIATE WEEK IN THE GROUP DETAIL
+      * WORKFILE
+      *
+      * THE 'RECEIVE DATE' OF THE MOVEMENT WILL BE RETRIEVED AND USED
+      * FOR DETERMINING THE 'DATE' OF THE DOA HEAD. SO, BEFORE PROCESSING
+      * MAKE SURE THE DATE FALLS IN THE 28-WEEK PERIOD OF THE REPORT.
+      *
+     C     $SDOAS        BEGSR
+      *
+     C     HGHGSN        SETLL     HSL085B
+      *
+     C     *IN91         DOUEQ     *ON                                          DO SALES DOA
+     C     HGHGSN        READE     HSL085B                                91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+     C     SGDOHD        ANDNE     0
+      *
+     C     SGMVSN        CHAIN     HSP084                             92
+     C     *IN92         IFEQ      *OFF                                         IF FOUND
+     C     SHRCDT        ANDGE     LDFYMD
+     C     SHRCDT        ANDLE     LDTYMD
+     C                   Z-ADD     SHRCDT        WKCYMD
+     C                   Z-ADD     SGDOHD        WKHD
+     C                   EXSR      $ACCUM
+     C                   ENDIF                                                  IF FOUND
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO SALES DOA
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CULLS - ACCUMULATE THE LIVE HEAD FROM CULLS SALES FOR GROUP
+      *----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE WILL READ ALL CULL SALES FOR A GROUP AND
+      * ACCUMULATE LIVE HEAD IN THE APPROPRIATE WEEK FOR THE GROUP
+      * DETAIL WORKFILE
+      *
+      * THE 'RECEIVE DATE' OF THE MOVEMENT WILL BE RETRIEVED AND USED
+      * FOR DETERMINING WHETHER TO INCLUDE THE SALE. BEFORE PROCESSING,
+      * MAKE SURE THE RECEIVED DATE FALLS IN THE 28-WEEK PERIOD SELECTED
+      * FOR THE REPORT.
+      *
+     C     $CULLS        BEGSR
+      *
+     C     HGHGSN        SETLL     HSL085B
+      *
+     C     *IN91         DOUEQ     *ON                                          DO CULL SALE
+     C                   Z-ADD     0             WKCYMD
+     C     HGHGSN        READE     HSL085B                                91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+     C     SGLVHD        ANDNE     0
+      *
+     C     SGMVSN        CHAIN     HSP084                             92
+     C     *IN92         IFEQ      *OFF                                         IF CULL SALE
+     C     SHSTCD        ANDEQ     'CULLS'
+     C     SHRCDT        ANDGE     LDFYMD
+     C     SHRCDT        ANDLE     LDTYMD
+     C                   Z-ADD     SHRCDT        WKCYMD
+     C                   Z-ADD     SGLVHD        WKHD
+     C                   EXSR      $ACCUM
+     C                   ENDIF                                                  IF CULL SALE
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO CULL SALE
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $ACCUM - ACCUMULATE DEAD HOGS INTO THE APPROPRIATE WEEK
+      *---------------------------------------------------------------
+      *
+     C     $ACCUM        BEGSR
+      *
+      * POSITION IN THE FILE USING THE HOG GROUP NUMBER AND DATE.
+      *
+     C     K1P303        SETLL     HSP303
+     C     HGHGSN        READE     HSP303                                 92
+     C     *IN92         IFEQ      *OFF                                         IF FOUND WK
+     C                   ADD       WKHD          WDCDHD
+     C                   UPDATE    WDREC
+     C                   ENDIF                                                  IF FOUND WK
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $GROUP - READ THE GROUP DETAIL RECORDS AND WRITE A TOTAL RECORD
+      *----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE READS THE 28 DETAIL RECORDS FOR THE GROUP
+      * AND MOVES THE VALUES INTO A SINGLE TOTAL RECORD WHICH WILL BE
+      * PRINTED ON THE REPORT.
+      *
+      * THE 'PERCENT' FOR EACH WEEK IS ALSO CALCULATED.  THE
+      * VALUE IS THE PERCENT OF ADJUSTED HEAD TRANSFERRED INTO THE GROUP
+      * THAT IS REPRESENTED BY THE WEEK'S DEAD AND CULL SALE HEAD.
+      *
+     C     $GROUP        BEGSR
+      *
+     C                   Z-ADD     HGHGSN        WGHGSN
+     C                   MOVEL     HGHGCD        WGHGCD
+     C                   MOVEL     HGBLCD        WGBLCD
+     C                   MOVEL     HGRMCD        WGRMCD
+     C                   MOVEL     HGFSCD        WGFSCD
+     C                   MOVEL     HGPPCD        WGPPCD
+      *
+      * RETRIEVE THE TRANSFERRED IN HEAD AS OF THE ENDING DATE OF
+      * THE REPORT
+      *
+     C                   EXSR      $TIHD
+      *
+      * Calculate the 'adjusted transfer in' head.
+      *
+     C                   EXSR      $AJTIHD
+      *
+      *  INITIALIZE DEAD/CULL SALE HEAD FIELDS FOR THE 28 WEEKS
+      *
+     C                   Z-ADD     0             WGCDHD
+     C                   Z-ADD     0             WG01HD
+     C                   Z-ADD     0             WG02HD
+     C                   Z-ADD     0             WG03HD
+     C                   Z-ADD     0             WG04HD
+     C                   Z-ADD     0             WG05HD
+     C                   Z-ADD     0             WG06HD
+     C                   Z-ADD     0             WG07HD
+     C                   Z-ADD     0             WG08HD
+     C                   Z-ADD     0             WG09HD
+     C                   Z-ADD     0             WG10HD
+     C                   Z-ADD     0             WG11HD
+     C                   Z-ADD     0             WG12HD
+     C                   Z-ADD     0             WG13HD
+     C                   Z-ADD     0             WG14HD
+     C                   Z-ADD     0             WG15HD
+     C                   Z-ADD     0             WG16HD
+     C                   Z-ADD     0             WG17HD
+     C                   Z-ADD     0             WG18HD
+     C                   Z-ADD     0             WG19HD
+     C                   Z-ADD     0             WG20HD
+     C                   Z-ADD     0             WG21HD
+     C                   Z-ADD     0             WG22HD
+     C                   Z-ADD     0             WG23HD
+     C                   Z-ADD     0             WG24HD
+     C                   Z-ADD     0             WG25HD
+     C                   Z-ADD     0             WG26HD
+     C                   Z-ADD     0             WG27HD
+     C                   Z-ADD     0             WG28HD
+      *
+      *  INITIALIZE PERCENT FIELDS FOR THE 28 WEEKS
+      *
+     C                   Z-ADD     0             WG01PR
+     C                   Z-ADD     0             WG02PR
+     C                   Z-ADD     0             WG03PR
+     C                   Z-ADD     0             WG04PR
+     C                   Z-ADD     0             WG05PR
+     C                   Z-ADD     0             WG06PR
+     C                   Z-ADD     0             WG07PR
+     C                   Z-ADD     0             WG08PR
+     C                   Z-ADD     0             WG09PR
+     C                   Z-ADD     0             WG10PR
+     C                   Z-ADD     0             WG11PR
+     C                   Z-ADD     0             WG12PR
+     C                   Z-ADD     0             WG13PR
+     C                   Z-ADD     0             WG14PR
+     C                   Z-ADD     0             WG15PR
+     C                   Z-ADD     0             WG16PR
+     C                   Z-ADD     0             WG17PR
+     C                   Z-ADD     0             WG18PR
+     C                   Z-ADD     0             WG19PR
+     C                   Z-ADD     0             WG20PR
+     C                   Z-ADD     0             WG21PR
+     C                   Z-ADD     0             WG22PR
+     C                   Z-ADD     0             WG23PR
+     C                   Z-ADD     0             WG24PR
+     C                   Z-ADD     0             WG25PR
+     C                   Z-ADD     0             WG26PR
+     C                   Z-ADD     0             WG27PR
+     C                   Z-ADD     0             WG28PR
+      *
+     C                   Z-ADD     0             COUNT
+      *
+      * PROCESS THE 28 DETAIL RECORDS FOR THE GROUP
+      *
+     C     HGHGSN        SETLL     HSP303
+      *
+     C     *IN91         DOUEQ     *ON                                          DO WEEKS
+     C     HGHGSN        READE     HSP303                                 91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+     C                   ADD       1             COUNT
+      *
+      * ACCUMULATE DEAD AND CULL SALE HEAD FOR THE GROUP
+      *
+     C                   ADD       WDCDHD        WGCDHD
+      *
+      * SETUP DEAD AND CULL SALE HEAD PER WEEK
+      *
+     C                   SELECT
+     C     COUNT         WHENEQ    1
+     C                   Z-ADD     WDCDHD        WG01HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG01PR
+      *
+     C     COUNT         WHENEQ    2
+     C                   Z-ADD     WDCDHD        WG02HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG02PR
+      *
+     C     COUNT         WHENEQ    3
+     C                   Z-ADD     WDCDHD        WG03HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG03PR
+      *
+     C     COUNT         WHENEQ    4
+     C                   Z-ADD     WDCDHD        WG04HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG04PR
+      *
+     C     COUNT         WHENEQ    5
+     C                   Z-ADD     WDCDHD        WG05HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG05PR
+      *
+     C     COUNT         WHENEQ    6
+     C                   Z-ADD     WDCDHD        WG06HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG06PR
+      *
+     C     COUNT         WHENEQ    7
+     C                   Z-ADD     WDCDHD        WG07HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG07PR
+      *
+     C     COUNT         WHENEQ    8
+     C                   Z-ADD     WDCDHD        WG08HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG08PR
+      *
+     C     COUNT         WHENEQ    9
+     C                   Z-ADD     WDCDHD        WG09HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG09PR
+      *
+     C     COUNT         WHENEQ    10
+     C                   Z-ADD     WDCDHD        WG10HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG10PR
+      *
+     C     COUNT         WHENEQ    11
+     C                   Z-ADD     WDCDHD        WG11HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG11PR
+      *
+     C     COUNT         WHENEQ    12
+     C                   Z-ADD     WDCDHD        WG12HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG12PR
+      *
+     C     COUNT         WHENEQ    13
+     C                   Z-ADD     WDCDHD        WG13HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG13PR
+      *
+     C     COUNT         WHENEQ    14
+     C                   Z-ADD     WDCDHD        WG14HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG14PR
+      *
+     C     COUNT         WHENEQ    15
+     C                   Z-ADD     WDCDHD        WG15HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG15PR
+      *
+     C     COUNT         WHENEQ    16
+     C                   Z-ADD     WDCDHD        WG16HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG16PR
+      *
+     C     COUNT         WHENEQ    17
+     C                   Z-ADD     WDCDHD        WG17HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG17PR
+      *
+     C     COUNT         WHENEQ    18
+     C                   Z-ADD     WDCDHD        WG18HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG18PR
+      *
+     C     COUNT         WHENEQ    19
+     C                   Z-ADD     WDCDHD        WG19HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG19PR
+      *
+     C     COUNT         WHENEQ    20
+     C                   Z-ADD     WDCDHD        WG20HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG20PR
+      *
+     C     COUNT         WHENEQ    21
+     C                   Z-ADD     WDCDHD        WG21HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG21PR
+      *
+     C     COUNT         WHENEQ    22
+     C                   Z-ADD     WDCDHD        WG22HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG22PR
+      *
+     C     COUNT         WHENEQ    23
+     C                   Z-ADD     WDCDHD        WG23HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG23PR
+      *
+     C     COUNT         WHENEQ    24
+     C                   Z-ADD     WDCDHD        WG24HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG24PR
+      *
+     C     COUNT         WHENEQ    25
+     C                   Z-ADD     WDCDHD        WG25HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG25PR
+      *
+     C     COUNT         WHENEQ    26
+     C                   Z-ADD     WDCDHD        WG26HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG26PR
+      *
+     C     COUNT         WHENEQ    27
+     C                   Z-ADD     WDCDHD        WG27HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG27PR
+      *
+     C     COUNT         WHENEQ    28
+     C                   Z-ADD     WDCDHD        WG28HD
+     C                   EXSR      $PER
+     C                   Z-ADD     WKFLD2        WG28PR
+     C                   ENDSL
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO WEEKS
+      *
+     C                   WRITE     WGREC
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $PER - CALCULATE PERCENT
+      *---------------------------------------------------------------
+      *
+     C     $PER          BEGSR
+      *
+     C     WGAJTIHD      IFNE      0
+     C     WDCDHD        DIV       WGAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WKFLD2
+     C                   ELSE
+     C                   Z-ADD     0             WKFLD2
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $FARM - READ GROUP TOTAL RECORDS AND CREATE FARM TOTAL RECORDS
+      *---------------------------------------------------------------
+      *
+      * THIS SUBROUTINE READS THE GROUP TOTAL RECORDS FROM THE WORKFILE
+      * AND CREATES A TOTAL RECORD FOR EACH FARM/PHASE IN THE 'FARM TOTAL'
+      * WORKFILE.
+      *
+     C     $FARM         BEGSR
+      *
+     C     *LOVAL        SETLL     HSL304B
+     C                   MOVEL     YES           FIRST
+      *
+     C     *IN91         DOUEQ     *ON                                          DO GROUPS
+     C                   READ      HSL304B                                91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C     FIRST         IFEQ      YES
+     C                   MOVEL     NO            FIRST
+     C                   EXSR      $CLRFS
+     C                   ENDIF
+      *
+     C     SVPPCD        IFNE      WGPPCD                                       IF BREAK
+     C     SVFSCD        ORNE      WGFSCD
+     C                   EXSR      $WRTFS
+     C                   EXSR      $CLRFS
+     C                   ENDIF                                                  IF BREAK
+      *
+     C                   ADD       WGTIHD        WFTIHD
+     C                   ADD       WGAJTIHD      WFAJTIHD
+     C                   ADD       WGCDHD        WFCDHD
+     C                   ADD       WG01HD        WF01HD
+     C                   ADD       WG02HD        WF02HD
+     C                   ADD       WG03HD        WF03HD
+     C                   ADD       WG04HD        WF04HD
+     C                   ADD       WG05HD        WF05HD
+     C                   ADD       WG06HD        WF06HD
+     C                   ADD       WG07HD        WF07HD
+     C                   ADD       WG08HD        WF08HD
+     C                   ADD       WG09HD        WF09HD
+     C                   ADD       WG10HD        WF10HD
+     C                   ADD       WG11HD        WF11HD
+     C                   ADD       WG12HD        WF12HD
+     C                   ADD       WG13HD        WF13HD
+     C                   ADD       WG14HD        WF14HD
+     C                   ADD       WG15HD        WF15HD
+     C                   ADD       WG16HD        WF16HD
+     C                   ADD       WG17HD        WF17HD
+     C                   ADD       WG18HD        WF18HD
+     C                   ADD       WG19HD        WF19HD
+     C                   ADD       WG20HD        WF20HD
+     C                   ADD       WG21HD        WF21HD
+     C                   ADD       WG22HD        WF22HD
+     C                   ADD       WG23HD        WF23HD
+     C                   ADD       WG24HD        WF24HD
+     C                   ADD       WG25HD        WF25HD
+     C                   ADD       WG26HD        WF26HD
+     C                   ADD       WG27HD        WF27HD
+     C                   ADD       WG28HD        WF28HD
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO GROUPS
+      *
+      *  WRITE OUT THE LAST FARM RECORD
+      *
+     C     FIRST         IFEQ      NO
+     C                   EXSR      $WRTFS
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $CLRFS - CLEAR FIELDS IN FARM SITE TOTAL WORKFILE RECORD
+      *---------------------------------------------------------------
+      *
+     C     $CLRFS        BEGSR
+      *
+     C                   MOVEL     WGPPCD        SVPPCD
+     C                   Z-ADD     WGFSCD        SVFSCD
+      *
+     C                   Z-ADD     WGFSCD        WFFSCD
+     C                   MOVEL     WGPPCD        WFPPCD
+      *
+     C                   Z-ADD     0             WFTIHD
+     C                   Z-ADD     0             WFAJTIHD
+     C                   Z-ADD     0             WFCDHD
+     C                   Z-ADD     0             WF01HD
+     C                   Z-ADD     0             WF02HD
+     C                   Z-ADD     0             WF03HD
+     C                   Z-ADD     0             WF04HD
+     C                   Z-ADD     0             WF05HD
+     C                   Z-ADD     0             WF06HD
+     C                   Z-ADD     0             WF07HD
+     C                   Z-ADD     0             WF08HD
+     C                   Z-ADD     0             WF09HD
+     C                   Z-ADD     0             WF10HD
+     C                   Z-ADD     0             WF11HD
+     C                   Z-ADD     0             WF12HD
+     C                   Z-ADD     0             WF13HD
+     C                   Z-ADD     0             WF14HD
+     C                   Z-ADD     0             WF15HD
+     C                   Z-ADD     0             WF16HD
+     C                   Z-ADD     0             WF17HD
+     C                   Z-ADD     0             WF18HD
+     C                   Z-ADD     0             WF19HD
+     C                   Z-ADD     0             WF20HD
+     C                   Z-ADD     0             WF21HD
+     C                   Z-ADD     0             WF22HD
+     C                   Z-ADD     0             WF23HD
+     C                   Z-ADD     0             WF24HD
+     C                   Z-ADD     0             WF25HD
+     C                   Z-ADD     0             WF26HD
+     C                   Z-ADD     0             WF27HD
+     C                   Z-ADD     0             WF28HD
+      *
+     C                   Z-ADD     0             WF01PR
+     C                   Z-ADD     0             WF02PR
+     C                   Z-ADD     0             WF03PR
+     C                   Z-ADD     0             WF04PR
+     C                   Z-ADD     0             WF05PR
+     C                   Z-ADD     0             WF06PR
+     C                   Z-ADD     0             WF07PR
+     C                   Z-ADD     0             WF08PR
+     C                   Z-ADD     0             WF09PR
+     C                   Z-ADD     0             WF10PR
+     C                   Z-ADD     0             WF11PR
+     C                   Z-ADD     0             WF12PR
+     C                   Z-ADD     0             WF13PR
+     C                   Z-ADD     0             WF14PR
+     C                   Z-ADD     0             WF15PR
+     C                   Z-ADD     0             WF16PR
+     C                   Z-ADD     0             WF17PR
+     C                   Z-ADD     0             WF18PR
+     C                   Z-ADD     0             WF19PR
+     C                   Z-ADD     0             WF20PR
+     C                   Z-ADD     0             WF21PR
+     C                   Z-ADD     0             WF22PR
+     C                   Z-ADD     0             WF23PR
+     C                   Z-ADD     0             WF24PR
+     C                   Z-ADD     0             WF25PR
+     C                   Z-ADD     0             WF26PR
+     C                   Z-ADD     0             WF27PR
+     C                   Z-ADD     0             WF28PR
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $WRTFS - WRITE A FARM SITE TOTAL WORKFILE RECORD
+      *---------------------------------------------------------------
+      *
+     C     $WRTFS        BEGSR
+      *
+      * CALCULATE PERCENT PER WEEK
+      *
+     C     WF01HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF01HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF01PR
+     C                   ENDIF
+      *
+     C     WF02HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF02HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF02PR
+     C                   ENDIF
+      *
+     C     WF03HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF03HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF03PR
+     C                   ENDIF
+      *
+     C     WF04HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF04HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF04PR
+     C                   ENDIF
+      *
+     C     WF05HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF05HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF05PR
+     C                   ENDIF
+      *
+     C     WF06HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF06HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF06PR
+     C                   ENDIF
+      *
+     C     WF07HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF07HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF07PR
+     C                   ENDIF
+      *
+     C     WF08HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF08HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF08PR
+     C                   ENDIF
+      *
+     C     WF09HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF09HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF09PR
+     C                   ENDIF
+      *
+     C     WF10HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF10HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF10PR
+     C                   ENDIF
+      *
+     C     WF11HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF11HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF11PR
+     C                   ENDIF
+      *
+     C     WF12HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF12HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF12PR
+     C                   ENDIF
+      *
+     C     WF13HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF13HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF13PR
+     C                   ENDIF
+      *
+     C     WF14HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF14HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF14PR
+     C                   ENDIF
+      *
+     C     WF15HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF15HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF15PR
+     C                   ENDIF
+      *
+     C     WF16HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF16HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF16PR
+     C                   ENDIF
+      *
+     C     WF17HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF17HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF17PR
+     C                   ENDIF
+      *
+     C     WF18HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF18HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF18PR
+     C                   ENDIF
+      *
+     C     WF19HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF19HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF19PR
+     C                   ENDIF
+      *
+     C     WF20HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF20HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF20PR
+     C                   ENDIF
+      *
+     C     WF21HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF21HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF21PR
+     C                   ENDIF
+      *
+     C     WF22HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF22HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF22PR
+     C                   ENDIF
+      *
+     C     WF23HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF23HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF23PR
+     C                   ENDIF
+      *
+     C     WF24HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF24HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF24PR
+     C                   ENDIF
+      *
+     C     WF25HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF25HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF25PR
+     C                   ENDIF
+      *
+     C     WF26HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF26HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF26PR
+     C                   ENDIF
+      *
+     C     WF27HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF27HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF27PR
+     C                   ENDIF
+      *
+     C     WF28HD        IFNE      0
+     C     WFAJTIHD      ANDNE     0
+     C     WF28HD        DIV       WFAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WF28PR
+     C                   ENDIF
+      *
+     C                   WRITE     WFREC
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $PHASE - READ FARM TOTAL RECORDS AND CREATE PHASE TOTAL RECORD
+      *---------------------------------------------------------------
+      *
+      * THIS SUBROUTINE READS THE FARM TOTAL RECORDS FROM THE WORKFILE
+      * AND CREATES A TOTAL RECORD FOR EACH PHASE FOR THE 'PHASE TOTAL'
+      * WORKFILE.
+      *
+     C     $PHASE        BEGSR
+      *
+     C     *LOVAL        SETLL     HSL305A
+     C                   MOVEL     YES           FIRST
+      *
+     C     *IN91         DOUEQ     *ON                                          DO FARMS
+     C                   READ      HSL305A                                91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C     FIRST         IFEQ      YES
+     C                   MOVEL     NO            FIRST
+     C                   EXSR      $CLRPP
+     C                   ENDIF
+      *
+     C     SVPPCD        IFNE      WFPPCD                                       IF BREAK
+     C                   EXSR      $WRTPP
+     C                   EXSR      $CLRPP
+     C                   ENDIF                                                  IF BREAK
+      *
+     C                   ADD       WFTIHD        WPTIHD
+     C                   ADD       WFAJTIHD      WPAJTIHD
+     C                   ADD       WFCDHD        WPCDHD
+     C                   ADD       WF01HD        WP01HD
+     C                   ADD       WF02HD        WP02HD
+     C                   ADD       WF03HD        WP03HD
+     C                   ADD       WF04HD        WP04HD
+     C                   ADD       WF05HD        WP05HD
+     C                   ADD       WF06HD        WP06HD
+     C                   ADD       WF07HD        WP07HD
+     C                   ADD       WF08HD        WP08HD
+     C                   ADD       WF09HD        WP09HD
+     C                   ADD       WF10HD        WP10HD
+     C                   ADD       WF11HD        WP11HD
+     C                   ADD       WF12HD        WP12HD
+     C                   ADD       WF13HD        WP13HD
+     C                   ADD       WF14HD        WP14HD
+     C                   ADD       WF15HD        WP15HD
+     C                   ADD       WF16HD        WP16HD
+     C                   ADD       WF17HD        WP17HD
+     C                   ADD       WF18HD        WP18HD
+     C                   ADD       WF19HD        WP19HD
+     C                   ADD       WF20HD        WP20HD
+     C                   ADD       WF21HD        WP21HD
+     C                   ADD       WF22HD        WP22HD
+     C                   ADD       WF23HD        WP23HD
+     C                   ADD       WF24HD        WP24HD
+     C                   ADD       WF25HD        WP25HD
+     C                   ADD       WF26HD        WP26HD
+     C                   ADD       WF27HD        WP27HD
+     C                   ADD       WF28HD        WP28HD
+     C                   ENDIF                                                  IF NOT EOF
+      *
+     C                   ENDDO                                                  DO GROUPS
+      *
+      *  WRITE OUT THE LAST PHASE RECORD
+      *
+     C     FIRST         IFEQ      NO
+     C                   EXSR      $WRTPP
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $CLRPP - CLEAR FIELDS IN PRODUCTION PHASE TOTAL WORKFILE REC
+      *---------------------------------------------------------------
+      *
+     C     $CLRPP        BEGSR
+      *
+     C                   MOVEL     WFPPCD        SVPPCD
+     C                   MOVEL     WFPPCD        WPPPCD
+      *
+     C                   Z-ADD     0             WPTIHD
+     C                   Z-ADD     0             WPAJTIHD
+     C                   Z-ADD     0             WPCDHD
+     C                   Z-ADD     0             WP01HD
+     C                   Z-ADD     0             WP02HD
+     C                   Z-ADD     0             WP03HD
+     C                   Z-ADD     0             WP04HD
+     C                   Z-ADD     0             WP05HD
+     C                   Z-ADD     0             WP06HD
+     C                   Z-ADD     0             WP07HD
+     C                   Z-ADD     0             WP08HD
+     C                   Z-ADD     0             WP09HD
+     C                   Z-ADD     0             WP10HD
+     C                   Z-ADD     0             WP11HD
+     C                   Z-ADD     0             WP12HD
+     C                   Z-ADD     0             WP13HD
+     C                   Z-ADD     0             WP14HD
+     C                   Z-ADD     0             WP15HD
+     C                   Z-ADD     0             WP16HD
+     C                   Z-ADD     0             WP17HD
+     C                   Z-ADD     0             WP18HD
+     C                   Z-ADD     0             WP19HD
+     C                   Z-ADD     0             WP20HD
+     C                   Z-ADD     0             WP21HD
+     C                   Z-ADD     0             WP22HD
+     C                   Z-ADD     0             WP23HD
+     C                   Z-ADD     0             WP24HD
+     C                   Z-ADD     0             WP25HD
+     C                   Z-ADD     0             WP26HD
+     C                   Z-ADD     0             WP27HD
+     C                   Z-ADD     0             WP28HD
+      *
+     C                   Z-ADD     0             WP01PR
+     C                   Z-ADD     0             WP02PR
+     C                   Z-ADD     0             WP03PR
+     C                   Z-ADD     0             WP04PR
+     C                   Z-ADD     0             WP05PR
+     C                   Z-ADD     0             WP06PR
+     C                   Z-ADD     0             WP07PR
+     C                   Z-ADD     0             WP08PR
+     C                   Z-ADD     0             WP09PR
+     C                   Z-ADD     0             WP10PR
+     C                   Z-ADD     0             WP11PR
+     C                   Z-ADD     0             WP12PR
+     C                   Z-ADD     0             WP13PR
+     C                   Z-ADD     0             WP14PR
+     C                   Z-ADD     0             WP15PR
+     C                   Z-ADD     0             WP16PR
+     C                   Z-ADD     0             WP17PR
+     C                   Z-ADD     0             WP18PR
+     C                   Z-ADD     0             WP19PR
+     C                   Z-ADD     0             WP20PR
+     C                   Z-ADD     0             WP21PR
+     C                   Z-ADD     0             WP22PR
+     C                   Z-ADD     0             WP23PR
+     C                   Z-ADD     0             WP24PR
+     C                   Z-ADD     0             WP25PR
+     C                   Z-ADD     0             WP26PR
+     C                   Z-ADD     0             WP27PR
+     C                   Z-ADD     0             WP28PR
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $WRTPP - WRITE A PRODUCTION PHASE TOTAL
+      *---------------------------------------------------------------
+      *
+     C     $WRTPP        BEGSR
+      *
+      * CALCULATE PERCENT PER WEEK
+      *
+     C     WP01HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP01HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP01PR
+     C                   ENDIF
+      *
+     C     WP02HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP02HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP02PR
+     C                   ENDIF
+      *
+     C     WP03HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP03HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP03PR
+     C                   ENDIF
+      *
+     C     WP04HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP04HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP04PR
+     C                   ENDIF
+      *
+     C     WP05HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP05HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP05PR
+     C                   ENDIF
+      *
+     C     WP06HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP06HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP06PR
+     C                   ENDIF
+      *
+     C     WP07HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP07HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP07PR
+     C                   ENDIF
+      *
+     C     WP08HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP08HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP08PR
+     C                   ENDIF
+      *
+     C     WP09HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP09HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP09PR
+     C                   ENDIF
+      *
+     C     WP10HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP10HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP10PR
+     C                   ENDIF
+      *
+     C     WP11HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP11HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP11PR
+     C                   ENDIF
+      *
+     C     WP12HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP12HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP12PR
+     C                   ENDIF
+      *
+     C     WP13HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP13HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP13PR
+     C                   ENDIF
+      *
+     C     WP14HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP14HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP14PR
+     C                   ENDIF
+      *
+     C     WP15HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP15HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP15PR
+     C                   ENDIF
+      *
+     C     WP16HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP16HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP16PR
+     C                   ENDIF
+      *
+     C     WP17HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP17HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP17PR
+     C                   ENDIF
+      *
+     C     WP18HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP18HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP18PR
+     C                   ENDIF
+      *
+     C     WP19HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP19HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP19PR
+     C                   ENDIF
+      *
+     C     WP20HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP20HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP20PR
+     C                   ENDIF
+      *
+     C     WP21HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP21HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP21PR
+     C                   ENDIF
+      *
+     C     WP22HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP22HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP22PR
+     C                   ENDIF
+      *
+     C     WP23HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP23HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP23PR
+     C                   ENDIF
+      *
+     C     WP24HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP24HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP24PR
+     C                   ENDIF
+      *
+     C     WP25HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP25HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP25PR
+     C                   ENDIF
+      *
+     C     WP26HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP26HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP26PR
+     C                   ENDIF
+      *
+     C     WP27HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP27HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP27PR
+     C                   ENDIF
+      *
+     C     WP28HD        IFNE      0
+     C     WPAJTIHD      ANDNE     0
+     C     WP28HD        DIV       WPAJTIHD      WKFLD
+     C     WKFLD         MULT(H)   100           WP28PR
+     C                   ENDIF
+     C                   WRITE     WPREC
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $28WKS - CREATE THE 28 WEEK RECORDS IN THE WEEKS WORKFILE
+      *----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE WILL START WITH THE 'BEGINNING' DATE FROM THE
+      * LOCAL DATA AREA AND CREATE 28 WEEK RECORDS.
+      *
+     C     $28WKS        BEGSR
+      *
+      * DEFAULT THE BEGINNING DATE FROM THE LOCAL DATA AREA
+      *
+     C                   Z-ADD     LDFYMD        WKFYMD
+      *
+     C                   Z-ADD     0             X
+      *
+     C                   DO        28            X                              DO 28 WEEKS
+      *
+      * FIND THE ENDING DATE FOR THE WEEK BY ADDING SIX DAYS
+      * TO THE BEGINNING DATE.
+      *
+     C                   Z-ADD     WKFYMD        PFRM8
+     C                   Z-ADD     6             PDAYS
+     C                   EXSR      $DATE
+     C                   Z-ADD     PFRM8         WWFYMD
+     C                   Z-ADD     PTO8          WWTYMD
+     C                   Z-ADD     X             WWWEEK
+     C                   WRITE     WWREC
+      *
+      * FIND THE NEXT FROM DATE BY ADDING SEVEN DAYS TO
+      * THE CURRENT FROM DATE.
+      *
+     C                   Z-ADD     7             PDAYS
+     C                   EXSR      $DATE
+     C                   Z-ADD     PTO8          WKFYMD
+     C                   ENDDO                                                  DO 28 WEEKS
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $GRPWK - WRITE 28 WEEK RECORDS FOR A GROUP
+      *---------------------------------------------------------------
+      *
+     C     $GRPWK        BEGSR
+      *
+     C     *LOVAL        SETLL     HSP355
+      *
+     C                   Z-ADD     0             X
+      *
+     C                   DO        28            X                              DO 28 WEEKS
+     C                   READ      HSP355                                 92
+     C     *IN92         IFEQ      *OFF                                         IF OK
+     C                   Z-ADD     WWFYMD        WDFYMD
+     C                   Z-ADD     WWTYMD        WDTYMD
+     C                   Z-ADD     HGHGSN        WDHGSN
+     C                   Z-ADD     0             WDCDHD
+     C                   WRITE     WDREC
+     C                   ENDIF                                                  IF OK
+     C                   ENDDO                                                  DO 28 WEEKS
+      *
+     C                   ENDSR
+      /EJECT
+      *------------------------------------------------------------------
+      * $TIHD - CALCULATE TRANSFERRED IN AS OF THE ENDING DATE OF REPORT
+      *------------------------------------------------------------------
+      *
+      * TRANSFERRED IN HEAD WILL BE CALCULATED USING THE GENERIC
+      * PROGRAM HPMOVE.
+      *
+     C     $TIHD         BEGSR
+      *
+     C                   Z-ADD     LDTYMD        XXCYMD
+      *
+     C                   call      'HPMOVE'      plist01
+      *
+     C                   Z-ADD     TINHD         WGTIHD
+      *
+     C                   ENDSR
+      /EJECT
+      *------------------------------------------------------------------
+      * $ajtihd - Calculate adjusted transferred in head
+      *------------------------------------------------------------------
+      *
+      * Adjusted transferred in head is typically calculated as the 'transfers
+      * in' less the head transferred out during the first 7 days after the
+      * group's open date. BUT, here we want to use either a) 7 days or b)
+      * the report date....whichever is earlier.
+      *
+     C     $ajtihd       begsr
+      *
+      * Calculate the 'cut-off' date as 7 days after the group's open date.
+      *
+     C     *iso          test(d)                 hgopdt                 92
+     C                   if        *in92 = *off                                 If good date
+     C                   movel     hgopdt        wkcymdiso
+     C                   adddur    7:*days       wkcymdiso
+     C                   move      wkcymdiso     xxcymd
+     C                   endif                                                  If good date
+      *
+      * Determine which date is earliest...a) open date plus 7 days
+      * or report date.
+     C                   select
+     C                   when      wkcymdiso < wkrptdtiso
+     C                   move      wkcymdiso     xxcymd
+     C                   other
+     C                   move      wkrptdtiso    xxcymd
+     C                   endsl
+      *
+      * Retrieve the 'transfer out head' as of the above date.
+      * Then, calculate the 'adjusted transfer in' head using the
+      * returned values from the call.
+      *
+     C                   call      'HPMOVE'      plist01
+     C     wgtihd        sub       touhd         wgajtihd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $DATE -  MANIPULATE DATES WITH DATE UTILITY
+      *---------------------------------------------------------------
+      *
+     C     $DATE         BEGSR
+      *
+     C                   MOVEL     'CYMD'        PFRFMT
+     C                   MOVEL     'CYMD'        PTOFMT
+     C                   MOVEL     'I'           PCODE
+     C                   MOVE      *BLANK        PRTRN
+      *
+     C                   CALL      'UT80060R'
+     C                   PARM                    PFRM8             8 0
+     C                   PARM                    PTO8              8 0
+     C                   PARM                    PFRFMT            4
+     C                   PARM                    PTOFMT            4
+     C                   PARM                    PDAYS             4 0
+     C                   PARM                    PCODE             1
+     C                   PARM                    PRTRN             1
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * *INZSR - INITIALIZATION SUBROUTINE
+      *---------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      * Parm Lists
+      *
+     C     plist01       plist
+     C                   parm                    hghgsn
+     C                   parm                    xxcymd
+      * Head
+     C                   parm                    gpihd                          GROUP INV
+     C                   parm                    pinhd                          PIG IN
+     C                   parm                    tinhd                          TRSF IN
+     C                   parm                    tisphd                         SAME PHASE
+     C                   parm                    tidphd                         DIFF PHASE
+     C                   parm                    pouhd                          PIGS OUT
+     C                   parm                    touhd                          TRSF OUT
+     C                   parm                    tosphd                         SAME PHASE
+     C                   parm                    tosphd                         DIFF PHASE
+     C                   parm                    rinhd                          REJECT IN
+     C                   parm                    rouhd                          REJECT OUT
+     C                   parm                    qinhd                          QUALITY IN
+     C                   parm                    qouhd                          QUALITY OUT
+     C                   parm                    morhd                          MORTALITY
+     C                   parm                    inahd                          INV ADJ
+      * Pounds
+     C                   parm                    pinlb                          PIG IN
+     C                   parm                    tinlb                          TRSF IN
+     C                   parm                    tisplb                         SAME PHASE
+     C                   parm                    tidplb                         DIFF PHASE
+     C                   parm                    poulb                          PIG OUT
+     C                   parm                    toulb                          TRSF OUT
+     C                   parm                    tosplb                         SAME PHASE
+     C                   parm                    todplb                         DIFF PHASE
+     C                   parm                    rinlb                          REJECT IN
+     C                   parm                    roulb                          REJECT OUT
+     C                   parm                    qinlb                          QUALITY IN
+     C                   parm                    qoulb                          QUALITY OUT
+     C                   parm                    morlb                          MORTALITY
+      *
+      *
+      * KEY LISTS
+      *
+      * KEY FOR GROUP DETAIL WORK FILE
+      *
+     C     K1P303        KLIST
+     C                   KFLD                    HGHGSN
+     C                   KFLD                    WKCYMD
+      *
+      *
+      * CONTROL PROCESSING FLAGS AND FIELDS
+      *
+     C                   MOVEL     YES           FIRST             1
+     C                   Z-ADD     0             COUNT             3 0
+     C                   Z-ADD     0             X                 3 0
+     C                   MOVEL     YES           PROCFL            1
+      *
+      * SAVE FIELDS
+     C     *LIKE         DEFINE    WGFSCD        SVFSCD
+     C     *LIKE         DEFINE    WGPPCD        SVPPCD
+      *
+      * DEFINE OUTPUT PARAMETERS FOR THE CALL TO "HPMOVE" TO
+      * CALCULATE INVENTORY
+      *
+     C     *LIKE         DEFINE    WWTYMD        XXCYMD
+      *
+     C                   Z-ADD     0             @@NU50            5 0
+     C     *LIKE         DEFINE    @@NU50        GPIHD
+     C     *LIKE         DEFINE    @@NU50        PINHD
+     C     *LIKE         DEFINE    @@NU50        TINHD
+     C     *LIKE         DEFINE    @@NU50        TISPHD
+     C     *LIKE         DEFINE    @@NU50        TIDPHD
+     C     *LIKE         DEFINE    @@NU50        POUHD
+     C     *LIKE         DEFINE    @@NU50        TOUHD
+     C     *LIKE         DEFINE    @@NU50        TOSPHD
+     C     *LIKE         DEFINE    @@NU50        TODPHD
+     C     *LIKE         DEFINE    @@NU50        RINHD
+     C     *LIKE         DEFINE    @@NU50        ROUHD
+     C     *LIKE         DEFINE    @@NU50        QINHD
+     C     *LIKE         DEFINE    @@NU50        QOUHD
+     C     *LIKE         DEFINE    @@NU50        MORHD
+     C     *LIKE         DEFINE    @@NU50        INAHD
+      *
+     C                   Z-ADD     0             @@NU92            9 2
+     C     *LIKE         DEFINE    @@NU92        PINLB
+     C     *LIKE         DEFINE    @@NU92        TINLB
+     C     *LIKE         DEFINE    @@NU92        TISPLB
+     C     *LIKE         DEFINE    @@NU92        TIDPLB
+     C     *LIKE         DEFINE    @@NU92        POULB
+     C     *LIKE         DEFINE    @@NU92        TOULB
+     C     *LIKE         DEFINE    @@NU92        TOSPLB
+     C     *LIKE         DEFINE    @@NU92        TODPLB
+     C     *LIKE         DEFINE    @@NU92        RINLB
+     C     *LIKE         DEFINE    @@NU92        ROULB
+     C     *LIKE         DEFINE    @@NU92        QINLB
+     C     *LIKE         DEFINE    @@NU92        QOULB
+     C     *LIKE         DEFINE    @@NU92        MORLB
+      *
+      *
+      * WORKFIELDS
+     C     *LIKE         DEFINE    HGCLDT        WKFYMD
+     C     *LIKE         DEFINE    HGCLDT        WKCYMD
+     C     *LIKE         DEFINE    KDKDHD        WKHD
+     C     *LIKE         DEFINE    WG01PR        WKFLD2
+     C                   Z-ADD     0             WKFLD            15 5
+      *
+      *
+      * Get the 'report date' into a date format field
+      *
+     C     *iso          movel     ldtymd        wkrptdtiso
+      *
+      *
+     C                   ENDSR
+      /EJECT

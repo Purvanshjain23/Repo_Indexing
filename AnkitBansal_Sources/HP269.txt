@@ -1,0 +1,716 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP269
+      * TITLE:       Safedata: Edit/Post Reported Weekly Activity
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     09/30/02
+      *
+      * FUNCTION:  Batch program to a) list errors on the records uploaded from
+      *            Safedata and b) post records without errors to HPS.
+      *
+      *            This listing is submitted through HP263CL as part of the
+      *            upload process.
+      *
+      *            The listing prints each record and lists all error messages
+      *            for each record (up to a maximum of 20 per record).
+      *
+      * Error Messages:
+      *
+      *           The messages are retrieved through a call to CLP UT80046A
+      *           using the same user message file, arrays and array logic as
+      *           in the interactive programs. However, they are printed from
+      *           the CL using the command 'CLPRINTA' that was created by Ernie
+      *           Wallace.
+      *
+      *           QPRINT is used for the output file since the command 'CLPRINTA'
+      *           prints to QPRINT.  QPRINT is overridden in the submission CLP
+      *           to 'SHARE = YES' to allows both this RPG program and the CLP
+      *           UT80046A to write to the same print file.
+      *
+      *           Since the 'CLPRINTA' command logic in UT80046A is not being used
+      *           to print headings, count lines or page break, these functions are
+      *           controlled from this RPG program by counting the lines.
+      *
+      *           This program page-breaks when the line count reaches 62 lines
+      *           because this listing is designed to run on paper that is 68 lines
+      *           long.  Therefore, if the users generate this report on various
+      *           laser printers with different page lengths, the page breaks may
+      *           be goofy.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 08/18/03  Barb Gutierrez
+      *           Changed weekly safedata process to run on Saturday instead
+      *           of Monday afternoons.  Now we no longer need to retrieve the
+      *           previous Saturday.  Just use the upload date which is always
+      *           a Saturday.
+      *
+      * 09/04/03  LeAnne Fedor
+      *           Made error messages for closed/voided/disposed groups more
+      *           explicit.
+      *
+      * 02/02/04  Barb Gutierrez
+      *           Changed to make sure we always use the week end date that Safe Data
+      *           sends us instead of the upload date.  There are times when the upload
+      *           from safedata doesn't happen on Saturday.
+      *
+      * 12/29/08  LeAnne Ramsey
+      *           This job runs (normally) on Saturday night--this week it ran on Sunday.
+      *           We were using the UpLoad Date as the WeekEnding Date. So, our records
+      *           had a WeekEnding Date of Sunday and the corresponding Year/Week were
+      *           also wrong.  If the System Date (upload date) is Saturday, we will
+      *           use that. If it is not Saturday, we will find the "Saturday" previous
+      *           and use that.
+      *
+      * 07/02/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp018    if   e           k disk
+      *   Farm site
+      *
+      *
+     Fhsp034    if   e           k disk
+      *   Hog group
+      *
+      *
+     Fhsp102    uf a e           k disk
+      *  Reported weekly activity
+      *
+      *
+     Fhsl269a   uf   e           k disk
+      *  Safedata: Reported weekly activity editing file
+      *
+      *
+     Fqprint    o    f  132        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     d dash            s            132    inz(*all'-')
+     d rtime           s              6  0
+     D maxmsg          s              2  0  inz(20)
+     D msgfl           s             10
+      *
+      *
+      * Control fields
+      *
+     d first           s              1    inz('Y')
+      *
+      *
+      * Work fields for counting lines
+      *
+     d wkovfl          s              3  0 inz(62)
+     d wkcurl          s              3  0 inz(62)
+     d wkdifl          s              3  0 inz(62)
+      *
+      *
+      * Print fields
+      *
+     D l1satmdy        s              6  0
+     D l1ulmdy         s              6  0
+     D l1cdyr          s              4  0
+     D l1cdwk          s              2  0
+      *
+      *
+      * Workfields for manipulating dates
+      *
+     D wkmmddyy        s               d   datfmt(*mdy)
+     D wkcymdiso       s               d   datfmt(*iso)
+     D wksatdt         s              8  0
+      *
+      *
+      * Parm fields
+      *
+     D xxmdy           s              8
+     D xxuldt          s              8  0
+     D xxsatdt         s              8  0
+     D xxname          s              9
+     D xxabbrev        s              4
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      *  Accounting period data area
+      *---------------------------------------------------------------
+      *
+     D dsdaaper       uds                  dtaara(daaper)
+     D  daccyy                        4s 0
+     D  daper                         2s 0
+     D  dabpdt                        8s 0
+     D  daepdt                        8s 0
+     D  dapgfl                        1a
+     D  dappfl                        1a
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Prepare to read the file and print headings the first time through.
+      *
+     C     *loval        setll     hsl269a
+     C                   exsr      $prthdr
+      *
+      * Read all records that have a blank in the error/posted flag.
+      * (The logical file selects these records.)
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsl269a                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   if        first = yes
+     C                   exsr      $first
+     C                   endif
+      *
+      * Edit record and print error messages
+      *
+     c                   exsr      $edit
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *---------------------------------------------------------------
+      * EOF processing
+      *---------------------------------------------------------------
+      * If the file was empty, print the standard 'no data...'
+      * error message
+      *
+     C                   if        first = yes
+     C                   except    nodata
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Edit record
+      *---------------------------------------------------------------
+      *
+     C     $edit         begsr
+      *
+      * Validate:
+      *   1) hog group code
+      *   2) all head fields
+      *
+     C                   exsr      $hgcd
+     C                   exsr      $head
+      *
+      *
+      * If there are errors,
+      *    flag the record as (E)rror
+      * else
+      *    flag the record as (P)osted into HPS
+      *    write an HPS record into the Reported Weekly Activity file
+      *
+     C                   select
+     C                   when      error > 0
+     C                   move      'E'           u5erpofl
+     C                   other
+     C                   move      'P'           u5erpofl
+     C                   exsr      $wrt102
+     C                   endsl
+      *
+     C                   update    u5rec
+      *
+      * Print the record followed by any error messages
+      *
+     C                   exsr      $prtrec
+      *
+     C                   if        error > 0
+     C                   exsr      $prtmsg
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate hog group
+      *---------------------------------------------------------------
+      *
+      * Validate group:
+      *   1) must be valid in hog group master
+      *   2) cannot be a BGF group
+      *   3) cannot have a status of Closed, Voided or Disposed
+      *
+     C     $hgcd         begsr
+      *
+     C                   select
+     C                   when      u5hgcd = *blank and error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09001'     mgid(e)
+     C                   other
+      *
+     C     u5hgcd        chain     hsp034                             92
+     C                   if        *in92 = *on                                  If bad group
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00261'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     u5hgcd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   else
+      *
+      * Group cannot be BGF group
+      *
+     C                   if        hgppcd = 'BGF  ' and                         If BGF
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09093'     mgid(e)
+     C                   endif                                                  If BGF
+      *
+      * Group cannot have a status of Voided
+      *
+     C                   select
+     C                   when      hggscd = 'VD' and error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS01210'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     u5hgcd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+      *
+      * Group cannot have a status of Disposed
+      *
+     C                   when      hggscd = 'DS' and error < maxmsg
+     C                   add       1             error
+     C     *iso          move      hgdsdt        wkcymdiso
+     C     *mdy          move      wkcymdiso     xxmdy
+      *
+     C                   movel     'HS01209'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     u5hgcd        mgw(1)
+     C                   movea     xxmdy         mgw(8)
+     C                   movea     mgw           mgdt(e)
+      *
+      * Group cannot have a status of Closed
+      *
+     C                   when      hggscd = 'CL' and error < maxmsg
+     C                   add       1             error
+     C     *iso          move      hgcldt        wkcymdiso
+     C     *mdy          move      wkcymdiso     xxmdy
+      *
+     C                   movel     'HS01208'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     u5hgcd        mgw(1)
+     C                   movea     xxmdy         mgw(8)
+     C                   movea     mgw           mgdt(e)
+     C                   endsl
+      *
+      *
+     C                   endif                                                  If bad group
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate head fields
+      *---------------------------------------------------------------
+      *
+      * The only 'validation' that I have for the head fields is that SOME of
+      * them cannot be negative. (Note: beginning and ending inventory CAN be negative.)
+      *
+     C     $head         begsr
+      *
+     C                   if        u5tihd   < 0 or
+     C                             u5tohd   < 0 or
+     C                             u5cuhd   < 0 or
+     C                             u5mkhd   < 0
+     C                   add       1             error
+     C                   movel     'HS09085'     mgid(e)
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a record into the HPS Reported Weekly Activity file
+      *---------------------------------------------------------------
+      *
+     C     $wrt102       begsr
+      *
+      * We don't want to write duplicate records for a group/week. So, if a
+      * record already exists, delete it first.
+      *
+     C     key01         chain     hsp102                             92
+     C                   if        *in92 = *off                                 If exists
+     C                   delete    rwrec
+     C                   endif                                                  If exists
+      *
+      * Move in uploaded values
+      *
+     C                   z-add     wksatdt       rwwedt
+     C                   z-add     l1cdyr        rwcdyr
+     C                   z-add     l1cdwk        rwcdwk
+      *
+     C                   z-add     u5bginhd      rwbginhd
+     C                   z-add     u5tihd        rwtihd
+     C                   z-add     u5tohd        rwtohd
+     C                   z-add     u5cuhd        rwcuhd
+     C                   z-add     u5mkhd        rwmkhd
+      *
+      * Move in hog group fields
+      *
+     C                   z-add     hghgsn        rwhgsn
+      *
+     C                   write     rwrec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print report headings
+      *---------------------------------------------------------------
+      *
+     C     $prthdr       begsr
+      *
+     C                   z-add     0             wkcurl
+     C                   except    h1hdr
+     C                   add       9             wkcurl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print record
+      *---------------------------------------------------------------
+      *
+     C     $prtrec       begsr
+      *
+     C                   if        wkcurl > wkovfl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Program UT80046A does not print headings or check for page breaks.
+      * Before calling  UT80046A, determine if all 8 lines required for the
+      * record will fit on the current page. Calculate the remaining lines
+      * on the page using the overflow line and the current line.
+      *
+     C     wkovfl        sub       wkcurl        wkdifl
+      *
+      * If you have more messages than will fit on the page, then page break
+      * and print headings.
+      *
+     C                   if        wkdifl < 8
+     C                   exsr      $prthdr
+     C                   endif
+      *
+     C                   except    l1dtl
+     C                   add       1             wkcurl
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------
+      * Print error messages
+      *-------------------------------------------------------------------
+      *
+     C     $prtmsg       begsr
+      *
+     C                   if        error <> 0
+     C                   exsr      $wrmsg
+     C                   z-add     0             error
+     C                   exsr      $clmsg
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+      * If overflow, print headings.
+      *
+     C                   if        wkcurl > wkovfl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Program UT80046A does not print headings or check for page breaks.
+      * Before calling  UT80046A, determine if all the error messages can be
+      * printed on the current page.  Calculate the remaining print lines
+      * on the page using the overflow line and the current line.
+      *
+     C     wkovfl        sub       wkcurl        wkdifl
+      *
+      * If you have more messages than will fit on the page, then page break
+      * and print headings.
+      *
+     C                   if        error > wkdifl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Increment the current line by the number of error messages you will be
+      * printing in UT80046A plus one for the space after.  This sets the current
+      * line number properly for when you return from UT80046A.
+      *
+     C     wkcurl        add       error         wkcurl
+     C                   add       1             wkcurl
+      *
+     C                   call      'UT80046A'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      msgfil        msgfl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80046A'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      msgfil        msgfl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * First time processing
+      *---------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+      * In the records that we will write, we want the Saturday WeekEnding Date
+      * associated with the Upload Date (System Date).
+      *
+      * We will print both this Saturday WeekEnding Date and the Upload Date.
+      * They will be the same except for those rare times when the Job Scheduler job
+      * is delayed until Sunday...it should always run on Saturday night.
+      *
+      * Determine if the system date is a Saturday.
+      *
+     C                   call      'HP8005'
+     C                   parm      u5uldt        xxuldt
+     C                   parm      *blank        xxname
+     C                   parm      *blank        xxabbrev
+      *
+      * If the system date is a Saturday, use it as the 'week-ending' date. If it
+      * is not a Saturday, find the previous Saturday and use it as the week-ending
+      * date.
+     C                   if        xxabbrev = 'Sat '                            If Saturday
+     C                   z-add     u5uldt        wksatdt
+     C                   else
+      *
+     C                   call      'HPSAT'
+     C                   parm      u5uldt        xxuldt
+     C     wksatdt       parm      0             xxsatdt
+     C                   endif                                                  If Saturday
+      *
+      * Retrieve Year/Week for this Saturday date.
+      *
+     C                   call      'HP8010'
+     C                   parm      wksatdt       xxsatdt
+     C                   parm      0             l1cdyr
+     C                   parm      0             l1cdwk
+      *
+      * Flip the Saturday date to MMDDYY for printing
+      *
+     C     *ymd          move      wksatdt       wkmmddyy
+     C                   move      wkmmddyy      l1satmdy
+      *
+      *
+      * Flip the Upload Date (system date) to MMDDYY for printing
+      *
+     C     *ymd          move      u5uldt        wkmmddyy
+     C                   move      wkmmddyy      l1ulmdy
+      *
+     C                   move      no            first
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    hghgsn
+     C                   kfld                    l1cdyr
+     C                   kfld                    l1cdwk
+      *
+      *
+      * Retrieve time for report heading.
+      *
+     C                   time                    rtime
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oqprint    e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           78 'HOG PRODUCTION SYSTEM'
+     O                                          122 'DATE'
+     O                       udate         y    132
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                                           73 'REPORTED WEEKLY ACTIVITY'
+     O                                           88 'UPLOAD LISTING'
+     O                                          122 'TIME'
+     O                       rtime              132 '  :  :  '
+      *
+     O          e            h1hdr          2
+     O                                          122 'PAGE'
+     O                       page          z    132
+      *
+      *
+     O          e            h1hdr          1
+     O                                           23 'BEGIN'
+     O                                           39 '--TRANSFERRED-'
+     O                                           48 'CULL'
+     O                                           59 'MARKET/'
+     O                                           78 'ENDING'
+     O                                          103 'WEEK'
+     O                                          132 'ERROR/'
+      *
+     O          e            h1hdr          1
+     O                                            5 'FARM'
+     O                                           10 'HOG'
+     O                                           23 'INVEN'
+     O                                           31 'HEAD'
+     O                                           39 'HEAD'
+     O                                           48 'SALE'
+     O                                           59 'FPS SALE'
+     O                                           67 'DEAD'
+     O                                           78 'INVENTORY'
+     O                                           93 '--CALENDAR--'
+     O                                          103 'ENDING'
+     O                                          114 'UPLOAD'
+     O                                          124 'UPLOAD'
+     O                                          132 'POSTED'
+      *
+      *
+     O          e            h1hdr          1
+     O                                            5 'SITE'
+     O                                           12 'GROUP'
+     O                                           23 'HEAD'
+     O                                           31 'IN'
+     O                                           39 'OUT'
+     O                                           48 'HEAD'
+     O                                           59 'HEAD'
+     O                                           67 'HEAD'
+     O                                           78 'HEAD'
+     O                                           86 'YEAR'
+     O                                           92 'WEEK'
+     O                                          103 'DATE'
+     O                                          114 'DATE'
+     O                                          124 'TIME'
+     O                                          131 'FLAG'
+      *
+     O          e            h1hdr          1
+     O                       dash               132
+      *
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       1
+     O                       u5fscd        z      5
+     O                       u5hgcd              14
+     O                       u5bginhd      k     24
+     O                       u5tihd        k     32
+     O                       u5tohd        k     40
+     O                       u5cuhd        k     49
+     O                       u5mkhd        k     60
+     O                       u5kdhd        k     68
+     O                       u5eninhd      k     79
+     O                       l1cdyr        z     86
+     O                       l1cdwk        z     91
+     O                       l1satmdy           103 '  /  /  '
+     O                       l1ulmdy            114 '  /  /  '
+     O                       u5ultm             124 '  :  :  '
+     O                       u5erpofl           130
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata      1
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'

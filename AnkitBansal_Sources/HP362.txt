@@ -1,0 +1,1098 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP362
+      * TITLE:       COST FEED TICKETS AND PRINT LISTING
+      * PROGRAMMER:  MARY PALMER
+      * CREATED:     5/04/94
+      *
+      * FUNCTION: BATCH PROGRAM SUBMITTED FROM SPECIFY FEED TICKETS
+      *           COSTING PROGRAM (HP462CL). FEED TICKET DETAIL RECORDS
+      *           ARE ASSIGNED INGREDIENT, MEDICATION, AND MANUFACTUR-
+      *           ING COSTS.
+      *
+      *  ERROR MESSAGES
+      *
+      *           ERROR MESSAGES ARE PRINTED FOR RECORDS THAT CANNOT
+      *           BE COSTED.
+      *           THE MESSAGES ARE RETRIEVED THROUGH A
+      *           CALL TO CLP UT80046 USING THE SAME USER MESSAGE
+      *           FILE, ARRAYS AND ARRAY LOGIC AS IN THE INTERACTIVE
+      *           PROGRAMS.  HOWEVER, THEY ARE PRINTED FROM THE CL
+      *           USING THE COMMAND 'CLPRINT' THAT WAS CREATED BY
+      *           ERNIE WALLACE.
+      *
+      *           QPRINT IS USED FOR THE OUTPUT FILE SINCE THE
+      *           COMMAND 'CLPRINT' PRINTS TO QPRINT.
+      *           QPRINT IS OVERRIDDEN IN THE SUBMISSION CLP
+      *           TO 'SHARE = YES' TO ALLOW BOTH THIS RPG PROGRAM AND
+      *           CLP UT80046 TO WRITE TO THE SAME PRINT FILE.
+      *
+      *           SINCE THE 'CLPRINT' COMMAND LOGIC IN UT80046 IS NOT
+      *           BEING USED TO PRINT HEADINGS, COUNT LINES OR PAGE
+      *           BREAK, THESE FUNCTIONS ARE CONTROLLED FROM THIS RPG
+      *           PROGRAM BY COUNTING THE LINES.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 01/30/01  LeAnne Fedor
+      *           Production type was removed from the feed ticket files.
+      *           So, removed all reference to production type.
+      *
+      * 06/28/01  LeAnne Fedor
+      *           Recompile only.
+      *           Manager and supervisor fields removed from Hog Group file.
+      *
+      * 01/09/02  LeAnne Fedor
+      *           I removed the 2 WARNING messages concerning Feed Manufacturing
+      *           Type cost.  They were really confusing Konner Everhard and no one is
+      *           actually entering any 'cost' for feed manufacturing type.  I left
+      *           the messages (HS00533, HS00534) in the message file in case we ever
+      *           have to put them back.
+      *
+      * 07/16/02  LeAnne Fedor
+      *           Recompile only.
+      *           Production Phase was removed from the feed ticket header file.
+      *
+      * 04/28/09  LeAnne Ramsey
+      *           Populated new fields Costed Time/User in Feed Ticket Header.
+      *
+      * 05/12/09  LeAnne Ramsey
+      *           Recompile only. PickUp Ticket Type added to Feed Ticket Header.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 09/21/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Upload Date' to Feed Ticket Header.
+      *
+      * 03/26/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Changed file HSP038. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *           Starting with field Bin Code (FDBNCD), shifted 1 position to the right up to
+      *           field Pounds (FDFDLB).
+      *           NOTE: Ingredient Cost was displaying a value length of '9999999.99' (7.2) and
+      *                 now it will be shorten to display a length of '999999.99' (6.2);
+      *                 The MAX Ingredient Amt in the Production file as of 4/17/20, was '19000.00'.
+      *                 If the Ingredient Amt would exceed 6.2 in length, then this report will
+      *                 need to change the CPI to a smaller font.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * SET DATE FORMAT TO YMD FOR TIME STAMP TO FEED TICKET HEADER
+      *
+     H DATEDIT(*YMD)
+      *
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSP029    IF   E           K DISK
+      *    RATION ADDITIVE COSTS
+      *
+      *
+     FHSP030    IF   E           K DISK
+      *    FEED MANUFACTURING COST
+      *
+      *
+     FHSL034D   IF   E           K DISK
+      *    HOG GROUP
+      *
+      *
+     FHSL037A   IF   E           K DISK    RENAME(FHREC:FHRECA) prefix(p1)
+      *    FEED TICKET HEADER
+      *
+      *
+     FHSL037D   UF   E           K DISK
+      *    FEED TICKET HEADER        (SELECT: STATUS = EN RC)
+      *
+      *
+     FHSP038    UF   E           K DISK
+      *    FEED TICKET DETAIL
+      *
+      *
+     FHSL038S   IF   E           K DISK    RENAME(FDREC:FDRECS)
+      *    FEED TICKET DETAIL  (OMIT: FDTRCD = PICKUP)
+      *
+      *
+     FQPRINT    O    F  132        PRINTER
+      *
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * STANDARD ERROR MESSAGE HANDLING DATA STRUCTURES
+      *---------------------------------------------------------------
+      *
+      * FOR ERROR MESSAGE HANDLING, A PACKED INDEX (E) IS REQUIRED.
+      * FOR PROGRAM READABILITY, DEFINE A CORRESPONDING ERROR COUNT
+      * FIELD CALLED 'ERROR'
+      *
+     D                 DS                  INZ
+     D  ERROR                  1      2P 0
+     D  E                      1      2P 0
+      *
+      * THIS DATA STRUCTURE SUPPLIES THE NAME OF THE MESSAGE FILE TO
+      * THE MESSAGE HANDLING CL PROGRAM.  THE FIELD NAME MSGFIL MUST BE
+      * CONSTANT. THE VALUE IN QUOTES IS THE NAME OF THE SPECIFIC
+      * MESSAGE FILE CONTAINING THE USER DEFINED MESSAGES.
+      *
+     D                 DS                  INZ
+     D  MSGFIL                 1     10    INZ('HSMSGF    ')
+      *
+      * THE FOLLOWING 3 DATA STRUCTURES ARE USED TO SPEED MESSAGE
+      * HANDLING SINCE IT IS FASTER TO CLEAR DATA STRUCTURES THAN
+      * ARRAYS.  EACH IS ASSOCIATED WITH A STANDARD MESSAGE ARRAY.
+      *
+     D MGI             DS           140    INZ
+     D  MGID                   1    140
+     D                                     DIM(20)                              MSG ID ARRAY
+      *
+     D MGD             DS          1000    INZ
+     D  MGDT                   1   1000
+     D                                     DIM(20)                              MSG PARMS
+      *
+     D MGWK            DS            50    INZ
+     D  MGW                    1     50
+     D                                     DIM(50)                              MSG WORK PARMS
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+      *
+      *
+      *---------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------
+      *
+      * Workfields
+     D wktm            s              6  0
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+     D wkmdy           s              6  0
+     D wkalphmdy       s              6
+      *
+      *---------------------------------------------------------------
+      * LDA - REPORT SELECTIONS
+      *---------------------------------------------------------------
+      *
+     D                UDS
+     D  LDFMBO                 1      5
+     D  LDCYMD                 6     13  0
+     D  LDEFFL                14     14
+     D  LDMDY                 15     20  0
+     D  LDBODS                21     50
+      *
+      /EJECT
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+      *
+      * PROCESS FEED TICKET HEADER RECORDS WITH A STATUS OF 'EN' OR
+      * 'RC' FOR THE SELECTED BUSINESS OFFICE. THIS LOGIC LIMITS COSTING
+      * TO A) DELIVERY TICKETS FOR PRODUCED FEED THAT HAVE BEEN ENTERED AS
+      * 'COST THROUGH THE SYSTEM' AND B) ALL PICKUP TICKETS.
+      *
+      * ALSO LIMIT PROCESSING TO TICKETS THAT HAVE A REFERENCE TICKET
+      * DATE THAT IS ON OR BEFORE THE USER'S CUT-OFF DATE.
+      *
+     C     LDFMBO        SETLL     HSL037D
+     C                   EXSR      $HDRPT
+      *
+     C     *IN90         DOUEQ     *ON                                          MAIN DO
+     C     LDFMBO        READE     HSL037D                                90
+     C     *IN90         IFEQ      *OFF                                         IF IN RANGE
+     C     FHRTDT        ANDLE     LDCYMD
+      *
+      * SET THE FLAG THAT, AT THE END OF PROCESSING, WILL DETERMINE
+      * WHETHER ANY FEED TICKETS WERE PROCESSED.
+      *
+     C     FIRST         IFEQ      YES
+     C                   MOVEL     YES           PRTFLG
+     C                   MOVEL     NO            FIRST
+     C                   ENDIF
+      *
+      * RESET FEED TICKET HEADER ERROR FLAG
+      *
+     C                   MOVEL     NO            FHERFL
+      *
+      * THE COSTING LOGIC IS NOT THE SAME FOR ALL TICKETS.
+      *
+     C     FHTRCD        IFEQ      'D'                                          IF DELIVERY
+     C                   EXSR      $PROC1
+     C                   ELSE
+      *
+      *
+      * PURCHASED PICKUP TICKETS
+      *
+     C                   SELECT
+     C     FHPRFL        WHENEQ    NO
+     C                   EXSR      $PROC2
+      *
+      * PRODUCED PICKUP TICKETS:
+      *   RETRIEVE THE COST METHOD USED ON THE ORIGINAL DELIVERY TICKET.
+      *   A) USE PROCESS 1 IF THE TICKET IS AGAINST A DELIVERY
+      *      TICKET THAT WAS COSTED THROUGH THE SYSTEM
+      *   5) USE PROCESS 2 IF THE TICKET IS AGAINST A DELIVERY
+      *      TICKET THAT HAD DOLLARS KEYED IN
+      *
+     C     FHPRFL        WHENEQ    YES
+     C     K8L037        CHAIN     HSL037A                            92
+      *
+     C                   select
+     C                   when      *in92 = *on or p1fhcsfl = yes
+     C                   exsr      $proc1
+      *
+     C                   when      p1fhcsfl = no
+     C                   exsr      $proc2
+     C                   endsl
+      *
+     C                   ENDSL
+     C                   ENDIF                                                  IF DELIVERY
+      *
+      * IF THE USER HAS REQUESTED THE FINAL RUN AND THERE
+      * ARE NO COSTING ERRORS FOR THIS TICKET, UPDATE THE
+      * FEED TICKET HEADER RECORD.
+      *
+     C     LDEFFL        IFEQ      'F'
+     C     FHERFL        ANDEQ     NO
+     C                   EXSR      $UPDFH
+     C                   ENDIF
+      *
+      * CLEAR FIELDS
+     C                   Z-ADD     0             WKRCDT
+     C                   Z-ADD     0             WKILRT
+     C                   Z-ADD     0             WKMLRT
+     C                   Z-ADD     0             WKINAM
+     C                   Z-ADD     0             WKMDAM
+      *
+     C                   Z-ADD     0             WKFLRT
+     C                   Z-ADD     0             WKMCDT
+     C                   Z-ADD     0             WKMFAM
+      *
+     C                   Z-ADD     0             WKCOAM
+     C                   Z-ADD     0             WKCLRT
+      *
+     C                   Z-ADD     0             WKFDLB
+     C                   MOVE      *BLANK        WKHGCD
+      *
+     C                   ENDIF                                                  IF IN RANGE
+     C                   ENDDO                                                  MAIN DO
+      *
+      *---------------------------------------------------------------
+      * EOF PROCESSING
+      *---------------------------------------------------------------
+      *
+      * PRINT STANDARD 'NO DATA...' ERROR MESSAGE IF NO DATA MET THE
+      * USER'S SELECTION CRITERIA. IF RECORDS WERE PROCESSED,
+      * PRINT THE ACCUMULATED COUNTS.
+      *
+     C     PRTFLG        IFEQ      NO                                           IF NOTHING
+     C                   EXCEPT    NODATA
+     C                   ELSE
+      *
+     C     WKCURL        IFGT      58
+     C                   EXSR      $HDRPT
+     C                   ENDIF
+     C                   EXCEPT    RPTTOT
+     C                   ENDIF                                                  IF NOTHING
+      *
+     C                   SETON                                        LR
+      /EJECT
+      ****************************************************************
+      * PROCESS FEED DETAIL RECORDS
+      ****************************************************************
+      *
+      * THIS SUBROUTINE IS EXECUTED FOR:
+      *    1) ALL DELIVERY TICKETS
+      *    2) PRODUCED PICKUP TICKETS THAT WERE AGAINST A DELIVERY
+      *       TICKET THAT WAS 'COSTED THROUGH THE SYSTEM'
+      *
+      *
+     C     $PROC1        BEGSR
+      *
+     C     K3P038        SETLL     HSP038
+     C                   SETOFF                                       91
+      *
+     C     *IN91         DOUEQ     *ON                                          DETAIL DO
+     C     K3P038        READE     HSP038                                 91
+     C     *IN91         IFEQ      *OFF                                         IF FOUND
+      *
+     C                   ADD       1             WKEDIT
+     C                   MOVEL     NO            FDERFL
+      *
+      * EXECUTE SUBROUTINES TO RETRIEVE RATION/ADDITIVE
+      * COST AND THE COST FOR THE FEED MANUFACTURING TYPE
+      *
+     C                   EXSR      $INGR
+     C                   EXSR      $MNFG
+      *
+      * PRINT THE FEED DETAIL LINE AND THEN PRINT ALL
+      * ERROR MESSAGES FOR THAT DETAIL LINE
+      *
+     C                   EXSR      $PRNT1
+      *
+     C     ERROR         IFNE      0
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+      *
+      * IF THERE WERE ANY COSTING ERRORS ON THIS FEED DETAIL RECORD,
+      * SET THE FEED HEADER ERROR FLAG.  IF THERE WERE NO ERRORS AND
+      * THE USER SELECTED 'FINAL', THEN UPDATE THE FEED DETAIL RECORD.
+      *
+     C     FDERFL        IFEQ      YES                                          IF DTL ERROR
+     C                   MOVEL     YES           FHERFL
+     C                   ELSE
+      *
+     C                   ADD       1             WKCOST
+      *
+     C     LDEFFL        IFEQ      'F'                                          IF FINAL
+     C                   EXSR      $UPDFD
+     C                   ENDIF                                                  IF FINAL
+     C                   ENDIF                                                  IF DTL ERROR
+      *
+     C                   ENDIF                                                  IF FOUND
+     C                   ENDDO                                                  DETAIL DO
+      *  RESET DETAIL FLAG
+     C                   MOVEL     NO            FDERFL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * ACCUMULATE POUNDS AND COSTS FOR PURCHASED PICKUPS
+      *----------------------------------------------------------------
+      *
+     C     $ACCUM        BEGSR
+      *
+      * SINCE THE FEED TICKET HEADER RECORD DOES NOT CONTAIN THE
+      * BIN, RATION OR ADDITIVE INFO. YOU MUST RETRIEVE THIS INFO
+      * FROM THE FIRST 'FROM' RECORD FOR THIS PICKUP TICKET IN
+      * THE FEED TICKET DETAIL FILE.
+      * (THE 'FROM' RECORD WILL ALWAYS HAVE NEGATIVE POUNDS)
+      *
+     C     K3P038        SETLL     HSP038
+     C                   SETOFF                                       96
+      *
+     C     *IN96         DOUEQ     *ON                                          DO FROM BIN
+     C     FDFDLB        ORLT      0
+     C     K3P038        READE     HSP038                                 96
+     C                   ENDDO                                                  DO FROM BIN
+      *
+      * IF YOU DID NOT FIND A 'FROM' RECORD, SET THE COSTING
+      * ERROR FLAG TO YES AND DO NOT PERFORM THE ACCUMULATION
+      * LOGIC.
+      *
+     C     *IN96         IFEQ      *ON                                          IF NO FROM
+     C                   MOVEL     YES           FDERFL
+     C                   ADD       1             WKERR
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00535'     MGID(E)
+     C                   ENDIF
+     C                   ELSE
+      *
+      * NOW THAT YOU HAVE THE APPROPRIATE BIN, RATION AND
+      * ADDITIVE CODES, YOU MUST ACCUMULATE POUNDS AND
+      * DOLLARS FOR THEM FROM THE REFERENCED DELIVERY TICKET
+      * AND, ALSO, FROM ALL ADJUSTMENTS FOR THEM THAT HAVE
+      * BEEN ENTERED AGAINST THE REFERENCED DELIVERY TICKET.
+      *
+     C                   SETOFF                                       95
+     C     K6L038        SETLL     HSL038S
+      *
+     C     *IN95         DOUEQ     *ON                                          DO ACCUM
+     C     K6L038        READE     HSL038S                                95
+     C     *IN95         IFEQ      *OFF                                         IF FOUND
+     C                   ADD       FDINAM        WKINAM
+     C                   ADD       FDMDAM        WKMDAM
+     C                   ADD       FDMFAM        WKMFAM
+     C                   ADD       FDFDLB        WKFDLB
+     C                   ENDIF                                                  IF FOUND
+     C                   ENDDO                                                  DO ACCUM
+      *
+      * TEST FOR ZERO INGREDIENT DOLLARS.
+      *
+     C     WKINAM        IFEQ      0                                            IF NO ING $
+     C                   MOVEL     YES           FDERFL
+     C                   ADD       1             WKERR
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00536'     MGID(E)
+     C                   ENDIF
+     C                   ENDIF                                                  IF NO ING $
+      *
+      * TEST FOR ZERO POUNDS.
+      *
+     C     WKFDLB        IFEQ      0                                            IF NO LBS
+     C                   MOVEL     YES           FDERFL
+     C                   ADD       1             WKERR
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00537'     MGID(E)
+     C                   ENDIF
+     C                   ENDIF                                                  IF NO LBS
+      *
+      * CALCULATE COSTS PER POUND
+      *      MANUFACTURING
+      *      MEDICATION
+      *      INGREDIENT
+      *
+     C     WKFDLB        IFNE      0
+     C     WKMFAM        DIV(H)    WKFDLB        WKFLRT
+     C     WKMDAM        DIV(H)    WKFDLB        WKMLRT
+     C     WKINAM        DIV(H)    WKFDLB        WKILRT
+     C                   ENDIF
+     C                   ENDIF                                                  IF NO FROM
+      *
+      * RESET AMOUNT ACCUMLATORS
+      *
+     C                   Z-ADD     0             WKINAM
+     C                   Z-ADD     0             WKMDAM
+     C                   Z-ADD     0             WKMFAM
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * PROCESS FEED DETAIL
+      *----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE IS EXECUTED FOR:
+      *    1) ALL PURCHASED PICKUP TICKETS
+      *    2) PRODUCED PICKUP TICKETS THAT WERE AGAINST A DELIVERY
+      *       TICKET THAT HAD THE DOLLARS KEYED IN
+      *
+     C     $PROC2        BEGSR
+      *
+      * ACCUMLATE POUNDS AND DOLLARS TO USE IN CALCULATING PER
+      * POUND RATES FOR USE IN COSTING THIS PICKUP TICKET
+      *
+     C                   EXSR      $ACCUM
+      *
+      * IF THERE WERE ANY COSTING ERRORS DURING THE ACCUMULATION
+      * ABOVE, SET THE FEED HEADER ERROR FLAG.
+      *
+     C     FDERFL        IFEQ      YES
+     C                   MOVEL     YES           FHERFL
+     C                   ENDIF
+      *
+      * COST AND PRINT THE FEED DETAIL RECORDS FOR THIS
+      * PICKUP TICKET (ALL ERROR CHECKING WAS DONE IN $ACCUM)
+      *
+     C     K3P038        SETLL     HSP038
+     C                   SETOFF                                       97
+      *
+     C     *IN97         DOUEQ     *ON                                          DETAIL DO
+     C     K3P038        READE     HSP038                                 97
+     C     *IN97         IFEQ      *OFF                                         IF FOUND
+      *
+     C                   ADD       1             WKEDIT
+      *
+      * CALCULATE DOLLARS.
+      *    INGREDIENT
+      *    MEDICATION
+      *    MANUFACTURING
+      *
+     C     FDFDLB        MULT(H)   WKILRT        WKINAM
+     C     FDFDLB        MULT(H)   WKMLRT        WKMDAM
+     C     FDFDLB        MULT(H)   WKFLRT        WKMFAM
+      *
+      * PRINT A DETAIL LINE ON THE REPORT
+      *
+     C                   EXSR      $PRNT1
+      *
+      * IF THERE ARE NO ERRORS, INCREMENT THE COSTED COUNTER
+      *
+     C     FDERFL        IFEQ      NO
+     C                   ADD       1             WKCOST
+     C     LDEFFL        IFEQ      'F'                                          IF FINAL
+     C                   EXSR      $UPDFD
+     C                   ENDIF                                                  IF FINAL
+     C                   ENDIF
+      *
+     C                   ENDIF                                                  IF FOUND
+     C                   ENDDO                                                  DETAIL DO
+      *
+      * PRINT ALL ERROR MESSAGES FOR THIS PICKUP TICKET AFTER
+      * ALL THE DETAIL LINES HAVE BEEN PRINTED
+      *
+     C     ERROR         IFNE      0
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+      *  RESET DETAIL FLAG
+      *
+     C                   MOVEL     NO            FDERFL
+     C                   ENDSR
+      /EJECT
+      *-----------------------------------------------------------------
+      * RETRIEVE RATION/ADDITIVE INGREDIENT COST
+      *-----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE IS ONLY EXECUTED FOR DELIVERY TICKETS AND PRODUCED
+      * PICKUP TICKETS THAT ARE AGAINST DELIVERY TICKETS THAT WERE
+      * 'COSTED THROUGH THE SYSTEM'
+      *
+     C     $INGR         BEGSR
+      *
+     C                   Z-ADD     0             WKILRT
+     C                   Z-ADD     0             WKMLRT
+     C                   Z-ADD     0             WKINAM
+     C                   Z-ADD     0             WKMDAM
+      *
+     C                   MOVEL     NO            FDERFL
+      *
+      * RETRIEVE THE RATION/ADDITIVE COST RECORD THAT IS
+      * CLOSEST TO THE REFERENCE TICKET DATE OF THE FEED TICKET.
+      *
+     C     K2P029        CHAIN     HSP029                             93
+     C     *IN93         IFEQ      *ON                                          IF NOT EXACT
+     C     K2P029        SETLL     HSP029
+     C     K1P029        READPE    HSP029                                 93
+     C                   ENDIF                                                  IF NOT EXACT
+      *
+      * IF NO RATION/ADDITIVE COST RECORD FOUND
+      *
+     C     *IN93         IFEQ      *ON                                          IF NO REC
+     C                   MOVEL     YES           FDERFL
+     C                   ADD       1             WKERR
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00531'     MGID(E)
+     C                   CLEAR                   MGW
+      *
+      * Flip Reference Ticket Date from CCYYMMDD to MMDDYY format
+      *
+     C     *iso          test(d)                 fdrtdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C                   move      fdrtdt        wkisodate
+     C     *mdy          move      wkisodate     wkmdy
+     C                   move      wkmdy         wkalphmdy
+     C                   else
+     C                   move      *blank        wkalphmdy
+     C                   endif                                                  If OK date
+      *
+     C                   MOVEA     wkalphmdy     MGW(1)
+     C                   MOVEA     LDFMBO        MGW(7)
+     C                   MOVEA     FDRNCD        MGW(12)
+     C                   MOVEA     FDADCD        MGW(17)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+     C                   ELSE
+      *
+     C                   Z-ADD     RCILRT        WKILRT
+     C                   Z-ADD     RCMLRT        WKMLRT
+     C                   Z-ADD     RCRCDT        WKRCDT
+      *
+      * RECORD WAS FOUND, CHECK FOR INGREDIENT COST IS ZERO
+      *
+     C     RCILRT        IFEQ      0                                            IF ZERO COST
+     C                   MOVEL     YES           FDERFL
+     C                   ADD       1             WKERR
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00532'     MGID(E)
+     C                   CLEAR                   MGW
+      *
+      * Flip Effective Date from CCYYMMDD to MMDDYY format
+      *
+     C     *iso          test(d)                 rcrcdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C                   move      rcrcdt        wkisodate
+     C     *mdy          move      wkisodate     wkmdy
+     C                   move      wkmdy         wkalphmdy
+     C                   else
+     C                   move      *blank        wkalphmdy
+     C                   endif                                                  If OK date
+      *
+     C                   MOVEA     LDFMBO        MGW(1)
+     C                   MOVEA     FDRNCD        MGW(6)
+     C                   MOVEA     FDADCD        MGW(11)
+     C                   MOVEA     wkalphmdy     MGW(16)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+     C                   ENDIF                                                  IF ZERO COST
+     C                   ENDIF                                                  IF NO REC
+      *
+      * CALCULATE INGREDIENT AND MEDICATION DOLLARS.
+      *
+     C     FDFDLB        MULT(H)   WKILRT        WKINAM
+     C     FDFDLB        MULT(H)   WKMLRT        WKMDAM
+      *
+     C                   ENDSR
+      /EJECT
+      *-----------------------------------------------------------------
+      * GET MANUFACTURING COST FOR FEED TICKET DETAIL RECORD
+      *-----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE IS ONLY EXECUTED FOR DELIVERY TICKETS AND PRODUCED
+      * PICKUP TICKETS THAT ARE AGAINST DELIVERY TICKETS THAT WERE
+      * 'COSTED THROUGH THE SYSTEM'
+      *
+      *
+     C     $MNFG         BEGSR
+      *
+     C                   Z-ADD     0             WKFLRT
+     C                   Z-ADD     0             WKMCDT
+     C                   Z-ADD     0             WKMFAM
+      *
+      * RETRIEVE THE FEED TYPE MANUFACTURING COST RECORD THAT IS
+      * CLOSEST TO THE REFERENCE TICKET DATE OF THE FEED TICKET.
+      *
+     C     K5P030        CHAIN     HSP030                             94
+     C     *IN94         IFEQ      *ON                                          IF NO EXACT
+     C     K5P030        SETLL     HSP030
+     C     K4P030        READPE    HSP030                                 94
+     C                   ENDIF                                                  IF NO EXACT
+      *
+      * IF NO MANUFACTURING COST RECORD FOUND
+      *
+     C     *IN94         IFEQ      *ON                                          IF NO REC
+     C                   ELSE
+     C                   Z-ADD     MCFLRT        WKFLRT
+     C                   Z-ADD     MCMCDT        WKMCDT
+     C                   ENDIF                                                  IF NO REC
+      *
+      * CALCULATE THE MANUFACTURING COST
+      *
+     C     FDFDLB        MULT(H)   WKFLRT        WKMFAM
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * PRINT REPORT HEADINGS
+      *---------------------------------------------------------------
+      *
+      * RESET THE CURRENT LINE TO ZERO
+      * PRINT THE HEADING LINE
+      * INCREMENT THE CURRENT LINE
+      *
+     C     $HDRPT        BEGSR
+      *
+     C                   Z-ADD     0             WKCURL
+     C                   EXCEPT    HDRPT
+     C                   ADD       9             WKCURL
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * WRITE ERROR MESSAGES TO REPORT
+      *---------------------------------------------------------------
+      *
+     C     $WRMSG        BEGSR
+      *
+      * IF OVERFLOW, PRINT REPORT HEADINGS
+      *
+     C     WKCURL        IFGT      WKOVFL
+     C                   EXSR      $HDRPT
+     C                   ENDIF
+      *
+      * PROGRAM UT80046 DOES NOT PRINT HEADINGS OR CHECK FOR PAGE
+      * BREAKS.  BEFORE CALLING UT80046, DETERMINE IF ALL THE ERROR
+      * MESSAGES CAN BE PRINTED ON THE CURRENT PAGE.
+      * CALCULATE REMAINING PRINT LINES ON PAGE USING THE OVERFLOW LINE
+      * AND THE CURRENT LINE.
+      *
+     C     WKOVFL        SUB       WKCURL        WKDIFL
+      *
+      * IF YOU HAVE MORE MESSAGES THAN WILL FIT ON THE PAGE, THEN
+      * PAGE BREAK AND PRINT HEADINGS.
+      *
+     C     ERROR         IFGT      WKDIFL
+     C                   EXSR      $HDRPT
+     C                   ENDIF
+      *
+      * INCREMENT THE CURRENT LINE BY THE NUMBER OF ERROR MESSAGES
+      * YOU WILL BE PRINTING IN UT80046 PLUS ONE FOR THE SPACE AFTER.
+      * THIS SETS THE CURRENT LINE NUMBER PROPERLY FOR WHEN YOU
+      * RETURN FROM UT80046.
+      *
+     C     WKCURL        ADD       ERROR         WKCURL
+     C                   ADD       1             WKCURL
+      *
+     C                   CALL      'UT80046'                            43
+     C                   PARM                    MGID
+     C                   PARM                    MGDT
+     C                   PARM                    ERROR
+     C                   PARM      MSGFIL        MSGFL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * CLEAR MESSAGES
+      *----------------------------------------------------------------
+      *
+     C     $CLMSG        BEGSR
+      *
+     C                   CALL      'UT80046'                            43
+     C                   PARM      *BLANKS       MGI
+     C                   PARM      *BLANKS       MGD
+     C                   PARM      *ZEROS        ERROR
+     C                   PARM      MSGFIL        MSGFL
+      *
+     C                   ENDSR
+      *
+      /EJECT
+      *----------------------------------------------------------------
+      * PRINT FEED DETAIL LINE
+      *----------------------------------------------------------------
+      *
+     C     $PRNT1        BEGSR
+      *
+      * CONVERT TICKET DATE TO MDY
+      *
+     C     *iso          test(d)                 fdtkdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C                   move      fdtkdt        wkisodate
+     c     *mdy          move      wkisodate     wktkdt
+     C                   else
+     C                   z-add     0             wktkdt
+     C                   endif                                                  If OK date
+      *
+      * CONVERT REFERENCE TICKET DATE TO MDY
+      *
+     C     *iso          test(d)                 fdrtdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C                   move      fdrtdt        wkisodate
+     C     *mdy          move      wkisodate     wkrtdt
+     C                   else
+     C                   z-add     0             wkrtdt
+     C                   endif                                                  If OK date
+      *
+      * ALWAYS RETRIEVE THE ALPHA HOG GROUP CODE
+      *
+     C     FDHGSN        CHAIN     HGREC                              84
+     C     *IN84         IFEQ      *OFF                                         IF FOUND
+     C                   MOVEL     HGHGCD        WKHGCD
+     C                   ELSE
+     C                   MOVE      *BLANK        WKHGCD
+     C                   ENDIF                                                  IF FOUND
+      *
+      * CALCULATE TOTAL COST DOLLARS FOR PRINTING
+      *
+     C     WKINAM        ADD       WKMDAM        WKCOAM
+     C     WKCOAM        ADD       WKMFAM        WKCOAM
+      *
+      * CALCULATE THE COST PER POUND FOR PRINTING
+      *
+     C                   Z-ADD     0             WKCLRT
+     C     FDFDLB        IFNE      0
+     C     WKCOAM        DIV(H)    FDFDLB        WKCLRT
+     C                   ENDIF
+      *
+      * IF OVERFLOW, PRINT REPORT HEADINGS
+      *
+     C     WKCURL        IFGT      WKOVFL
+     C                   EXSR      $HDRPT
+     C                   ENDIF
+      *
+     C                   EXCEPT    DTCOST
+     C                   ADD       1             WKCURL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * UPDATE FEED DETAIL RECORD
+      *----------------------------------------------------------------
+      *
+     C     $UPDFD        BEGSR
+      *
+     C                   Z-ADD     WKINAM        FDINAM
+     C                   Z-ADD     WKMDAM        FDMDAM
+     C                   Z-ADD     WKMFAM        FDMFAM
+     C                   Z-ADD     WKMCDT        FDMCDT
+     C                   Z-ADD     WKRCDT        FDRCDT
+     C                   UPDATE    FDREC
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * UPDATE FEED TICKET HEADER
+      *----------------------------------------------------------------
+      *
+     C     $UPDFH        BEGSR
+      *
+     C                   MOVEL     'CO'          FHTSCD
+     C                   MOVEL     *DATE         FHCODT
+     C                   z-add     wktm          fhcotm
+     C                   move      sdusr         fhcousr
+      *
+     C                   UPDATE    FHREC
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * INITIALIZATION SUBROUTINE
+      *---------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      * KEY FOR RATION ADDITIVE COST FILE
+      *
+     C     K1P029        KLIST
+     C                   KFLD                    LDFMBO
+     C                   KFLD                    FDRNCD
+     C                   KFLD                    FDADCD
+      *
+      * KEY FOR RATION ADDITIVE COST FILE
+      *
+     C     K2P029        KLIST
+     C                   KFLD                    LDFMBO
+     C                   KFLD                    FDRNCD
+     C                   KFLD                    FDADCD
+     C                   KFLD                    FDRTDT
+      *
+      * KEY FOR FEED TICKET DETAIL FILE
+      *
+     C     K3P038        KLIST
+     C                   KFLD                    LDFMBO
+     C                   KFLD                    FHTKNO
+     C                   KFLD                    FHTRCD
+      *
+      * KEY FOR MANUFACTURING COST FILE
+      *
+     C     K4P030        KLIST
+     C                   KFLD                    LDFMBO
+     C                   KFLD                    FDFTCD
+      *
+      * KEY FOR MANUFACTURING COST FILE
+      *
+     C     K5P030        KLIST
+     C                   KFLD                    LDFMBO
+     C                   KFLD                    FDFTCD
+     C                   KFLD                    FDRTDT
+      *
+      * KEY FOR FEED TICKET DETAIL
+      *
+     C     K6L038        KLIST
+     C                   KFLD                    LDFMBO
+     C                   KFLD                    FDRTNO
+     C                   KFLD                    FDBNCD
+     C                   KFLD                    FDRNCD
+     C                   KFLD                    FDADCD
+      *
+      * KEY FOR FEED TICKET HEADER
+      *
+     C     K8L037        KLIST
+     C                   KFLD                    LDFMBO
+     C                   KFLD                    FHRTNO
+     C                   KFLD                    WKTRCD
+      *
+      * COUNTERS
+     C                   Z-ADD     0             WKEDIT            5 0
+     C                   Z-ADD     0             WKCOST            5 0
+     C                   Z-ADD     0             WKERR             5 0
+      *
+      * WORKFIELD
+      *
+     C     *LIKE         DEFINE    FHTRCD        WKTRCD
+     C                   MOVEL     'D'           WKTRCD
+      *
+      * ACCUMULATORS AND PRINT FIELDS
+      *
+     C     *LIKE         DEFINE    HGHGCD        WKHGCD
+     C     *LIKE         DEFINE    WKMDY         WKTKDT
+     C     *LIKE         DEFINE    WKMDY         WKRTDT
+     C     *LIKE         DEFINE    RCRCDT        WKRCDT
+     C     *LIKE         DEFINE    MCMCDT        WKMCDT
+      *
+     C                   Z-ADD     0             WKFLRT            7 6
+     C                   Z-ADD     0             WKMLRT            7 6
+     C                   Z-ADD     0             WKILRT            7 6
+      *
+     C     *LIKE         DEFINE    FDINAM        WKINAM
+     C     *LIKE         DEFINE    FDMFAM        WKMFAM
+     C     *LIKE         DEFINE    FDMDAM        WKMDAM
+     C                   Z-ADD     0             WKCOAM            9 2
+     C                   Z-ADD     0             WKCLRT            6 4
+     C     *LIKE         DEFINE    FDFDLB        WKFDLB
+      *
+      *  ERROR FLAGS
+     C                   MOVEL     NO            FHERFL            1
+     C                   MOVEL     NO            FDERFL            1
+      *
+      *  PROCESSING FLAGS
+     C                   MOVEL     NO            PRTFLG            1
+     C                   MOVEL     YES           FIRST             1
+      *
+      * SET UP HEADING UNDERLINE FIELD FOR PRINT
+      * RETRIEVE TIME FOR REPORT HEADING
+      * DETERMINE IF REPORT TYPE IS EDIT OR FINAL
+      *
+     C                   MOVE      *ALL'-'       DASH            132
+     C                   TIME                    RTIME             6 0
+     C                   time                    wktm
+      *
+     C     LDEFFL        IFEQ      'F'
+     C                   MOVEL     'FINAL'       OPTION            5
+     C                   ELSE
+     C                   MOVEL     ' EDIT'       OPTION
+     C                   ENDIF
+      *
+      * DEFINE WORK FIELDS USED IN CONTROLLING LINE COUNTS FOR
+      * PRINTING SINCE DETAIL LINES ARE PRINTED FROM THIS RPG PROGRAM
+      * AND ERROR MESSAGES ARE PRINTED FROM CLP UT80046.
+      *
+     C                   Z-ADD     0             WKDIFL            3 0          LINES LEFT
+     C                   Z-ADD     62            WKOVFL            3 0          OVERFLOW LIN
+     C                   Z-ADD     0             WKCURL            3 0          CURRENT LINE
+      *
+      * MESSAGE PARMS
+     C                   MOVE      *BLANK        MSGFL            10            MESSAGE FILE
+     C                   Z-ADD     20            MAXMSG            2 0
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------
+      * REPORT HEADING LINES
+      *-------------------------------------------------------------
+      *
+     OQPRINT    E            HDRPT          1 01
+     O                       SDPGM               10
+     O                                           77 'HOG PRODUCTION SYSTEM'
+     O                                          122 'DATE'
+     O                       UMONTH             126
+     O                                          127 '/'
+     O                       UDAY               129
+     O                                          130 '/'
+     O                       UYEAR              132
+      *
+     O          E            HDRPT          1
+     O                       SDUSR               10
+     O                                           77 'FEED TICKET COSTING REP'
+     O                                           80 'ORT'
+     O                                          122 'TIME'
+     O                       RTIME              132 '  :  :  '
+      *
+     O          E            HDRPT          1
+     O                       OPTION              57
+     O                                           79 'THROUGH CUT-OFF DATE:'
+     O                       LDMDY         Y     88
+     O                                          122 'PAGE'
+     O                       PAGE          Z    132
+      *
+     O          E            HDRPT          2
+     O                                           16 'BUSINESS OFFICE:'
+     O                       LDFMBO              23
+     O                       LDBODS              55
+      *
+      *
+     O          E            HDRPT          1
+     O                                           16 'TICKET TICKET'
+     O                                           22 'FARM'
+P405 O**                                         38 'PR'
+P405 O                                           39 'PR'
+P405 O**                                         41 'TR'
+P405 O                                           42 'TR'
+P405 O**                                         48 'REFER'
+P405 O                                           51 'REFER'
+P405 O**                                         56 'REFER'
+P405 O                                           58 'REFER'
+P405 O**                                         65 'RATION/'
+P405 O                                           66 'RATION/'
+     O                                           89 'INGREDIENT'
+     O                                          100 'MANUFACTUR'
+     O                                          111 'MEDICATION'
+     O                                          122 'TOTAL FEED'
+     O                                          132 'COST PER'
+      *
+     O          E            HDRPT          1
+     O                                           15 'NUMBER  DATE'
+     O                                           22 'SITE'
+     O                                           26 'BIN'
+P405 O**                                         34 'GROUP'
+P405 O                                           35 'GROUP'
+P405 O**                                         38 'YN'
+P405 O                                           39 'YN'
+P405 O**                                         41 'CD'
+P405 O                                           42 'CD'
+P405 O**                                         48 'TICKET'
+P405 O                                           51 'TICKET'
+P405 O**                                         56 'DATE'
+P405 O                                           57 'DATE'
+P405 O**                                         66 'ADDITIVE'
+P405 O                                           67 'ADDITIVE'
+P405 O**                                         77 'POUNDS'
+P405 O                                           78 'POUNDS'
+     O                                           89 'AMOUNT'
+     O                                          111 'AMOUNT     AMOUNT'
+     O                                          120 'COST'
+     O                                          131 'POUND'
+      *
+     O          E            HDRPT          1
+     O                       DASH               132
+      *
+      *-------------------------------------------------------------
+      * FEED TICKET DETAIL LINE
+      *-------------------------------------------------------------
+      *
+     O          E            DTCOST      1
+     O                       FDTKNO        Z      9
+     O                       WKTKDT        Z     16
+     O                       FDFSCD        M     23
+P405 O**                     FDBNCD              28
+P405 O                       FDBNCD              29
+P405 O**                     WKHGCD              36
+P405 O                       WKHGCD              37
+P405 O**                     FHPRFL              38
+P405 O                       FHPRFL              39
+P405 O**                     FDTRCD              40
+P405 O                       FDTRCD              41
+P405 O**                     FDRTNO        Z     48
+P405 O                       FDRTNO        Z     51
+P405 O**                     WKRTDT        Y     57
+P405 O                       WKRTDT        Z     58
+P405 O**                     FDRNCD              63
+P405 O                       FDRNCD              64
+P405 O**                                         64 '/'
+P405 O                                           65 '/'
+P405 O**                     FDADCD              69
+P405 O                       FDADCD              70
+P405 O**                     FDFDLB        m     78
+P405 O                       FDFDLB        m     79
+     O                       WKINAM        m     90
+     O                       WKMFAM        m    101
+     O                       WKMDAM        m    112
+     O                       WKCOAM        m    123
+     O                       WKCLRT        K    132
+      *
+      *-------------------------------------------------------------
+      * REPORT COUNTS
+      *-------------------------------------------------------------
+      *
+     O          E            RPTTOT      2  1
+     O                                           13 'TOTAL EDITED:'
+     O                       WKEDIT        Z     21
+      *
+     O          E            RPTTOT         1
+     O                                           13 'TOTAL COSTED:'
+     O                       WKCOST        Z     21
+      *
+     O          E            RPTTOT         1
+     O                                           13 'TOTAL ERRORS:'
+     O                       WKERR         Z     21
+      *
+      *-------------------------------------------------------------
+      * NO DATA MESSAGE LINE
+      *-------------------------------------------------------------
+      *
+     O          E            NODATA      1
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'

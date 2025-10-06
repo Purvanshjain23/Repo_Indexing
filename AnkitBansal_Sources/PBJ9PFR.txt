@@ -1,0 +1,1115 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * SYSTEM:      OMS Development Model
+      * PROGRAM:     PBJ9PFR
+      * TITLE:       Prt Warehouse Inventory-Aged on Production Date
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     09/19/13
+      *
+      *
+      * FUNCTION:  Batch program to print an Aged Iventory by Warehouse.
+      *            Aging is based on the Production Date...that is not the date
+      *            that the existing Aged Inventory Report uses.
+      *            This program is called from CLP PBKACLP which is submitted
+      *            from PBJ8PVR.
+      *
+      *            The LDA is used to pass the user's report selections.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/27/13  LeAnne Ramsey (C2900)
+      *           Abend with "target for a numeric operation too small to hold results".
+      *           Field WKTNUM (3,0) was not large enough when Dewey W. selected 360
+      *           days as the Aging Days.
+      *
+      * 12/12/13  LeAnne Ramsey (E2937)
+      *           We added an additional selection for Dewey: 'Only print Items that
+      *           have an Available to Sell Qty'. He will run this version to give to
+      *           the Salesmen. We will also hide the Total Qty, Open Order Qty and
+      *           Hold Qty on this Salesmen verion...so, they won't get so confused!
+      *
+      * 01/03/14  LeAnne Ramsey (E2937)
+      *           With the change of 12/12/13, we began to retrieve Open Order Qty from
+      *           POB5CPP-Order Detail Schedule Inventory. This worked fine except for
+      *           Items set up as "Plan Production Status-No"...which did not have
+      *           records in this file. So, we are reverting back to the Open Order
+      *           Detail file.
+      *
+      * 01/21/14  LeAnne Ramsey (E2981)
+      *           Added an additional selection for Dewey W. Now, he can
+      *           elect to only print a Summary Page. Added logic to create/print
+      *           the summary page; Lara Buser helped me create the workfile for this.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fombyrel1  if   e           k disk
+      *    Item default
+      *
+      *
+     Fcaadrel1  if   e           k disk
+      *    Warehouse
+      *
+      *
+     Fcab0rel6  if   e           k disk
+      *    Item balance
+      *    (Records selected in open query; we use this file as the driver.)
+      *
+      *
+     Fcab1rel1  if   e           k disk
+      *    Item balance detail
+      *    (Records selected in open query)
+      *    (We use this file when a Warehouse has Lot Tracking = NO)
+      *
+      *
+     Fopbgwklt  if   e           k disk
+      *    Order detail
+      *
+      *
+     Fpdl5cpl1  if   e           k disk
+      *    Item lot location
+      *    (Records selected in open query)
+      *    (We use this file when a Warehouse has Lot Tracking = YES)
+      *
+      *
+     Fpbbgcpl0  uf a e           k disk
+      *    Workfile: Warehouse inventory summary
+      *    (Used to accumulate the totals by Warehouse for the Summary Page)
+      *
+      *
+     Fprint198  o    f  198        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+     D arhdtx          s             11    dim(8)
+     D arhdbdt         s              6  0 dim(8)
+     D arhdedt         s              6  0 dim(8)
+     D arenddt         s              7  0 dim(8)  descend
+     D arqt            s              9  2 dim(8)
+     D artotqt         s              9  2 dim(8)
+     D arsumqt         s              9  2 dim(8)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D dash            s            198    inz(*all'-')
+     D dash23          s             23    inz(*all'-')
+     D dash24          s             24    inz(*all'-')
+     d rtime           s              6  0
+      *
+      *
+      * Array Indexes
+     D x               s              3  0
+     D y               s              3  0
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D procfl          s              1    inz('Y')
+     D whscount        s              3  0
+      *
+     D svitcd          s                   like(b1hgcd)
+     D svwhcd          s                   like(b0ajcd)
+      *
+      *
+      * Workfields
+     D wkfnum          s              5  0
+     D wktnum          s              5  0
+     D wkfalph         s              5
+     D wktalph         s              5
+     D wkeldt          s                   like(b1eldt)
+     D wkarqt          s                   like(b1arqt)
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodt         s               D   datfmt(*iso)
+      *
+      *
+      * Print fields
+      *
+      * Report headings
+     D h1agcoltx       s             58
+     D h1soflds        s             27
+     D h1selomit       s              9
+     D h1ynds          s              3
+      *
+      * Detail line for Item/Warehouse
+     D l1itds          s             18
+     D l1holdqt        s              9  2
+     D l1openqt        s              9  2
+     D l1totqt         s              9  2
+     D l1varqt         s              9  2
+      *
+      * Total line for Item
+     D t1holdqt        s              9  2
+     D t1openqt        s              9  2
+     D t1totqt         s              9  2
+     D t1varqt         s              9  2
+      *
+     D t2totqt         s              9  2
+     D t2varqt         s              9  2
+     D t2openqt        s              9  2
+     D t2holdqt        s              9  2
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+      *
+     d  ldwhtycd               1      2
+     D  ldfmdy                 3      8  0
+     D  ldtmdy                 9     14  0
+     D  ldfcymd               15     21  0
+     D  ldtcymd               22     28  0
+     D  ldage                 29     31  0
+     D  ldfitcd               32     38  0
+     D  ldfitds               39     68
+      *
+     D  ldsofl                69     69
+      *
+     D  ldwhcd1               70     72
+     D  ldwhds1               73    102
+      *
+     D  ldwhcd2              103    105
+     D  ldwhds2              106    135
+      *
+     D  ldwhcd3              136    138
+     D  ldwhds3              139    168
+      *
+     D  ldwhcd4              169    171
+     D  ldwhds4              172    201
+      *
+     D  ldwhcd5              202    204
+     D  ldwhds5              205    234
+      *
+     D  ldwhcd6              235    237
+     D  ldwhds6              238    267
+      *
+     D  ldtitcd              268    274  0
+     D  ldtitds              275    304
+      *
+     D  ldyn                 305    305
+     D  ldsumyn              306    306
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *****************************************************************************************
+      * Main Line
+      *****************************************************************************************
+      *
+      * Read each record selected by the open query from the Item Balance file.
+      * (Open query selects only records with a Quantity on Hand.)
+      *
+     C     *loval        setll     cab0rel6
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      cab0rel6                               90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Check Warehouse against User's selections
+      *
+     C                   move      yes           procfl
+     C                   exsr      $chkwhs
+     C                   if        procfl = yes                                 If process
+      * Control breaks
+     C                   select
+     C                   when      first = yes
+     C                   exsr      $first
+      *
+     C                   when      b0hgcd <> svitcd
+     C                   exsr      $l1dtl
+     C                   exsr      $t1tot
+      *
+     C                   when      b0ajcd <> svwhcd
+     C                   exsr      $l1dtl
+     C                   endsl
+      *
+      * Warehouse Detail
+     C                   exsr      $detail
+     C                   endif                                                  If process
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *---------------
+      * EOF processing
+      *---------------
+      * If you had no data, print the standard 'no data...' message
+      *
+     C                   if        first = yes                                  If no data
+     C                   except    h1hdr
+     C                   except    nodata
+     C                   else
+      *
+      * Print detail line for the last Item.
+      * Print the Total Line if the user didn't elect the Summary Page only.
+      *
+     C                   exsr      $l1dtl
+     C                   if        ldsumyn = no
+     C                   exsr      $t1tot
+     C                   endif
+      *
+      * Print Summary Page
+     C                   exsr      $summary
+     C                   endif                                                  If no data
+      *
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * Check Warehouse against User's Selections
+      *---------------------------------------------------------------
+      *
+      * Retrieve the Warehouse Type and Lot Tracking Flag values
+      * from the Warehouse Master. Exclude all Inactive warehouses.
+      * Include only warehouses that match the User's Warehouse Type.
+      * Check for User's Select/Omit warehouses.
+      *
+     C     $chkwhs       begsr
+      *
+     C     b0ajcd        chain     caadrel1                           92
+     C                   select
+     C                   when      *in92 = *on or advsst = 'I'
+     C                   move      no            procfl
+      *
+     C                   when      adwpst <> ldwhtycd
+     C                   move      no            procfl
+      *
+     C                   when      ldsofl = 'S' and
+     C                                      (b0ajcd <> ldwhcd1 and
+     C                                       b0ajcd <> ldwhcd2 and
+     C                                       b0ajcd <> ldwhcd3 and
+     C                                       b0ajcd <> ldwhcd4 and
+     C                                       b0ajcd <> ldwhcd5 and
+     C                                       b0ajcd <> ldwhcd6)
+     C                   move      no            procfl
+      *
+     C                   when      ldsofl = 'O' and
+     C                                      (b0ajcd = ldwhcd1 or
+     C                                       b0ajcd = ldwhcd2 or
+     C                                       b0ajcd = ldwhcd3 or
+     C                                       b0ajcd = ldwhcd4 or
+     C                                       b0ajcd = ldwhcd5 or
+     C                                       b0ajcd = ldwhcd6)
+     C                   move      no            procfl
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Detail processing
+      *---------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+      * Retrieve On-Hand Quantity and put into Aging Column Array
+      *      The retrieval file depends on Warehouse Lot Tracking:
+      *         Item Balance Detail (when lot tracking is NO)
+      *         Item Lot Location   (when lot tracking is YES)
+      *
+     C                   select
+     C                   when      advhst = no
+     C                   exsr      $baldtl
+     C                   other
+     C                   exsr      $lotdtl
+     C                   endsl
+      *
+     C                   xfoot     arqt          l1totqt
+      *
+      * If you had any On-Hand Quantity (for the users's Production Date
+      * range, retrieve Open Orders and calc the variance.
+      *
+     C                   if        l1totqt > 0
+     C                   exsr      $open
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Get On-Hand Quantity from the Item Balance Detail file
+      *---------------------------------------------------------------
+      * Note: You are here when Lot Tracking for the Warehouse is NO
+      *       NOTE: We do not have an 'On Hold' qty when Lot Tracking
+      *             is NO....we just don't store/keep it anywhere to go get.
+      *
+     C     $baldtl       begsr
+      *
+     C     key01         setll     cab1rel1
+      *
+     C                   dou       *in91 = *on                                  Do dtl loop
+     C     key01         reade     cab1rel1                               91
+     C                   if        *in91 = *off
+     C                   z-add     b1eldt        wkeldt
+     C                   z-add     b1arqt        wkarqt
+     C                   exsr      $accum
+     C                   endif
+     C                   enddo                                                  Do dtl loop
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Get On-Hand Quantity from the Item Lot Location file
+      *---------------------------------------------------------------
+      * Note: You are here when Lot Tracking for the Warehouse is YES
+      *
+     C     $lotdtl       begsr
+      *
+     C     key01         setll     pdl5cpl1
+      *
+     C                   dou       *in91 = *on                                  Do lot loop
+     C     key01         reade     pdl5cpl1                               91
+     c                   if        *in91 = *off                                 If not eof
+      *
+      * When the Inventory Hold Reason Code is blank, accumulate
+      * the On-Hand Quantity into the appropriate Aging Column.
+      * If it is not blank, add the qty to the Hold Column.
+      *
+     C                   if        l5yscd = *blank
+     C                   z-add     l5eldt        wkeldt
+     C                   z-add     l5j2qt        wkarqt
+     C                   exsr      $accum
+     C                   else
+     C                   add       l5j2qt        l1holdqt
+     C                   endif
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do lot loop
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Accumulate On-Hand Quantity into Aging Columns
+      *---------------------------------------------------------------
+      *
+     C     $accum        begsr
+      *
+      * Bulk Items will not have a Production Date. So, we will plop them
+      * into Column 8...the oldest column.
+      *
+     C                   select
+     C                   when      wkeldt = 0
+     C                   add       wkarqt        arqt(8)
+     C                   other
+      * Find aging column
+     C                   z-add     1             x
+     C     wkeldt        lookup    arenddt(x)                           9292
+     C                   if        *in92 = *on
+     C                   add       wkarqt        arqt(x)
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve Open Orders
+      *---------------------------------------------------------------
+      *
+     C     $open         begsr
+      *
+     C     key01         setll     opbgwklt
+      *
+     C                   dou       *in91 = *on                                  Do open
+     C     key01         reade     opbgwklt                               91
+     C                   if        *in91 = *off and
+     C                             (omgmst = 'H' or omgmst = 'A')
+     C                   add       omavqt        l1openqt
+     C                   endif
+     C                   enddo                                                  Do open
+      *
+      * Calc the difference (variance) between Total Quantity and Open Order
+      * quantity.
+     C                   eval      l1varqt = l1totqt - l1openqt
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve Item Description
+      *---------------------------------------------------------------
+      *
+     C     $newitem      begsr
+      *
+     C                   seton                                            83
+     C                   z-add     0             whscount
+     C                   z-add     b0hgcd        svitcd
+      *
+     C     svitcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      l1itds = byavna
+     C                   else
+     C                   eval      l1itds = 'Unknown'
+     C                   endif
+      *
+      * Clear Total fields and array
+     C                   z-add     0             artotqt
+     C                   z-add     0             t1totqt
+     C                   z-add     0             t1openqt
+     C                   z-add     0             t1holdqt
+     C                   z-add     0             t1varqt
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * New warehouse
+      *---------------------------------------------------------------
+      *
+     C     $newwhs       begsr
+      *
+     C                   move      adajcd        svwhcd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print a line for the Item/Warehouse
+      *---------------------------------------------------------------
+      *
+     C     $l1dtl        begsr
+      *
+     C                   select
+      *
+      * If the user elected to ONLY print Items that have some quantity available
+      * to sell and the Variance is not GT zero, don't print the Item.
+      *
+     C                   when      ldyn = yes and l1varqt <= 0
+      *
+      * If Total On-Hand Quantity is zero, don't print a line
+      *
+     C                   when      l1totqt = 0
+      *
+      * If the user elected to ONLY print a Summary Page, don't print a line
+      *
+     C                   when      ldsumyn = yes
+     C                   exsr      $whssum
+     C                   other
+      * Print detail
+     C                   add       arqt          artotqt
+     C                   add       l1holdqt      t1holdqt
+     C                   add       l1openqt      t1openqt
+     C                   add       l1varqt       t1varqt
+     C                   exsr      $whssum
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   except    l1dtl
+     C                   add       1             whscount
+     C                   setoff                                       83
+     C                   endsl
+      *
+      * Clear detail line fields
+      *
+     C                   exsr      $cleardtl
+      *
+      * Setup for next Warehouse
+      *
+     C                   exsr      $newwhs
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Accumulate Quantities by Warehouse for the Summary Page
+      *---------------------------------------------------------------
+      * We use a workfile (PBBGCPP) to accumulate the totals by warehouse.
+      *
+     C     $whssum       begsr
+      *
+     C     svwhcd        chain     pbbgcpl0                           92
+     C                   if        *in92 = *off
+     C                   add       l1totqt       bgzgny
+     C                   add       l1openqt      bgziny
+     C                   add       l1varqt       bgzjny
+     C                   add       l1holdqt      bgzhny
+     C                   add       arqt(1)       bgy8ny
+     C                   add       arqt(2)       bgy9ny
+     C                   add       arqt(3)       bgzany
+     C                   add       arqt(4)       bgzbny
+     C                   add       arqt(5)       bgzcny
+     C                   add       arqt(6)       bgzdny
+     C                   add       arqt(7)       bgzeny
+     C                   add       arqt(8)       bgzfny
+     C                   update    @bgcpr1
+     C                   else
+     C                   move      svwhcd        bgajcd
+     C                   z-add     l1totqt       bgzgny
+     C                   z-add     l1openqt      bgziny
+     C                   z-add     l1varqt       bgzjny
+     C                   z-add     l1holdqt      bgzhny
+     C                   z-add     arqt(1)       bgy8ny
+     C                   z-add     arqt(2)       bgy9ny
+     C                   z-add     arqt(3)       bgzany
+     C                   z-add     arqt(4)       bgzbny
+     C                   z-add     arqt(5)       bgzcny
+     C                   z-add     arqt(6)       bgzdny
+     C                   z-add     arqt(7)       bgzeny
+     C                   z-add     arqt(8)       bgzfny
+     C                   write     @bgcpr1
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Clear the Detail Line Fields
+      *---------------------------------------------------------------
+      *
+     C     $cleardtl     begsr
+      *
+     C                   z-add     0             arqt
+     C                   z-add     0             l1totqt
+     C                   z-add     0             l1holdqt
+     C                   z-add     0             l1openqt
+     C                   z-add     0             l1varqt
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print the total line for an Item
+      *---------------------------------------------------------------
+      *
+     C     $t1tot        begsr
+      *
+      * Only print a Total for the Item when you have printed a detail
+      * line for more than one warehouse.
+      *
+     C                   select
+     C                   when      whscount = 1
+     C                   except    blank
+      *
+     C                   when      whscount > 1
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   xfoot     artotqt       t1totqt
+     C                   except    t1tot
+     C                   endsl
+      *
+      * Setup for next Item
+      *
+     C                   exsr      $newitem
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Summary Page
+      *---------------------------------------------------------------
+      *
+     C     $summary      begsr
+      *
+      * Force the Summary Page to start/print on a new/separate page.
+      *
+     C                   seton                                        81
+     C                   if        ldsumyn = no
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+      * Read/print each record in the Workfile.
+      * There will be 1 record per Warehouse.
+      *
+     C     *loval        setll     pbbgcpl0
+     C                   dou       *in91 = *on                                  Do dtl loop
+     C                   read      pbbgcpl0                               91
+     C                   if        *in91 = *off
+      *
+      * Accumulate values for the Total Line on the Summary Page.
+      *
+     C                   add       bgzgny        t2totqt
+     C                   add       bgziny        t2openqt
+     C                   add       bgzjny        t2varqt
+     C                   add       bgzhny        t2holdqt
+     C                   add       bgy8ny        arsumqt(1)
+     C                   add       bgy9ny        arsumqt(2)
+     C                   add       bgzany        arsumqt(3)
+     C                   add       bgzbny        arsumqt(4)
+     C                   add       bgzcny        arsumqt(5)
+     C                   add       bgzdny        arsumqt(6)
+     C                   add       bgzeny        arsumqt(7)
+     C                   add       bgzfny        arsumqt(8)
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+     C                   except    l2dtl
+      *
+     C                   endif
+     C                   enddo                                                  Do dtl loop
+      *
+      * Print Total Line
+     C                   except    t2tot
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print report heading
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+     C                   seton                                            83
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * First time subroutine
+      *---------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+     C                   move      no            first
+      *
+      * Do setup and print headings
+      *
+     C                   exsr      $newitem
+     C                   exsr      $newwhs
+      *
+     C                   if        ldsumyn = yes
+     C                   seton                                        81
+     C                   endif
+     C                   exsr      $h1hdr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Text for Column Headings
+      *---------------------------------------------------------------
+      *
+     C     $hdtx         begsr
+      *
+      * Setup Column heading text in the Text Array.
+      *
+     C                   select
+     C                   when      ldage = 1
+     C                   eval      arhdtx(1) = '   0   '
+     C                   eval      arhdtx(2) = '   1   '
+     C                   eval      arhdtx(3) = '   2   '
+     C                   eval      arhdtx(4) = '   3   '
+     C                   eval      arhdtx(5) = '   4   '
+     C                   eval      arhdtx(6) = '   5   '
+     C                   eval      arhdtx(7) = '   6   '
+     C                   eval      arhdtx(8) = '   7   '
+     C                   other
+      *
+     C                   z-add     0             x
+     c                   do        8
+     C                   add       1             x
+     C                   eval      wkfnum = wktnum + 1
+     C                   eval      wkfalph = (%editc(wkfnum:'Z'))
+     C                   eval      wktnum = wktnum + ldage
+     C                   eval      wktalph = %triml(%editc(wktnum:'Z'))
+     C                   if        x = 8
+     C                   eval      wktalph = '-->'
+     C                   endif
+     C                   eval      arhdtx(x) = wkfalph + '-' + wktalph
+     C                   enddo
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------
+      * Dates for Column Headings (this is the Beginning Date for the column)
+      *----------------------------------------------------------------------------
+      *
+     C     $hddt         begsr
+      *
+      * The date in the first column is always the user's "To Production Date".
+      *
+     C                   z-add     ldtmdy        arhdbdt(1)
+      *
+     C                   z-add     1             x
+     C     *cymd         move      ldtcymd       wkisodt
+      *
+     c                   do        7
+     C                   add       1             x
+     C                   subdur    ldage:*d      wkisodt
+     C     *mdy          move      wkisodt       arhdbdt(x)
+     C                   enddo
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * End Dates for Aging Column logic
+      *----------------------------------------------------------------------------------
+      * We will use this array with a LOOKUP to determine which column each On-Hand
+      * Quantity should go into. And, we also want to print the MM/DD/YY version in the
+      * column headings.
+      *
+     C     $enddt        begsr
+      *
+      * We will hardcode the End Date for the last column...far in the past
+      *
+     C                   z-add     0000101       arenddt(8)
+     C                   z-add     000000        arhdedt(8)
+      *
+      * Now, for columns 1 thru 7, the End Date will be
+      * the Beginning Date for the next Column...plus 1
+      *
+     C                   z-add     0             x
+     C                   z-add     1             y
+      *
+     c                   do        7
+     C                   add       1             x
+     C                   add       1             y
+     C     *mdy          move      arhdbdt(y)    wkisodt
+     C                   adddur    1:*d          wkisodt
+     C     *cymd         move      wkisodt       arenddt(x)
+     C     *mdy          move      wkisodt       arhdedt(x)
+     C                   enddo
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    b0aic3
+     C                   kfld                    b0hgcd
+     C                   kfld                    b0ajcd
+      *
+      * Retrieve time for report heading.
+      *
+     C                   time                    rtime
+      *
+      * Set up user selections in the heading.
+      *
+     C                   if        ldfitcd <> 0
+     C                   seton                                        85
+     C                   endif
+      *
+     C                   if        ldtitcd <> 0
+     C                   seton                                        84
+     C                   endif
+      *
+     C                   select
+     C                   when      ldyn = yes
+     C                   eval      h1ynds = 'Yes'
+     C                   when      ldyn = no
+     C                   eval      h1ynds = 'No'
+     C                   endsl
+      *
+     C                   select
+     C                   when      ldsofl = ' '
+     C                   eval      h1soflds = 'All ' + ldwhtycd + ' Warehouses'
+      *
+     C                   when      ldsofl = 'S'
+     C                   eval      h1soflds = 'Only Selected Warehouses'
+     C                   eval      h1selomit = 'Selected:'
+     C                   seton                                        86
+      *
+     C                   when      ldsofl = 'O'
+     C                   eval      h1soflds = 'Excludes Omitted Warehouses'
+     C                   eval      h1selomit = 'Omitted:'
+     C                   seton                                        86
+     C                   endsl
+      *
+      * For the 8 Aging Columns, build arrays for:
+      *  text in the column headings
+      *  dates in the column headings
+      *  end dates to use for plopping the data into the correct columns
+      *
+     C                   exsr      $hdtx
+     C                   exsr      $hddt
+     C                   exsr      $enddt
+      *
+     C                   eval      h1agcoltx = 'On-Hand Inventory Quantity in +
+     C                                          these Production Date Ranges'
+      *
+      * If the user has elected to Only print Items with an Available Qty to Sell,
+      * we "hide" 3 columns (Total Qty, Open Order Qty, On-Hold Qty).
+      *
+     C                   if        ldyn = yes
+     C                   seton                                        33
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oprint198  e            h1hdr          1  1
+     O                       sdpgm               10
+     O                                          109 'Inventory Management +
+     O                                              System'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                                           99 'Warehouse Inventory---Aged'
+     O                                          118 'on Production Date'
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+     O          e            h1hdr          1
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+     O          e            h1hdr          1
+     O                                           21 'Warehouse Type . . .:'
+     O                       ldwhtycd            25
+     O                                           45 'Aging Days:'
+     O                       ldage         z     49
+     O                                          106 'Warehouses:'
+     O                       h1soflds           134
+      *
+     O          e            h1hdr          1
+     O                                           21 'From Production Date:'
+     O                       ldfmdy              31 '  /  / 0'
+      *
+     O                                           45 'From Item :'
+     O              n85                          49 'All'
+     O               85      ldfitcd       z     53
+     O               85      ldfitds             84
+      *
+     O               86      h1selomit          106
+     O               86      ldwhcd1            110
+     O               86      ldwhds1            142
+     O               86      ldwhcd4            147
+     O               86      ldwhds4            178
+      *
+      *
+     O          e            h1hdr          1
+     O                                           21 'To Production Date .:'
+     O                       ldtmdy              31 '  /  / 0'
+      *
+     O                                           45 'To Item ..:'
+     O               84      ldtitcd       z     53
+     O               84      ldtitds             84
+      *
+     O               86      ldwhcd2            110
+     O               86      ldwhds2            142
+     O               86      ldwhcd5            147
+     O               86      ldwhds5            178
+      *
+      *
+     O          e            h1hdr          2
+     O                                           52 'Only print Items with +
+     O                                              an Available to Sell +
+     O                                              quantity:'
+     O                       h1ynds              56
+     O               86      ldwhcd3            110
+     O               86      ldwhds3            142
+     O               86      ldwhcd6            147
+     O               86      ldwhds6            178
+      *
+      *-------------------------------------------------------------
+      * Column headings for Detail Pages
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr          1
+     O              n33                          43 '(No Holds)'
+     O                       dash24             100
+     O                       h1agcoltx          159
+     O                       dash23             183
+      *
+     O          e            h1hdr          1
+     O              n33                          43 'Total'
+     O              n33                          57 'Open Orders'
+     O                                           71 'Available'
+     O                       arhdtx(1)           86
+     O                       arhdtx(2)          100
+     O                       arhdtx(3)          114
+     O                       arhdtx(4)          128
+     O                       arhdtx(5)          142
+     O                       arhdtx(6)          156
+     O                       arhdtx(7)          170
+     O                       arhdtx(8)          185
+      *
+     O          e            h1hdr          1
+     O              n81                           7 'Item'
+     O                                           31 'Whs'
+     O              n33                          43 'On-Hand'
+     O              n33                          57 'Quantity'
+     O                                           71 'To Sell'
+     O                       arhdbdt(1)          85 '  /  /  '
+     O                       arhdbdt(2)          99 '  /  /  '
+     O                       arhdbdt(3)         113 '  /  /  '
+     O                       arhdbdt(4)         127 '  /  /  '
+     O                       arhdbdt(5)         141 '  /  /  '
+     O                       arhdbdt(6)         155 '  /  /  '
+     O                       arhdbdt(7)         169 '  /  /  '
+     O                       arhdbdt(8)         183 '  /  /  '
+     O              n33                         197 'On-Hold'
+      *
+     O          e            h1hdr          1
+     O              n81                           7 'Code'
+     O              n81                          19 'Description'
+     O               81                          12 'SUMMARY PAGE'
+     O                                           31 'Cde'
+     O              n33                          43 'Quantity'
+     O              n33                          46 '-'
+     O              n33                          57 'Ordered'
+     O              n33                          60 '='
+     O                                           71 'Quantity'
+     O                       arhdedt(1)          85 '  /  /  '
+     O                       arhdedt(2)          99 '  /  /  '
+     O                       arhdedt(3)         113 '  /  /  '
+     O                       arhdedt(4)         127 '  /  /  '
+     O                       arhdedt(5)         141 '  /  /  '
+     O                       arhdedt(6)         155 '  /  /  '
+     O                       arhdedt(7)         169 '  /  /  '
+     O                       arhdedt(8)         183 '  /  /  '
+     O              n33                         197 'Quantity'
+      *
+     O          e            h1hdr          1
+     O                       dash               198
+      *
+      *-------------------------------------------------------------
+      * Detail line for Item
+      *-------------------------------------------------------------
+      *
+     o          e            l1dtl          1
+     O               83      svitcd        z      7
+     O               83      l1itds              26
+     O                       svwhcd              31
+     O              n33      l1totqt       kb    44
+     O              n33      l1openqt      kb    58
+     O                       l1varqt       kb    72
+     O                       arqt (1)      kb    86
+     O                       arqt (2)      kb   100
+     O                       arqt (3)      kb   114
+     O                       arqt (4)      kb   128
+     O                       arqt (5)      kb   142
+     O                       arqt (6)      kb   156
+     O                       arqt (7)      kb   170
+     O                       arqt (8)      kb   184
+     O              n33      l1holdqt      kb   198
+      *
+      *-------------------------------------------------------------
+      * Detail line for Summary Page (warehouse)
+      *-------------------------------------------------------------
+      *
+     o          e            l2dtl          1
+     O                       bgajcd              31
+     O              n33      bgzgny        k     44
+     O              n33      bgziny        k     58
+     O                       bgzjny        k     72
+     O                       bgy8ny        k     86
+     O                       bgy9ny        k    100
+     O                       bgzany        k    114
+     O                       bgzbny        k    128
+     O                       bgzcny        k    142
+     O                       bgzdny        k    156
+     O                       bgzeny        k    170
+     O                       bgzfny        k    184
+     O              n33      bgzhny        k    198
+      *
+      *-------------------------------------------------------------
+      * Total lines for Section showing Items
+      *-------------------------------------------------------------
+      *
+     O          e            t1tot          1
+     O              n33                          43 '-----------'
+     O              n33                          57 '------------'
+     O                                           71 '------------'
+     O                                           85 '------------'
+     O                                           99 '------------'
+     O                                          113 '------------'
+     O                                          127 '------------'
+     O                                          141 '------------'
+     O                                          155 '------------'
+     O                                          169 '------------'
+     O                                          183 '------------'
+     O              n33                         197 '------------'
+      *
+     O          e            t1tot          2
+     O              n33      t1totqt       k     44
+     O              n33      t1openqt      k     58
+     O                       t1varqt       k     72
+     O                       artotqt(1)    k     86
+     O                       artotqt(2)    k    100
+     O                       artotqt(3)    k    114
+     O                       artotqt(4)    k    128
+     O                       artotqt(5)    k    142
+     O                       artotqt(6)    k    156
+     O                       artotqt(7)    k    170
+     O                       artotqt(8)    k    184
+     O              n33      t1holdqt      k    198
+      *
+      *-------------------------------------------------------------
+      * Total lines for Summary Page
+      *-------------------------------------------------------------
+      *
+     O          e            t2tot          1
+     O              n33                          43 '-----------'
+     O              n33                          57 '------------'
+     O                                           71 '------------'
+     O                                           85 '------------'
+     O                                           99 '------------'
+     O                                          113 '------------'
+     O                                          127 '------------'
+     O                                          141 '------------'
+     O                                          155 '------------'
+     O                                          169 '------------'
+     O                                          183 '------------'
+     O              n33                         197 '------------'
+      *
+     O          e            t2tot          2
+     O              n33      t2totqt       k     44
+     O              n33      t2openqt      k     58
+     O                       t2varqt       k     72
+     O                       arsumqt(1)    k     86
+     O                       arsumqt(2)    k    100
+     O                       arsumqt(3)    k    114
+     O                       arsumqt(4)    k    128
+     O                       arsumqt(5)    k    142
+     O                       arsumqt(6)    k    156
+     O                       arsumqt(7)    k    170
+     O                       arsumqt(8)    k    184
+     O              n33      t2holdqt      k    198
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank       1
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata      1
+     O                                           19 'No data meets your'
+     O                                           39 'selection criteria.'

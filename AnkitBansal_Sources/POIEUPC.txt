@@ -1,0 +1,164 @@
+/*********************************************************************/
+/*     Program: PDIEUPC                                              */
+/*       Title: VALIDATE LOCKBOX TRANSMISSION FILE                   */
+/*        Date: 09/13/00                                             */
+/* PROGRAMMER : PURVA DROGE                                          */
+/* Description: - Called by PC Auto Scheduler after it retrieves     */
+/*                the lockbox file from the NationsBank bulletin bd  */
+/*              - Validates the incoming date for accuracy and       */
+/*                successful transmission.                           */
+/*              - CREATE A NEW MEMBER IN THE NBLCKBOX FILE FOR THE   */
+/*                DEPOSIT DATE.                                      */
+/*********************************************************************/
+/* Modifications:                                                    */
+/*                                                                   */
+/*   Date     Pgmr     Description                                   */
+/* -------- ---------- --------------------------------------------  */
+/*  08/15/02 RMC       USE SNDPGRMSG A LIEU SNDDST                   */
+/*********************************************************************/
+             PGM
+/*--*----------------------------------------------------------------*/
+/* DECLARE VARIABLES                                                 */
+/*-------------------------------------------------------------------*/
+             DCL        VAR(&JOBD) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&LIBL) TYPE(*CHAR) LEN(275)
+             DCL        VAR(&RECS) TYPE(*DEC) LEN(10 0)
+             DCL        VAR(&MSG) TYPE(*CHAR) LEN(132)
+             DCL        VAR(&DEPDTE) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&MM) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&DD) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&YY) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&CHKS) TYPE(*CHAR) LEN(132)
+             DCL        VAR(&DEPAMT) TYPE(*CHAR) LEN(11)
+             DCL        VAR(&DEPAMTNBR) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&DEPAMTDEC) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&MMDDYY) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&CYYMMDD) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&MBR) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&CO) TYPE(*DEC) LEN(3 0) VALUE(360)
+             DCL        VAR(&LCKBOX) TYPE(*DEC) LEN(7 0) VALUE(844853)
+             DCL        VAR(&RCDSTS) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&DATE) TYPE(*DEC) LEN(7 0)
+
+             DCLF       FILE(NBLCKBOX)
+
+/*--*----------------------------------------------------------------*/
+/* INITIALIZE                                                        */
+/*-------------------------------------------------------------------*/
+             CPYF       FROMFILE(NBLCKBOX) TOFILE(QTEMP/QNBLCKBOX) +
+                          MBROPT(*ADD) CRTFILE(*YES)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CPYF1))
+             OVRDBF     FILE(NBLCKBOX) TOFILE(QTEMP/QNBLCKBOX) +
+                          MBR(*FIRST)
+
+/*--*----------------------------------------------------------------*/
+/* MAINLINE                                                          */
+/*-------------------------------------------------------------------*/
+/* DELETE ALL RECORDS IN THE QTEMP FILE EXCEPT FOR RECORD TYPE 8 */
+             DELETE SQL('FROM QNBLCKBOX WHERE SUBSTR(TRANS,1,1)<>"8"')
+
+/* CHECK IF RECORD TYPE 8 RECORD EXIST IN THE QTEMP FILE */
+             RTVMBRD    FILE(QNBLCKBOX) NBRCURRCD(&RECS)
+
+/* IF RECORDS DO NOT EXIST THEN THE FILE WAS NOT RECEIVED SUCCESSFULLY */
+             IF   COND(&RECS *EQ 0) THEN(DO)
+                 CHGVAR     VAR(&MSG) VALUE('Nations Bank Lock Box:  +
+                          RECEIVED with no TOTALS ***ERROR***.')
+ /*              SNDDST     TYPE(*MSG) TOUSRID((PRKLCKBX BIGBYTE)) +
+                          DSTD('Pork Lock Box') MSG(&MSG)          */
+             SNDPGRMSG  TOPGR(PRKLCKBX) MSG(&MSG) CONFMSG(*NO)
+                 ENDDO
+/* IF RECORDS DO EXIST THEN CREATE A NEW MBMBER FOR DEPOSIT DATE AND SEND */
+/* SUCCESSFUL COMPLETION MESSAGE                                          */
+             ELSE (DO)
+                 RCVF
+                 CHGVAR     VAR(&YY) VALUE(%SST(&TRANS 15 2))
+                 CHGVAR     VAR(&MM) VALUE(%SST(&TRANS 17 2))
+                 CHGVAR     VAR(&DD) VALUE(%SST(&TRANS 19 2))
+                 CHGVAR     VAR(&DEPDTE) VALUE(&MM *CAT '/' *CAT &DD +
+                            *CAT '/' *CAT &YY)
+                 CHGVAR     VAR(&CHKS) VALUE(%SST(&TRANS 21 4))
+                 CHGVAR     VAR(&DEPAMTNBR) VALUE(%SST(&TRANS 25 8))
+                 CHGVAR     VAR(&DEPAMTDEC) VALUE(%SST(&TRANS 33 2))
+                 CHGVAR     VAR(&DEPAMT) VALUE(&DEPAMTNBR *CAT '.' *CAT +
+                            &DEPAMTDEC)
+
+                 DLTOVR     FILE(*ALL)
+
+/* CREATE MEMBER FOR DEPOSIT DATE */
+                 CHGVAR     VAR(&MMDDYY) VALUE(&MM *CAT &DD *CAT &YY)
+                 CVTDAT     DATE(&MMDDYY) TOVAR(&CYYMMDD) FROMFMT(*MDY) +
+                            TOFMT(*CYMD) TOSEP(*NONE)
+                 CHGVAR     VAR(&MBR) VALUE('Z' *CAT &CYYMMDD)
+
+/* CHECK IF LOCKBOX DEPOSIT ALREADY EXISTS */
+                 CHGVAR     VAR(&DATE) VALUE(&CYYMMDD)
+                 CALL       PGM(POIIXFR) PARM(' ' &CO &LCKBOX &DATE +
+                          &RCDSTS)
+                 IF   COND(&RCDSTS *EQ 'Y') THEN(GOTO CMDLBL(DUPDEP))
+
+ADDPFM:          ADDPFM     FILE(NBLCKBOX) MBR(&MBR)
+                 MONMSG     MSGID(CPF7306) EXEC(DO)
+                    RMVM       FILE(NBLCKBOX) MBR(&MBR)
+                    GOTO ADDPFM
+                 ENDDO
+                 MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(ADDMBR))
+
+                 CPYF       FROMFILE(NBLCKBOX) TOFILE(NBLCKBOX) +
+                            FROMMBR(*FIRST) TOMBR(&MBR) MBROPT(*REPLACE)
+                 MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CPYF2))
+
+/* SEND SUCCESSFUL COMPLETION MESSAGE */
+                 CHGVAR     VAR(&MSG) VALUE('Nations Bank Lock Box:  +
+                            RECEIVED Deposit Date' *BCAT &DEPDTE +
+                            *BCAT 'with' *BCAT &CHKS *BCAT 'Checks +
+                            and $' *CAT &DEPAMT *BCAT 'Deposit Amount.')
+/*               SNDDST     TYPE(*MSG) TOUSRID((PRKLCKBX BIGBYTE)) +
+                          DSTD('Pork Lock Box') MSG(&MSG)          */
+             SNDPGRMSG  TOPGR(PRKLCKBX) MSG(&MSG) CONFMSG(*NO)
+             ENDDO
+
+             GOTO       CMDLBL(END)
+/*--*----------------------------------------------------------------*/
+/* ERROR PROCESSING                                                  */
+/*-------------------------------------------------------------------*/
+CPYF1:
+             CHGVAR     VAR(&MSG) VALUE('Nations Bank Lock Box:  +
+                          Copy of NBLCKBOX to QTEMP/QNBLCKBOX failed.')
+/*           SNDDST     TYPE(*MSG) TOUSRID((PRKERRAR BIGBYTE)) +
+                          DSTD('Pork Error:  AR') MSG(&MSG)     */
+             SNDPGRMSG  TOPGR(PRKERRAR) MSG(&MSG) CONFMSG(*NO)
+             GOTO       CMDLBL(END)
+
+CPYF2:
+             CHGVAR     VAR(&MSG) VALUE('Nations Bank Lock Box:  +
+                          Copy of NBLCKBOX *FIRST member to member +
+                          ' *CAT &MBR *BCAT 'failed.')
+/*           SNDDST     TYPE(*MSG) TOUSRID((PRKERRAR BIGBYTE)) +
+                          DSTD('Pork Error:  AR') MSG(&MSG)    */
+             SNDPGRMSG  TOPGR(PRKERRAR) MSG(&MSG) CONFMSG(*NO)
+             GOTO       CMDLBL(END)
+
+ADDMBR:
+             CHGVAR     VAR(&MSG) VALUE('Nations Bank Lock Box:  +
+                          ADDPFM ' *CAT &MBR *CAT 'to NBLCKBOX +
+                          failed.')
+/*           SNDDST     TYPE(*MSG) TOUSRID((PRKERRAR BIGBYTE)) +
+                          DSTD('Pork Error:  AR') MSG(&MSG)     */
+             SNDPGRMSG  TOPGR(PRKERRAR) MSG(&MSG) CONFMSG(*NO)
+             GOTO       CMDLBL(END)
+
+DUPDEP:
+             CHGVAR     VAR(&MSG) VALUE('Nations Bank Lock Box:  +
+                          Received Deposit Date ' *CAT &DEPDTE +
+                          *CAT '. --DUPLICATE ERROR-- Please +
+                          retrieve file again.')
+/*           SNDDST     TYPE(*MSG) TOUSRID((PRKERRAR BIGBYTE)) +
+                          DSTD('Pork Error:  AR') MSG(&MSG)        */
+             SNDPGRMSG  TOPGR(PRKERRAR) MSG(&MSG) CONFMSG(*NO)
+             GOTO       CMDLBL(END)
+/*--*----------------------------------------------------------------*/
+/* END PROGRAM                                                       */
+/*-------------------------------------------------------------------*/
+ END:
+             ENDPGM

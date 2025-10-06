@@ -1,0 +1,237 @@
+/***************************************************************** */
+/*                                                                 */
+/*  System:          Transportation                                */
+/*  Program Number:  ST200CL   - MOVE TO E1DEVMDL                  */
+/*  Program Name:    Driver CL for uploading FB and CR records     */
+/*                   from Power Pro into JDE.                      */
+/*  Programmer:      Barb Gutierrez                                */
+/*  Create Date:     01/18/10                                      */
+/*                                                                 */
+/*  Function:        This CL takes the freight billing and cash    */
+/*                   receipts transactions generated in Power Pro  */
+/*                   and transfers them into a flat file on the    */
+/*                   AS400.   Once the data is transferred to the  */
+/*                   AS400, this cl is executed from the PC side   */
+/*                   to get the transactions into JDE.             */
+/*                                                                 */
+/*                   An email is sent to a DL notifying the users  */
+/*                   of the batch that was created in JDE.         */
+/*******************************************************************/
+/*  MODIFIED BY     -> ROSE CENTONZE          03/27/2020           */
+/*   P16169            CHECK FOR LIVE WITH JW/E1 TO CALL ALTERNATE    */
+/*                     E1 FUNCTIONS WHICH ARE FROM E1IDEVMDL         */
+/*                     ST200       --> ST200E1                       */
+/*                     ST300       --> ST300E1 -WRITE RUNLOG WORKFILE E1B9CPP */
+/*              AT END, CALL PGM E1LDXFR TO PUSH E1 BATCHES TO Z PROCESSOR */
+/*                FROM RUN LOG WORKFILE QTEMP/E1B9CPP                        */
+/*                                                                 */
+/*  7/23/2020 Brad Baden     P16169   SDN465                          */
+/*                     Call program E1LRXFR to send an email of all   */
+/*                     of the Batch Numbers in the E1B9CPP file.      */
+/*                     Also send the new message field values to the  */
+/*                     WORLD version.                                 */
+/*  MODIFIED BY     -> ROSE CENTONZE          09/21/2021           */
+/*   whd 84086         Change company 390 to 355                      */
+/*                                                                    */
+/**********************************************************************/
+
+             PGM
+
+             DCL        VAR(&RCDCNT) TYPE(*DEC) LEN(10 0)
+             DCL        VAR(&MESSAGE) TYPE(*CHAR) LEN(100)
+
+             DCL        VAR(&SOURCE)  TYPE(*CHAR) LEN(25) +
+                          VALUE('Power Pro')
+             DCL        VAR(&BCHDSC)  TYPE(*CHAR) LEN(25) +
+                          VALUE('Voucher')
+             DCL        VAR(&RECIP)   TYPE(*CHAR) LEN(30)
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(40) VALUE('SSI +
+                          interfaces to JDE')
+
+             DCL        VAR(&USER) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&GRPPRF) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBNAME) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBNBR) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&LIVEJW) TYPE(*CHAR) LEN(1)  /*    LIVE WITH JW */
+             DCL        VAR(&LIVEE1) TYPE(*CHAR) LEN(1)  /*    LIVE WITH E1 */
+             DCL        VAR(&RETRN) TYPE(*CHAR) LEN(7)
+
+/* Save library list prior to execution                              */
+             PSHLIBL35
+             MONMSG     MSGID(CPF098A)
+
+/*-------------------------------------------------------------------*/
+/*  Set library list based on user's group profile                   */
+/*-------------------------------------------------------------------*/
+             RTVJOBA    USER(&USER) JOB(&JOBNAME) NBR(&JOBNBR)
+             RTVUSRPRF  USRPRF(&USER) GRPPRF(&GRPPRF) OUTQ(&OUTQ)
+
+/* Set library list                                                 */
+             IF         COND(&GRPPRF *EQ 'SBDPGMR') THEN(DO)
+/*           CALL       PGM(SETJDED)   */
+             SETLIBL    JOBD(PRKTSTE1)
+             ENDDO
+
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+  /*         CALL       PGM(SETJFOOD)    */
+             SETLIBL    JOBD(PRKPRDGUY)
+             ENDDO
+
+             ADDLIBLE   LIB(ESEND) POSITION(*LAST)
+             MONMSG     MSGID(CPF2103)
+
+/*-------------------------------------------------------------------*/
+/*  GET E1 LIVE STATUS FROM COMPANY VALUES                           */
+/*-------------------------------------------------------------------*/
+             CALL       PGM(POMTXFR) PARM(&RETRN X'355F' 'JWLIVE    +
+                          ' &LIVEJW)
+             CALL       PGM(POMTXFR) PARM(&RETRN X'355F' 'E1LIVE    +
+                          ' &LIVEE1)
+/*-------------------------------------------------------------------*/
+/*  Clear the formatted file from the last upload.                   */
+/*-------------------------------------------------------------------*/
+
+
+             CLRPFM     FILE(STP201)
+             MONMSG     MSGID(CPF0000)
+
+/*-------------------------------------------------------------------*/
+/*  Retrieve the number of records in the receiving file to make     */
+/*  sure there are records to process.  If no records, exit program. */
+/*-------------------------------------------------------------------*/
+
+             RTVMBRD    FILE(STP200) NBRCURRCD(&RCDCNT)
+             IF         COND(&RCDCNT > 0) THEN(DO)
+
+/*-------------------------------------------------------------------*/
+/*  Write the flat file into a formatted file.                       */
+/*-------------------------------------------------------------------*/
+/*   ******  CALL       PGM(ST200) ******                            */
+/*-------------------------------------------------------------------*/
+/*  CALL FOR JDE WORLD IF LIVE                                       */
+/*-------------------------------------------------------------------*/
+
+ LIVEJW:     IF         COND(&LIVEJW *EQ 'Y' *OR &LIVEJW *EQ 'P') +
+                          THEN(DO)
+             CALL       PGM(ST200)
+/*-------------------------------------------------------------------*/
+/*  Read the formatted file for processing into JDE.                 */
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*  Override print file to go on hold and save.                      */
+
+             OVRPRTF    FILE(PRINT198) HOLD(*YES)
+             CALL       PGM(ST300)
+
+/*                                                                   */
+/*  Send message to user that the batch is ready in JDE              */
+
+             CHGVAR     VAR(&MESSAGE) VALUE(*BLANKS)
+             CHGVAR     VAR(&MESSAGE) VALUE('Power Pro has created +
+                          an interface batch in JDE and is ready +
+                          for you to review.')
+             IF         COND(&GRPPRF *EQ 'SBDPGMR') THEN(DO)
+             CHGVAR     VAR(&RECIP) VALUE('SSI Interfaces TEST')
+                ENDDO
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+             CHGVAR     VAR(&RECIP) VALUE('SSI Interfaces to JDE')
+                ENDDO
+
+             ESNDFILE   RECIPIENT(&RECIP) SUBJECT('SSI INTERFACE TO +
+                          JDE') MSG(&MESSAGE) TYPE(*SPLPDF) +
+                          SPLF(PRINT198) JOB(&JOBNBR/&USER/&JOBNAME)
+
+             ENDDO
+/*-------------------------------------------------------------------*/
+/*  CALL FOR JDE E1 IF LIVE OR PARALLEL                  */
+/*-------------------------------------------------------------------*/
+
+ LIVEE1:    IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1 *EQ 'P') +
+                          THEN(DO)
+/*-------------------------------------------------------------------*/
+/*  CREATE E1 RUN LOG WORKFILE - TO USER LATER TO PUSH BATCHES TO E1   */
+/*                                                                   */
+             CRTDUPOBJ  OBJ(E1B9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CLRPFM     FILE(STP201)
+             MONMSG     MSGID(CPF0000)
+             CALL       PGM(ST200E1)
+/*-------------------------------------------------------------------*/
+/*  Read the formatted file for processing into JDE.                 */
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*  Override print file to go on hold and save.                      */
+
+RUNIT:       OVRPRTF    FILE(PRINT198) HOLD(*YES)
+             CALL       PGM(ST300E1)
+/**********************************************************************/
+/*  EXECUTE THE PROGRAM TO READ THE QTEMP RUN LOG HEADER         */
+/*      E1B9CPP AND PUSH THE BATCHES TO E1                      */
+/**********************************************************************/
+/*                                                                   */
+             CALL       PGM(E1LDXFR) PARM(&RETRN)
+
+/*-------------------------------------------------------------------*/
+/*  SDN465 - New messaging function  7/23/2020 JBB                  */
+/*  Send message to user that the batch is ready in JDE              */
+
+             IF         COND(&GRPPRF *EQ 'SBDPGMR') THEN(DO)
+             CHGVAR     VAR(&RECIP) VALUE('SSI Interfaces TEST')
+                ENDDO
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+             CHGVAR     VAR(&RECIP) VALUE('SSI Interfaces to JDE')
+                ENDDO
+
+             CALL       PGM(E1LRXFR) PARM(&RETRN &SOURCE &BCHDSC +
+                          &RECIP &SUBJECT)
+
+             DLTF       FILE(QTEMP/E1B9CP*)
+             MONMSG     MSGID(CPF2105 CPF2125)
+             ENDDO
+
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*  Send message to user that the batch is ready in JDE              */
+/*       This section moved Production processing above              */
+
+/*           CHGVAR     VAR(&MESSAGE) VALUE(*BLANKS)                 */
+/*           CHGVAR     VAR(&MESSAGE) VALUE('Power Pro has created +
+                          an interface batch in JDE and is ready +
+                          for you to review.')                       */
+
+/*           IF         COND(&GRPPRF *EQ 'SBDPGMR') THEN(DO)         */
+/*           ESNDFILE   RECIPIENT('SSI INTERFACES TEST') +
+                          SUBJECT('SSI INTERFACE TO JDE')  +
+                          MSG(&MESSAGE) TYPE(*SPLPDF) SPLF(PRINT198) +
+                          JOB(&JOBNBR/&USER/&JOBNAME)                */
+/*           ENDDO                                                   */
+/*           IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)         */
+/*           ESNDFILE   RECIPIENT('SSI INTERFACES TO JDE') +
+                          SUBJECT('SSI INTERFACE TO JDE')  +
+                          MSG(&MESSAGE) TYPE(*SPLPDF) SPLF(PRINT198) +
+                          JOB(&JOBNBR/&USER/&JOBNAME)                */
+/*           ENDDO                                                   */
+
+/*-------------------------------------------------------------------*/
+/*  Clear the flat file so it will be ready for the next upload      */
+/*-------------------------------------------------------------------*/
+
+             CLRPFM     FILE(STP200)
+             MONMSG     MSGID(CPF0000)
+
+             DLTOVR     FILE(PRINT198)
+
+             ENDDO
+
+/* Restore library list back to what it was prior to execution       */
+
+             POPLIBL35
+             MONMSG     MSGID(CPF0000)
+             ENDPGM
+

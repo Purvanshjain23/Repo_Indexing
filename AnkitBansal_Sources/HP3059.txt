@@ -1,0 +1,199 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      ****************************************************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP3059
+      * TITLE:       Royalty Payment: Build Check Detail Workfile
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     08/11/08
+      *
+      *
+      * FUNCTION: Extracts Check Detail data and builds a Check Detail workfile which
+      *           will be used to build the Group Header and Distribution workfiles.
+      *
+      *           Market Sales are extracted based on Kill Date.
+      *           Feeder Pig Sales are extracted based on Received Date.
+      *           Cull Sales are excluded.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 01/21/21  ISE           TSN593
+      *           Replaced *loval with *start
+      *
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsl064i   if   e           k disk    rename(cdrec:cdreci)
+      *  Check detail (records selected in open query)
+      *  (Used for extracting Market Sales)
+      *
+      *
+     Fhsj064f   if   e           k disk
+      *  Check detail + Sales Movement Header (records selected in open query)
+      *  (Used for extracting Feeder Pig Sales)
+      *
+      *
+     Fhsl034d   if   e           k disk
+      *  Hog Group
+      *
+      *
+     Fhsp084    if   e           k disk
+      *  Sales movement header (temp for the switchover to Kill Date logic)
+      *
+      *
+     Fhsp3059   o    e           k disk
+      *  Workfile: Check detail
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * Standalone fields
+      ****************************************************************
+      *
+      * Control field
+      *
+     D procfl          s              1     inz('Y')
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldfcymd                1      8  0
+     D  ldtcymd                9     16  0
+      *
+     D  ldemail              300    349
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * MAINLINE
+      ***************************************************************************************
+      *
+      * MARKET SALES (records selected with open query)
+      *
+593  C*    *loval        setll     hsl064i
+593  C     *start        setll     hsl064i
+     C                   dou       *in91 = *on                                  Do markets
+     C                   read      hsl064i                                91
+     C                   if        *in91 = *off
+      *
+      *     Temp code for Period 8 of 2008 when we switch our extraction from
+      *     Received Date to Kill Date. This code should kick in when this
+      *     is run for the HPS EOP Close (we'll check the LDA for the
+      *     Distribution List).
+      *
+     C                   move      yes           procfl
+      *
+     C                   if        ldfcymd = 20080727 and                       If P8 2008
+     C                             ldemail = 'HPS-ROYALTY.PAY'
+     C     cdmvsn        chain     hsp084                             92
+     C                   if        *in92 = *off and shrcdt < 20080727
+     C                   move      no            procfl
+     C                   endif
+     C                   endif                                                  If P8 2008
+      *
+     C                   if        procfl = yes
+     C                   exsr      $process
+     C                   endif
+      *
+     C                   endif
+     C                   enddo                                                  Do markets
+      *
+      * FEEDER PIG SALES (records selected with open query)
+      *
+593  C*    *loval        setll     hsj064f
+593  C     *Start        setll     hsj064f
+     C                   dou       *in91 = *on                                  Do FPS
+     C                   read      hsj064f                                91
+     C                   if        *in91 = *off
+     C                   exsr      $process
+     C                   endif
+     C                   enddo                                                  Do FPS
+      *
+      * EOF
+     C                   seton                                        lr
+      /EJECT
+      *----------------------------------------------------------------------------------------
+      * Process a Check Detail record
+      *----------------------------------------------------------------------------------------
+      *
+     C     $process      begsr
+      *
+      * Exclude all BGF groups
+      *
+     C     cdhgsn        chain     hsl034d                            92
+     C                   if        *in92 = *off and hgppcd <> 'BGF  '           If not BGF
+      *
+     C                   move      hghgcd        w3hgcd
+     C                   z-add     hghgsn        w3hgsn
+     C                   z-add     hgfscd        w3fscd
+      * Yard dead
+      * Condemned
+     C                   z-add     cdydhd        w3ydhd
+     C                   z-add     cdcdhd        w3cdhd
+      *
+      * Sold head
+     C                   z-add     cdlvhd        w3slhd
+      *
+      * Conditionally populate the Live/Carcass fields using Live Head
+      * and the following rules:
+      *    Live:    Payment Type of Live and customer is Guymon Plant (customer=360516)
+      *    Carcass: Everything else
+      *
+     C                   select
+     C                   when      cdtpcd = 'L' and cdcvno = 360516
+     C                   z-add     cdlvhd        w3livhd
+     C                   other
+     C                   z-add     cdlvhd        w3carhd
+     C                   endsl
+      *
+     C                   write     w3rec
+     C                   clear                   w3rec
+     C                   endif                                                  If not BGF
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C                   endsr
+      /eject

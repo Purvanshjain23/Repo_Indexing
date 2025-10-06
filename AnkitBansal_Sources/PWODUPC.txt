@@ -1,0 +1,309 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  PWODUPC                                       */
+/*  PROGRAM NAME:    Purge Repayment Backup Files                  */
+/*  PROGRAMMER:      Brad Baden                                    */
+/*  CREATE DATE:      9/08/2021                                    */
+/*                                                                 */
+/*  FUNCTION:        This CL program will executed from the Job    */
+/*                   Scheduler.  It's purpose is to delete the     */
+/*                   Repayment backup files that are older than    */
+/*                   6 weeks.  The file names are in the format    */
+/*                   of llmmddffff:                                */
+/*                   ll   = location initials (GU, ST, or TF)      */
+/*                   mm   = month                                  */
+/*                   dd   = day                                    */
+/*                   ffff = first 4 characters of the file name    */
+/*                                                                 */
+/*                   The files backed up are:                      */
+/*                   PKAWCPP - Buy Order                           */
+/*                   PKAXCPP - Buy Order Load                      */
+/*                   PKA1CPP - Tattoo Header                       */
+/*                   PKA2CPP - Tattoo Detail                       */
+/*                   PKCDCPP - Tattoo Ded/Add                      */
+/*                   PKDNCPP - Tattoo Header EXT                   */
+/*                   PKB3CPP - Tattoo Scale Ticket                 */
+/*                   PKB1CPP - Carcass Detail                      */
+/*                                                                 */
+/*******************************************************************/
+/*  Modification History                                           */
+/*                                                                 */
+/*  xx/xx/xxxx xxx xxxxxxx - xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  */
+/*                                                                 */
+/*******************************************************************/
+             PGM
+
+             DCL        VAR(&COMPANY)  TYPE(*CHAR) LEN(2)
+             DCL        VAR(&LIBRFROM) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&LIBRTO)   TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PREFIX)   TYPE(*CHAR) LEN(6)
+
+             /* Date variables */
+             DCL        VAR(&DATEA)    TYPE(*CHAR) LEN(7)
+             DCL        VAR(&DATEIN)   TYPE(*DEC)  LEN(7 0)
+             DCL        VAR(&DATEINA)  TYPE(*CHAR) LEN(7)
+             DCL        VAR(&DATEOUT)  TYPE(*DEC)  LEN(7 0)
+             DCL        VAR(&DATEOUTA) TYPE(*CHAR)  LEN(7)
+             DCL        VAR(&DATEMMDD) TYPE(*CHAR)  LEN(4)
+             DCL        VAR(&DAYS)     TYPE(*DEC)  LEN(5 0)
+
+             DCL        VAR(&NUMFLAG)  TYPE(*CHAR)  LEN(1)
+
+             DCL        VAR(&PREFIXDT) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&RETURN)   TYPE(*CHAR) LEN(7)
+             DCL        VAR(&PRODFILE) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&SAVEFILE) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PKAXFILE) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&SVFILENM) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&DATEJ)    TYPE(*CHAR) LEN(7)
+             DCL        VAR(&DATEF)    TYPE(*CHAR) LEN(7)
+             DCL        VAR(&DATET)    TYPE(*CHAR) LEN(7)
+             DCL        VAR(&COMPVALA) TYPE(*CHAR) LEN(40)
+             DCL        VAR(&CMPVALCD) TYPE(*CHAR) LEN(10) +
+                          VALUE(HPEREPAYBU)
+             DCL        VAR(&BACKUPSTS) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&BACKUPPRFX) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&PKAXSAVEF) TYPE(*CHAR) LEN(10)
+
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(ERROR))
+
+             DCLF       FILE(QSYS/QAFDMBRL)
+
+/* Build outfile of files in library PRKFSAV to QTEMP */
+             DSPFD      FILE(PRKFSAV/*ALL) TYPE(*MBRLIST) +
+                          OUTPUT(*OUTFILE) FILEATR(*PF) +
+                          OUTFILE(QTEMP/DSPFD) OUTMBR(*FIRST *REPLACE)
+
+/* Call program to calculate purge date */
+             RTVSYSVAL  SYSVAL(QDATE) RTNVAR(&DATEA)
+
+             CVTDAT     DATE(&DATEA) TOVAR(&DATEINA) TOFMT(*CYMD) +
+                          TOSEP(*NONE)
+             CHGVAR     VAR(&DATEIN) VALUE(&DATEINA)
+
+             CALL       PGM(PWOEUPC) PARM(&DATEIN &DAYS &DATEOUT)
+
+             CHGVAR     VAR(&DATEOUTA) VALUE(&DATEOUT)
+             CHGVAR     VAR(&DATEMMDD) VALUE(%SST(&DATEOUTA 3 4))
+
+/* Read file list and purge if valid mmdd < purge date */
+ LOOP:       RCVF
+             MONMSG     MSGID(CPF0864) EXEC(GOTO CMDLBL(ENDIT)) /* EOF */
+
+             /* Strip out company abbreviation */
+             CHGVAR     VAR(&COMPANY)  VALUE(%SST(&PREFIX 1 2))
+
+/* Process GU, ST, and TF */
+             SELECT
+             WHEN       COND(&COMPANY *EQ 'GU') THEN(DO)
+             CHGVAR     VAR(&FILEMMDD) VALUE(%SST(&PREFIX 3 4))
+
+             CALLSUBR $CHKNUM
+
+             IF         COND(&NUMFLAG *EQ 'N') THEN(GOTO CMDLBL(LOOP))
+
+             CALLSUBR $COMPARE
+
+
+
+/* Retrieve current backup status from Company Values */
+             CALL       PGM(POMTXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             CHGVAR     VAR(&BACKUPPRFX) VALUE(%SST(&COMPVALA 5 4))
+
+/* If files already backed up, exit program */
+             IF         COND((&BACKUPPRFX *EQ &PREFIXDT) *AND +
+                          (&BACKUPSTS = 'C')) THEN(GOTO CMDLBL(ENDIT))
+
+/* Backup PKAWCPP - Buy Order */
+             CHGVAR     VAR(&PRODFILE) VALUE('PKAWCPP   ')
+             CHGVAR     VAR(&SAVEFILE) VALUE(&PREFIX *CAT 'PKAW')
+             CHGVAR     VAR(&COMPVALA) VALUE('P' *TCAT &DATEJ *TCAT +
+                          &PRODFILE)
+
+/* Perform backups is not previously done for the day               */
+/**********  CHKOBJ     OBJ(&LIBRTO/&SAVEFILE) OBJTYPE(*FILE) *******/
+/**********  MONMSG     MSGID(CPF9801) EXEC(DO)               *******/
+
+             CALLSUBR   SUBR($PURGEGUY)
+             CALLSUBR   SUBR($PURGESTF)
+             CALLSUBR   SUBR($PURGETF)
+
+             /* Update Company Values record HPEREPAYBU with &COMPVALA */
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             /* Copy records within date range                         */
+             CPYF       FROMFILE(&LIBRFROM/&PRODFILE) +
+                          TOFILE(&LIBRTO/&SAVEFILE) MBROPT(*REPLACE) +
+                          CRTFILE(*YES) INCREL((*IF AWASDT *GE +
+                          &DATEF) (*AND AWASDT *LE &DATET))
+
+/* Backup PKAXCPP - Buy Order Load */
+             CHGVAR     VAR(&PRODFILE) VALUE('PKAXCPP   ')
+             CHGVAR     VAR(&SAVEFILE) VALUE(&PREFIX *CAT 'PKAX')
+             CHGVAR     VAR(&PKAXFILE) VALUE(&SAVEFILE) /* For PKAX */
+             CHGVAR     VAR(&COMPVALA) VALUE('P' *TCAT &DATEJ *TCAT +
+                          &PRODFILE)
+
+             /* Update Company Values record HPEREPAYBU with &COMPVALA */
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             /* Copy records within date range                         */
+             CPYF       FROMFILE(&LIBRFROM/&PRODFILE) +
+                          TOFILE(&LIBRTO/&SAVEFILE) MBROPT(*REPLACE) +
+                          CRTFILE(*YES) INCREL((*IF AXCQDT *GE +
+                          &DATEF) (*AND AXCQDT *LE &DATET))
+
+
+/* Backup PKA1CPP - Tattoo Header */
+             CHGVAR     VAR(&PRODFILE) VALUE('PKA1CPP   ')
+             CHGVAR     VAR(&SAVEFILE) VALUE(&PREFIX *CAT 'PKA1')
+             CHGVAR     VAR(&COMPVALA) VALUE('P' *TCAT &DATEJ *TCAT +
+                          &PRODFILE)
+
+             /* Update Company Values record HPEREPAYBU with &COMPVALA */
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             /* Copy records within date range                         */
+             CPYF       FROMFILE(&LIBRFROM/&PRODFILE) +
+                          TOFILE(&LIBRTO/&SAVEFILE) MBROPT(*REPLACE) +
+                          CRTFILE(*YES) INCREL((*IF A1B0DT *GE +
+                          &DATEF) (*AND A1B0DT *LE &DATET))
+
+/* Backup PKA2CPP - Tattoo Detail */
+             CHGVAR     VAR(&PRODFILE) VALUE('PKA2CPP   ')
+             CHGVAR     VAR(&SAVEFILE) VALUE(&PREFIX *CAT 'PKA2')
+             CHGVAR     VAR(&COMPVALA) VALUE('P' *TCAT &DATEJ *TCAT +
+                          &PRODFILE)
+
+             /* Update Company Values record HPEREPAYBU with &COMPVALA */
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             /* Copy records within date range                         */
+             CPYF       FROMFILE(&LIBRFROM/&PRODFILE) +
+                          TOFILE(&LIBRTO/&SAVEFILE) MBROPT(*REPLACE) +
+                          CRTFILE(*YES) INCREL((*IF A2B0DT *GE +
+                          &DATEF) (*AND A2B0DT *LE &DATET))
+
+/* Backup PKDNCPP - Tattoo Header EXT */
+             CHGVAR     VAR(&PRODFILE) VALUE('PKDNCPP   ')
+             CHGVAR     VAR(&SAVEFILE) VALUE(&PREFIX *CAT 'PKDN')
+             CHGVAR     VAR(&COMPVALA) VALUE('P' *TCAT &DATEJ *TCAT +
+                          &PRODFILE)
+
+             /* Update Company Values record HPEREPAYBU with &COMPVALA */
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             /* Copy records within date range                         */
+             CPYF       FROMFILE(&LIBRFROM/&PRODFILE) +
+                          TOFILE(&LIBRTO/&SAVEFILE) MBROPT(*REPLACE) +
+                          CRTFILE(*YES) INCREL((*IF DNB0DT *GE +
+                          &DATEF) (*AND DNB0DT *LE &DATET))
+
+/* Backup PKCDCPP - Tattoo Ded/Add */
+             CHGVAR     VAR(&PRODFILE) VALUE('PKCDCPP   ')
+             CHGVAR     VAR(&SAVEFILE) VALUE(&PREFIX *CAT 'PKCD')
+             CHGVAR     VAR(&COMPVALA) VALUE('P' *TCAT &DATEJ *TCAT +
+                          &PRODFILE)
+
+             /* Update Company Values record HPEREPAYBU with &COMPVALA */
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             /* Copy records within date range                         */
+             CPYF       FROMFILE(&LIBRFROM/&PRODFILE) +
+                          TOFILE(&LIBRTO/&SAVEFILE) MBROPT(*REPLACE) +
+                          CRTFILE(*YES) INCREL((*IF CDB0DT *GE +
+                          &DATEF) (*AND CDB0DT *LE &DATET))
+
+/* Backup PKB1CPP - Carcass Detail */
+             CHGVAR     VAR(&PRODFILE) VALUE('PKB1CPP   ')
+             CHGVAR     VAR(&SAVEFILE) VALUE(&PREFIX *CAT 'PKB1')
+             CHGVAR     VAR(&COMPVALA) VALUE('P' *TCAT &DATEJ *TCAT +
+                          &PRODFILE)
+
+             /* Update Company Values record HPEREPAYBU with &COMPVALA */
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             /* Copy records within date range                         */
+             CPYF       FROMFILE(&LIBRFROM/&PRODFILE) +
+                          TOFILE(&LIBRTO/&SAVEFILE) MBROPT(*REPLACE) +
+                          CRTFILE(*YES) INCREL((*IF B1B0DT *GE +
+                          &DATEF) (*AND B1B0DT *LE &DATET))
+
+/* Backup PKB3CPP - Tattoo Scale Ticket */
+             CHGVAR     VAR(&PRODFILE) VALUE('PKB3CPP   ')
+             CHGVAR     VAR(&SAVEFILE) VALUE(&PREFIX *CAT 'PKB3')
+             CHGVAR     VAR(&COMPVALA) VALUE('P' *TCAT &DATEJ *TCAT +
+                          &PRODFILE)
+
+             /* Update Company Values record HPEREPAYBU with &COMPVALA */
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             /* Copy records within date range                         */
+             CPYF       FROMFILE(&LIBRFROM/&PRODFILE) +
+                          TOFILE(&LIBRTO/&SAVEFILE) MBROPT(*REPLACE) +
+                          CRTFILE(*YES) INCREL((*IF B3B0DT *GE +
+                          &DATEF) (*AND B3B0DT *LE &DATET))
+
+/* Backup PKEJCPP - Buy Order Load Weight */
+             CHGVAR     VAR(&PRODFILE) VALUE('PKEJCPP   ')
+             CHGVAR     VAR(&SAVEFILE) VALUE(&PREFIX *CAT 'PKEJ')
+             CHGVAR     VAR(&COMPVALA) VALUE('P' *TCAT &DATEJ *TCAT +
+                          &PRODFILE)
+
+             DLTF       FILE(&LIBRTO/&SAVEFILE)
+             MONMSG     MSGID(CPF2105)
+
+             /* Update Company Values record HPEREPAYBU with &COMPVALA */
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             RUNQRY     QRY(BACKUPPKEJ) QRYFILE((&LIBRTO/&PKAXFILE) +
+                          (&LIBRFROM/PKEJCPP)) OUTTYPE(*OUTFILE) +
+                          PRTDFN(*NO) OUTFILE(&LIBRTO/&SAVEFILE)
+
+/* Update data area for completion */
+             CHGVAR     VAR(&COMPVALA) VALUE('C' *TCAT &DATEJ *TCAT +
+                          '          ')
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+             GOTO       CMDLBL(ENDIT)
+
+ERROR:       CHGVAR     VAR(&COMPVALA) VALUE('E' *TCAT &DATEJ *TCAT +
+                          &SVFILENM)
+             CALL       PGM(PUKMXFR) PARM(&RETURN &COMPANY &CMPVALCD +
+                          &COMPVALA)
+
+ENDIT:       ENDPGM
+
+/*********************************************************************/
+/* Subroutine $CHKNUM - Check if MMDD is numeric                     */
+/*********************************************************************/
+             SUBR       SUBR($CHKNUM)
+
+             CHGVAR     VAR(&NUMFLAG) VALUE('Y')
+
+             IF         COND(%CHECK('0123456789' &DATEMMDD) *NE 0) +
+                          THEN(CHGVAR VAR(&NUMFLAG) VALUE('N'))
+             ENDSUBR
+
+/*********************************************************************/
+/* Subroutine $COMPARE - Compare purge date to file date             */
+/*********************************************************************/
+             SUBR       SUBR($COMPARE)
+
+             CHGVAR     VAR(&NUMFLAG) VALUE('Y')
+
+             IF         COND(%CHECK('0123456789' &DATEMMDD) *NE 0) +
+                          THEN(CHGVAR VAR(&NUMFLAG) VALUE('N'))
+             ENDSUBR

@@ -1,0 +1,1013 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      ****************************************************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF622
+      * TITLE:       Margin: Byproduct Mix Adjustment Report
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     04/23/07
+      *
+      * FUNCTION:  Batch program to print the Byproduct Mix Adjustment Report.
+      *
+      *            This report runs over files created in the Resource
+      *            Optimization Meat Cost Calculation.
+      *
+      *            This 'report' is generated:
+      *               1) On-demand
+      *               2) From the Margin Adjustment Close function
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 08/07/07  LeAnne Ramsey
+      *           Added Work-in-Process Items and logic.
+      *
+      * 12/21/07  Alice Brownfield
+      *           Minor changes when we combined the Credit item Meat Cost files with
+      *           the Byproduct MIX processing files.
+      *
+      * 06/10/08  LeAnne Ramsey
+      *           Replace 2 columns (Pkg Cost/LB and Labor Cost/LB) with a single column
+      *           (Total Cost/LB)--which is the sum of Pkg, Labor, Ingredient, Other Costs.
+      *           Make "Description" longer (using the extra space from the Cost/Lb change.)
+      *           Print "WP" in front of the Item Code of WIPs.
+      *
+      * 06/20/08  LeAnne Ramsey
+      *           Rewritten using new "summary level" logic; changed layout.
+      *           Also, we no longer print a record for an Item when all values are zero.
+      *
+      * 07/11/08  LeAnne Ramsey
+      *           Tom Dye wants to see the Items when all values are zero.
+      *           So, I changed the code back to the old way.
+      *
+      * 11/28/08  LeAnne Ramsey
+      *           As part of synchronizing the LDAs between the TFS Margin Adjustment Close
+      *           and the Meat Costing, we changed the LDA positions
+      *
+      * 04/02/09  LeAnne Ramsey
+      *           Recompile only. Field 'Producing Company' added to Byproduct Detail.
+      *
+      * 08/23/10  LeAnne Ramsey  (E940)
+      *           Recompile only....I just added some notes to document a change that we
+      *           made to the Meat Costing logic. it concerns the SalesYld% that is printed
+      *           on this report.
+      *
+      *           For Meat Costing Splits:
+      *           We now retrieve the ProductionYield% instead of the SalesYield%
+      *           from the BOM file for Items: 12721, 12730, 12740, 79810
+      *           Damon is changing the SalesYield% to be more accurate for these 4 Items.
+      *           BUT, he does not want the split calcs for the Items (RO229) to use the new %'s.
+      *           He wants the split calcs in RO229 to now use the ProductionYield% for these
+      *           Items..(Note: The ProdYld%s are the same as the old SalesYield%.)
+      *
+      *           Note: We will still store this % in our SalesYield% field in ROP122-ByProduct
+      *                 Detail; the benefits of adding ProductionYield% as a new field were
+      *                 insignificant when compared to the problems that it would cause.
+      *
+      *           This change ONLY affects the split calcs; other Meat Costing
+      *           logic will continue to use the SalesYield% for these 4 Items...which it stored
+      *           in ROP102-Component Item Meat Cost.
+      *
+      * 02/01/11  LeAnne Ramsey (E1298)
+      *           As of February 2011 we no longer build records in ROP124..which this report
+      *           program uses. We replaced the ROP124 logic with Exception records in TFP019 and
+      *           the corresponding records in ROP122-ByProduct Detail....like the Tenders.
+      *           BUT, when/if the users run this report historically, we need to continue to
+      *           retrieve/print these special "Exception" records from ROP124.
+      *           Just FYI, we did all of this because the meat cost and, therefore, the margins
+      *           in COGNOS for SRLN/BNLS were not correct per Damon Ginther.
+      *
+      * 09/19/11  LeAnne Ramsey (E1748)
+      *           Changed some documentation and recompiled only....NO logic/code changes.
+      *           Damon G. had us remove all hardcoded logic for Items 12721, 12730, 12740 and
+      *           79810. He has changed the SalesYld% for these in the BOM; so, they flow thru
+      *           MeatCosting without any special processing.
+      *
+      * 04/21/16  Rose Centonze (S5658)
+      *           Lengthen t1anpupr, t1snpupr, t1tnpupr to 10,6 to accomodate nos over 999.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Frol121f   if   e           k disk
+      *  TF Byproduct mix summary (LF selects only "standalone"records)
+      *
+      *
+     Frol122g   if   e           k disk
+      *  Byproduct detail
+      *
+      *
+     Frol124a   if   e           k disk
+      *  TF Byproduct mix exceptions
+      *
+      *
+     Fombyrel1  if   e           k disk
+      *    Item default
+      *
+      *
+     Fppamrel1  if   e           k disk
+      *    TF Classification
+      *
+      *
+     Ftfp019    if   e           k disk
+      *    Product exceptions
+      *
+      *
+     Fprint198  o    f  198        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     d rtime           s              6  0
+      *
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D count           s              5  0
+     D countsum        s              5  0
+      *
+     D svsumlev        s                   like(ydsumlev)
+     D svcgcd          s                   like(ydcgcd)
+     D svsgcd          s                   like(ydsgcd)
+      *
+     D svmixgrp        s                   like(ydmixgrp)
+     D svtfclcd        s                   like(ydtfclcd)
+     D svistycd        s                   like(ydistycd)
+     D svisgrcd        s                   like(ydisgrcd)
+     D svisclcd        s                   like(ydisclcd)
+      *
+     D lasttfclcd      s                   like(ydtfclcd)
+     D lastcgcd        s                   like(ydcgcd)
+     D lastsgcd        s                   like(ydsgcd)
+      *
+      * Workfields
+      *
+     D wkpesn          s              7
+      *
+     D wkspulb         s                   like(ysspulb)
+     D wksnpuam        s                   like(yssnpuam)
+      *
+     D wktpulb         s                   like(ystpulb)
+     D wktnpuam        s                   like(ystnpuam)
+      *
+     D wkapulb         s                   like(ysapulb)
+     D wkapuam         s                   like(ysapuam)
+     D wkanpuam        s                   like(ysanpuam)
+      *
+      *
+      * Accumulator field
+     d totmunpupr      s                   like(ydnpupr)
+      *
+      *
+      * Print fields
+      *
+     D dash            s            198    inz(*all'-')
+      *
+     d h1demand        s             35
+      *
+     D h2desc          s             54
+      *
+     D l1ds            s                   like(byavna)
+     D l1totco         s                   like(ydpco)
+     D l1spulb         s              9  0
+     D l1snpuam        s              9  0
+     D l1tpulb         s              9  0
+     D l1tnpuam        s              9  0
+     D l1apulb         s              9  0
+     D l1apuam         s              9  0
+     D l1anpuam        s              9  0
+      *
+     D l2apulb         s              9  0
+     D l2anpuam        s              9  0
+     D l2spulb         s              9  0
+     D l2snpuam        s              9  0
+     D l2tpulb         s              9  0
+     D l2tnpuam        s              9  0
+      *
+     D t1spulb         s              9  0
+     D t1snpuam        s              9  0
+     D t1tpulb         s              9  0
+     D t1tnpuam        s              9  0
+     D t1apulb         s              9  0
+     D t1apuam         s              9  0
+     D t1anpuam        s              9  0
+     D t1anpupr        s             10  6                                       was  9 6
+     D t1snpupr        s             10  6                                          "
+     D t1tnpupr        s             10  6                                          "
+      *
+      *
+     D t2spulb         s              9  0
+     D t2snpuam        s              9  0
+     D t2tpulb         s              9  0
+     D t2tnpuam        s              9  0
+     D t2apulb         s              9  0
+     D t2anpuam        s              9  0
+      *
+     D t3smixam        s                   like(yssmixam)
+     D t3strpam        s                   like(ysstrpam)
+     D t3sduam         s                   like(yssduam)
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwedt                29     36  0
+     D  ldwemdy               44     49  0
+      *
+     D  ldtfclcd             156    158
+     D  ldtfclds             159    188
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * Mainline
+      ***************************************************************************************
+      *
+     C                   exsr      $h1hdr
+      *
+      * Read each Byproduct Detail record for this Week-Ending Date.
+      * Process the records where:
+      *    TF Class Group Code is BP (ByProduct)
+      *    Mix Flag = Yes
+      *
+     C     ldwedt        setll     rol122g
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C     ldwedt        reade     rol122g                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             ydtfcgcd = 'BP' and
+     C                             ydmixfl = yes
+      * Break logic
+     C                   select
+     C                   when      first = yes
+     C                   add       1             countsum
+     C                   move      no            first
+     C                   exsr      $save
+     C                   exsr      $h2hdr
+      *
+     C                   when      svsumlev <> ydsumlev
+     C                   exsr      $t1tot
+     C                   exsr      $t2tot
+     C                   exsr      $save
+     C                   seton                                        87
+     C                   exsr      $h2hdr
+      *
+     C                   when      svtfclcd <> ydtfclcd or
+     C                             svcgcd   <> ydcgcd   or
+     C                             svsgcd   <> ydsgcd   or
+     C                             svmixgrp <> ydmixgrp or
+     C                             svistycd <> ydistycd or
+     C                             svisgrcd <> ydisgrcd or
+     C                             svisclcd <> ydisclcd
+     C                   add       1             countsum
+     C                   exsr      $t1tot
+     C                   exsr      $save
+     C                   exsr      $h2hdr
+     C                   endsl
+      *
+      * 1) Accumulate for totals
+      * 2) Print detail line
+      *
+     C                   exsr      $accum
+     C                   exsr      $l1dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * Print a heading and the standard 'no data' message if you had
+      * no data.
+     C                   if        first = yes                                  If nothing
+     C                   except    nodata
+     C                   else
+      *
+     C                   exsr      $t1tot
+     C                   exsr      $t2tot
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      * Report total
+     C                   except    t3tot
+     C                   endif                                                  If nothing
+      *
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * Accumulate detail line values for totals
+      *---------------------------------------------------------------
+      *
+     C     $accum        begsr
+      *
+     C                   add       ydspulb       wkspulb
+     C                   add       ydtpulb       wktpulb
+     C                   add       ydapulb       wkapulb
+      *
+     C                   add       ydapuam       wkapuam
+     C                   add       ydsnpuam      wksnpuam
+     C                   add       ydtnpuam      wktnpuam
+     C                   add       ydanpuam      wkanpuam
+      *
+      *
+      * If this Item has 1) a mult % NE to 100 and 2) produced pounds,
+      *    and 3) it is in the BNIN Meat Cost Group
+      * we want to sum the prices for the total record
+      *
+     C                   if        ydmupc <> 100 and ydapulb <> 0
+     C                             and ydcgcd = 'BNIN'
+     c                   add       ydnpupr       totmunpupr
+     C                   endif
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Save break fields
+      *---------------------------------------------------------------
+      *
+     C     $save         begsr
+      *
+     C                   move      ydsumlev      svsumlev
+      *
+     C                   if        ydtfclcd <> svtfclcd
+     C                   exsr      $tfclds
+     C                   endif
+     C                   move      ydtfclcd      svtfclcd
+      *
+     C                   move      ydcgcd        svcgcd
+     C                   move      ydsgcd        svsgcd
+     C                   move      ydmixgrp      svmixgrp
+      *
+     C                   z-add     ydistycd      svistycd
+     C                   z-add     ydisgrcd      svisgrcd
+     C                   z-add     ydisclcd      svisclcd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------
+      * Retrieve/print special "Exceptions" for Sirloin/Trim
+      *---------------------------------------------------------------------------------
+      * E1298: As of February 2011 we no longer build records in ROP124.
+      * The ROP124 logic was replaced with Exception records in TFP019/ROP122...like the Tenders.
+      * But, if/when the users run this report historically, we need to continue to
+      * retrieve/print these special "Exception" records from ROP124.
+      * We don't have to condition this logic; there just won't be any records in this file after
+      * the E1298 change.
+      *
+     C     $except       begsr
+      *
+     C     key01         setll     rol124a                                91
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     key01         reade     rol124a                                91
+     C                   if        *in91 = *off                                 If not EOF
+     C                   exsr      $l2dtl
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+     C                   except    blank
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print detail line
+      *---------------------------------------------------------------
+      *
+     C     $l1dtl        begsr
+      *
+      * Get fields into print fields with no decimals
+      *
+     C                   z-add(h)  ydspulb       l1spulb
+     C                   z-add(h)  ydsnpuam      l1snpuam
+      *
+     C                   z-add(h)  ydtpulb       l1tpulb
+     C                   z-add(h)  ydtnpuam      l1tnpuam
+      *
+     C                   z-add(h)  ydapulb       l1apulb
+     C                   z-add(h)  ydapuam       l1apuam
+     C                   z-add(h)  ydanpuam      l1anpuam
+      *
+      * Sum of Costs into Total Cost print field.
+      *
+     C                   eval      l1totco = ydpco + ydlco + ydico + ydoco
+      *
+      * Retrieve 1) Product Description or 2) Exception Comment
+      *
+     C                   select
+     C                   when      ydpesn = 0
+     C     yditcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      l1ds  = byavna
+     C                   endif
+     C                   other
+      *
+     C     key02         chain     tfp019
+     C                   if        *in92 = *off
+     C                   move      ydpesn        wkpesn
+     C                   eval      l1ds  = wkpesn + ' ' + peexcom
+     C                   endif
+     C                   endsl
+      *
+      * Print headings if necessary
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+      *
+      * Set indicator to print "WP" on the line...so we can easily see the
+      * WIP records.
+     C                   if        ydittycd = 'WP'
+     C                   seton                                        85
+     C                   else
+     C                   setoff                                       85
+     C                   endif
+      *
+     C                   except    l1dtl
+     C                   add       1             count
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print exception line
+      *---------------------------------------------------------------
+      *
+     C     $l2dtl        begsr
+      *
+      * Get fields into print fields with no decimals
+      *
+     C                   z-add(h)  yespulb       l2spulb
+     C                   z-add(h)  yesnpuam      l2snpuam
+      *
+     C                   z-add(h)  yetpulb       l2tpulb
+     C                   z-add(h)  yetnpuam      l2tnpuam
+      *
+     C                   z-add(h)  yeapulb       l2apulb
+     C                   z-add(h)  yeanpuam      l2anpuam
+      *
+      * Print headings if necessary
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+      *
+     C                   except    l2dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print total line
+      *---------------------------------------------------------------
+      *
+     C     $t1tot        begsr
+      *
+     C                   if        count > 1                                    If more than 1
+      *
+      * Get fields into print fields with no decimals
+      *
+     C                   z-add(h)  wkspulb       t1spulb
+     C                   z-add(h)  wktpulb       t1tpulb
+     C                   z-add(h)  wkapulb       t1apulb
+      *
+     C                   z-add(h)  wkapuam       t1apuam
+     C                   z-add(h)  wksnpuam      t1snpuam
+     C                   z-add(h)  wktnpuam      t1tnpuam
+     C                   z-add(h)  wkanpuam      t1anpuam
+      *
+      * Make calculations--almost always!!
+      * (We still have some special logic for BNIN multiplier % records.)
+      *
+     C                   select
+      *           Mult%
+     C                   when      totmunpupr <> 0
+     C                   z-add     totmunpupr    t1anpupr
+     C                   z-add     totmunpupr    t1snpupr
+     C                   z-add     totmunpupr    t1tnpupr
+     C                   other
+      *           Calcs:
+     C                   if        wkapulb <> 0
+     C                   eval(h)   t1anpupr = wkanpuam / wkapulb
+     C                   endif
+      *
+     C                   if        wkspulb <> 0
+     C                   eval(h)   t1snpupr = wksnpuam / wkspulb
+     C                   endif
+      *
+     C                   if        wktpulb <> 0
+     C                   eval(h)   t1tnpupr = wktnpuam / wktpulb
+     C                   endif
+     C                   endsl
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+      *
+     C                   except    t1tot
+     C                   else
+     C                   except    blank
+     C                   endif                                                  If more than 1
+      *
+      * Clear work fields
+      *
+     C                   z-add     0             wkspulb
+     C                   z-add     0             wktpulb
+     C                   z-add     0             wkapulb
+      *
+     C                   z-add     0             wkapuam
+     C                   z-add     0             wksnpuam
+     C                   z-add     0             wktnpuam
+     C                   z-add     0             wkanpuam
+      *
+     C                   z-add     0             totmunpupr
+     C                   z-add     0             count
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Summary Level total lines
+      *---------------------------------------------------------------
+      *
+     C     $t2tot        begsr
+      *
+      * For Sirloin/Trim, print the special "exceptions" before printing the Summary Total.
+      * The Sirloin/Trim Summary Levels are:
+      *    1) BP1.SRLN  (2 records)
+      *    2) BP7.T72A  (1 record)
+     C                   if        svsumlev = 'BP1.SRLN              ' or
+     C                             svsumlev = 'BP7.T72A              '
+     C                   exsr      $except
+     C                   endif
+      *
+      * Retrieve the Summary record for this Summary Level.
+      * Get values into print fields with no decimals.
+      *
+     C     key01         chain     rol121f
+     C                   if        *in92 = *off                                 If hit
+      *
+     C                   z-add(h)  ysspulb       t2spulb
+     C                   z-add(h)  yssnpuam      t2snpuam
+      *
+     C                   z-add(h)  ystpulb       t2tpulb
+     C                   z-add(h)  ystnpuam      t2tnpuam
+      *
+     C                   z-add(h)  ysapulb       t2apulb
+     C                   z-add(h)  ysanpuam      t2anpuam
+      *
+      * If there are no values in any of the fields for this line, set on
+      * an indictor to print the word "Nothing"; otherwise, accumulate for
+      * Report Total.
+     C                   if        yssmixam = 0 and
+     C                             ysstrpam = 0 and
+     C                             yssduam  = 0
+     C                   seton                                        84
+     C                   else
+     C                   setoff                                       84
+     C                   add       yssmixam      t3smixam
+     C                   add       ysstrpam      t3strpam
+     C                   add       yssduam       t3sduam
+     C                   endif
+      *
+     C                   endif                                                  If hit
+      *
+      * Print headings (if necessary)
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+      *
+      * Conditionally, print the line of "totals"
+      *
+     C                   if        countsum > 1
+     C                   except    t2tot
+     C                   endif
+      *
+      * Always print the "Due" line
+      *
+     C                   except    t2due
+      *
+     C                   z-add     0             countsum
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print report headings
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+      *
+     C                   move      *blank        lasttfclcd
+     C                   move      *blank        lastcgcd
+     C                   move      *blank        lastsgcd
+     C                   seton                                        87
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------
+      * Print Classification Heading (with Summary Level when different)
+      *-------------------------------------------------------------------------
+      *
+     C     $h2hdr        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+      * Set indictors to control printing of various fields in the heading.
+      *
+     C                   if        svtfclcd <> lasttfclcd
+     C                   seton                                        89
+     C                   move      svtfclcd      lasttfclcd
+     C                   endif
+      *
+     C                   if        svcgcd <> lastcgcd or
+     C                             svsgcd <> lastsgcd
+     C                   seton                                        88
+     C                   move      svcgcd        lastcgcd
+     C                   move      svsgcd        lastsgcd
+     C                   endif
+      *
+     C                   if        svmixgrp = *blank
+     C                   setoff                                       86
+     C                   else
+     C                   seton                                        86
+     C                   endif
+     C                   except    h2hdr
+      *
+     C                   setoff                                       878889
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve TF Classification Description
+      *---------------------------------------------------------------
+      *
+     C     $tfclds       begsr
+      *
+     C     ydtfclcd      chain     ppamrel1                           92
+     C                   if        *in92 = *on                                  If no hit
+     C                   eval      h2desc = 'TF Classification ' + ydtfclcd
+     C                   else
+     C                   eval      h2desc = %trim(amq0na) +
+     C                                      ' (TF Classification ' +
+     C                                      %trim(ydtfclcd) + ')'
+     C                   endif                                                  If no hit
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    svsumlev
+      *
+     C     key02         klist
+     C                   kfld                    ydpesn
+     C                   kfld                    yditcd
+      *
+      * Retrieve time for report heading.
+      *
+     C                   time                    rtime
+      *
+      * This report is generated on-demand and also from the
+      * Margin Adjustment Close function.
+      *
+     C                   select
+     C                   when      ldpfcd = 'D'
+     C                   eval      %subst(h1demand:13:9) = 'On-Demand'
+      *
+     C                   when      ldpfcd = 'F'
+     C                   eval      %subst(h1demand:4:29) =
+     C                             'Final Margin Adjustment Close'
+      *
+     C                   when      ldpfcd = 'P'
+     C                   eval      %subst(h1demand:1:35) =
+     C                             'Preliminary Margin Adjustment Close'
+     C                   endsl
+      *
+      * When the report is generated on-demand, the user can enter selections.
+      *
+      * TF classification code
+      *
+     C                   if        ldtfclcd = *blank
+     C                   seton                                        96
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report lines
+      *-------------------------------------------------------------
+      *
+     Oprint198  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                          103 'Byproduct Mix Adjustment'
+     O                                          110 ' Report'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                       h1demand           113
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+     O          e            h1hdr          1
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+      *
+     O          e            h1hdr          1
+     O                                           23 'Year/week:'
+     O                       ldyr          z     29
+     O                       ldwk          z     33
+      *
+     O          e            h1hdr          1
+     O                                           23 'Week-ending date:'
+     O                       ldwemdy             33 '  /  /  '
+      *
+     O          e            h1hdr          2
+     O                                           23 'TF classification code:'
+     O              n96      ldtfclcd            28
+     O               96                          28 'All'
+     O              n96      ldtfclds            64
+      *
+      *
+      *-------------------------------------------------------------
+      * Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr          1
+     O                                           53 'Std'
+     O                                           65 'Std'
+      *
+     O                                           80 'AGG Net'
+     O                                           93 'AGG'
+     O                                          106 'AGG Net'
+      *
+     O                                          120 'SBD Net'
+     O                                          134 'SBD'
+     O                                          148 'SBD Net'
+      *
+     O                                          169 'TF Net'
+     O                                          183 'TF'
+     O                                          197 'TF Net'
+     O          e            h1hdr          1
+     O                                           11 'Item'
+     O                                           53 'Yield'
+     O                                           65 'Total'
+      *
+     O                                           80 'Produced'
+     O                                           93 'Produced'
+     O                                          106 'Prod Value'
+      *
+     O                                          120 'Produced'
+     O                                          134 'Produced'
+     O                                          148 'Prod Value'
+      *
+     O                                          169 'Produced'
+     O                                          183 'Produced'
+     O                                          197 'Prod Value'
+     O          e            h1hdr          1
+     O                                           11 'Code'
+     O                                           24 'Description'
+     O                                           53 'Percent'
+     O                                           65 'Cost/lb'
+      *
+     O                                           80 'Price/lb'
+     O                                           93 'Pounds'
+     O                                          106 'Amount'
+      *
+     O                                          120 'Price/lb'
+     O                                          134 'Pounds'
+     O                                          148 'Amount'
+      *
+     O                                          169 'Price/lb'
+     O                                          183 'Pounds'
+     O                                          197 'Amount'
+     O          e            h1hdr          1
+     O                       dash               198
+      *
+      *-------------------------------------------------------------
+      * Heading for Item Structure Type/Group/Class
+      *-------------------------------------------------------------
+      *
+     O          e            h2hdr       1  0
+     O               89      h2desc              54
+     O               88                          67 'MC Grp/Sub:'
+     O               88      svcgcd              72
+     O               88      svsgcd              77
+     O               86                          93 'Mix Group:'
+     O               86      svmixgrp            95
+     O                                          119 'IS Type/Group/Class:'
+     O                       svistycd      z    125
+     O                       svisgrcd      z    129
+     O                       svisclcd      z    133
+      *
+     O               87                         165 'SUMMARY LEVEL:'
+     O               87      svsumlev           190
+      *
+     O          e            h2hdr          1
+     O               89      h2desc              54
+     O               88                          67 'MC Grp/Sub:'
+     O               88      svcgcd              72
+     O               88      svsgcd              77
+     O               86                          93 'Mix Group:'
+     O               86      svmixgrp            95
+     O                                          119 'IS Type/Group/Class:'
+     O                       svistycd      z    125
+     O                       svisgrcd      z    129
+     O                       svisclcd      z    133
+      *
+     O               87                         165 'SUMMARY LEVEL:'
+     O               87      svsumlev           190
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl          1
+     O               85      ydittycd             3
+     O                       yditcd        z     11
+     O                       l1ds           b    43
+      *
+     O                       ydsypc        k     54
+     O                       l1totco       kb    66
+      *
+     O                       ydnpupr       k     81
+     O                       l1apulb       kb    94
+     O                       l1anpuam      kb   107
+      *
+     O                       l1spulb       kb   135
+     O                       l1snpuam      kb   149
+      *
+     O                       l1tpulb       kb   184
+     O                       l1tnpuam      kb   198
+      *
+      *-------------------------------------------------------------
+      * Exception line (for Sirloin/Trim)
+      *-------------------------------------------------------------
+      *
+     O          e            l2dtl          1
+     O                       yeexds              66
+     O                       yenpupr       k     81
+     O                       l2apulb       kb    94
+     O                       l2anpuam      kb   107
+      *
+     O                       l2spulb       kb   135
+     O                       l2snpuam      kb   149
+      *
+     O                       l2tpulb       kb   184
+     O                       l2tnpuam      kb   198
+      *
+      *-------------------------------------------------------------
+      * Total line for Item Structure Type/Group/Class
+      *-------------------------------------------------------------
+      *
+     O          e            t1tot       0  1
+     O                                           80 '-----------'
+     O                                           93 '-----------'
+     O                                          107 '-----------'
+      *
+     O                                          120 '-----------'
+     O                                          134 '-----------'
+     O                                          148 '-----------'
+      *
+     O                                          169 '-----------'
+     O                                          183 '-----------'
+     O                                          197 '-----------'
+      *
+     O          e            t1tot          2
+     O                       t1anpupr      kb    81
+     O                       t1apulb       kb    94
+     O                       t1anpuam      kb   107
+      *
+     O                       t1snpupr      kb   121
+     O                       t1spulb       kb   135
+     O                       t1snpuam      kb   149
+      *
+     O                       t1tnpupr      kb   170
+     O                       t1tpulb       kb   184
+     O                       t1tnpuam      kb   198
+      *
+      *----------------------------------------------------------------------------
+      * Summary Level "total" line (conditionally printed)
+      *----------------------------------------------------------------------------
+      *
+     O          e            t2tot       0  0
+     O                                           65 'SUMMARY LEVEL TOTALS:'
+     O          e            t2tot       0  1
+     O                                           65 'SUMMARY LEVEL TOTALS:'
+     O                       ysanpupr      k     81
+     O                       t2apulb       kb    94
+     O                       t2anpuam      kb   107
+
+     O                       yssnpupr      kb   121
+     O                       t2spulb       kb   135
+     O                       t2snpuam      kb   149
+
+     O                       ystnpupr      kb   170
+     O                       t2tpulb       kb   184
+     O                       t2tnpuam      kb   198
+      *
+      *-------------------------------------------------------------
+      * Summary Level "due" line
+      *-------------------------------------------------------------
+      *
+     O          e            t2due       0  0
+     O                                           65 'SUMMARY LEVEL DUE:'
+     O                       yssduam       k     81
+      *
+     O          e   n84      t2due       0  2
+     O                                           65 'SUMMARY LEVEL DUE:'
+     O                       yssduam       k     81
+     O                                           95 'SBD MIX AMT:'
+     O                       yssmixam      k    111
+     O                                          126 'COOWNED AMT:'
+     O                       ysstrpam      k    142
+      *
+      *
+     O          e    84      t2due       0  2
+     O                                           65 'SUMMARY LEVEL DUE:'
+     O                                           74 'Nothing'
+      *
+      *-------------------------------------------------------------
+      * Total line for Report
+      *-------------------------------------------------------------
+      *
+     O          e            t3tot       1  1
+     O                                           18 'TOTAL SBD PAYMENT:'
+     O                                           31 'Mix Amount:'
+     O                       t3smixam      k     47
+     O                                           64 'CoOwned Amount:'
+     O                       t3strpam      k     80
+     O                                           94 'Due Amount:'
+     O                       t3sduam       k    110
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank       1
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata      1
+     O                                           19 'No data meets your'
+     O                                           39 'selection criteria.'
+      /eject

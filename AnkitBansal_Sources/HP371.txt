@@ -1,0 +1,2370 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP371
+      * TITLE:       Build Workfiles for Closing Hog Groups
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     6/20/94
+      *
+      *  FUNCTION:   This batch program builds 2 workfiles for closing groups.
+      *
+      /EJECT
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 08/07/00  LeAnne Fedor
+      *           Added 'adjusted transfer in' logic.
+      *
+      * 05/02/01  LeAnne Fedor
+      *           Changed logic using 'shipped' pounds to use 'received' pounds for TRANO,
+      *           COS and WGAIN records.
+      *
+      * 08/20/01  LeAnne Fedor
+      *           We are replacing workfile hsp372-Transfers with a permanent database
+      *           file hsp086-Costed Transfers.  So, all logic originally for the
+      *           workfile has been rewritten for the new database file.
+      *
+      * 10/28/02  LeAnne Fedor
+      *           We had duplicate records for some movements/line numbers.
+      *           Fixed bug on chain to hsp086-Costed Transfers. No indicator was assigned
+      *           to the chain---even though a) we checked after the chain for a hit and
+      *           b) the code documentation indicated that we should only write a record
+      *           if no record already existed for the movement/line number.
+      *
+      * 01/29/03  LeAnne Fedor
+      *           Removed all hardcoded special logic for SHAUL.
+      *
+      * 04/10/03  LeAnne Fedor
+      *           We redesigned/rewrote 'transfer costing' logic.
+      *
+      * 07/16/03  LeAnne Fedor
+      *           Changed Cull Sale logic to use 'net' instead of 'gross' amount.
+      *           Since we now have a 'preliminary' disposed group edit, removed
+      *           edits from this program.
+      *
+      * 12/17/03  LeAnne Fedor
+      *           Apparently, since the beginning, the DOA head/lbs on the CULLS and
+      *           FPS records were doubled. Fixed bug.
+      *
+      * 01/16/06  LeAnne Fedor
+      *           Removed file HSJ034L from the F-spec. It was not being used in this
+      *           program.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 03/26/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp006    if   e           k disk
+      *    Report codes
+      *
+      *
+     Fhsl034d   if   e           k disk
+      *    Hog group
+      *    (open query used to select disposed groups on date range)
+      *
+      *
+     Fhsl038e   if   e           k disk
+      *   Feed ticket detail
+      *
+      *
+     Fhsp044    if   e           k disk
+      *   Deduction/add-on codes
+      *
+      *
+     Fhsp045    if   e           k disk
+      *   Premium/discount codes
+      *
+      *
+     Fhsl048b   if   e           k disk
+      *   Expense ticket
+      *
+      *
+     Fhsl058d   if   e           k disk
+      *    movement event
+      *
+      *
+     Fhsl064i   if   e           k disk
+      *    Check detail
+      *
+      *
+     Fhsp065    if   e           k disk
+      *    Check adjustments
+      *
+      *
+     Fhsl065c   if   e           k disk    rename(cjrec:cjrecc) prefix(p1)
+      *    Check adjustments
+      *
+      *
+     Fhsp066    if   e           k disk
+      *    Sale type codes
+      *
+      *
+     Fhsl068d   if   e           k disk    rename(kdrec:kdrecd)
+      *  Killed/dead hogs
+      *
+      *
+     Fhsl069a   if   e           k disk    rename(iarec:iareca)
+      *  Inventory adjustments
+      *
+      *
+     Fhsp071    if   e           k disk
+      *    Ration
+      *
+      *
+     Fhsp073    if   e           k disk
+      *    Ration calories
+      *
+      *
+     Fhsj075a   if   e           k disk
+      *  Transfer movement detail + header
+      *
+      *
+     Fhsp079    if   e           k disk
+      *    Sale type report codes
+      *
+      *
+     Fhsp084    if   e           k disk
+      *    Sales movement header
+      *
+      *
+     Fhsl085b   if   e           k disk
+      *    Sales movement detail
+      *
+      *
+     Fhsl118b   if   e           k disk
+      *    Cost Movements: Costed movements
+      *
+      *
+     Fhsl118c   if   e           k disk    rename(cmrec:cmrecc)
+      *    Cost Movements: Costed movements
+      *
+      *
+     Fhsp371    uf a e           k disk
+      *    Workfile: Hog group report codes
+      *
+      *
+     Fhsp373    o    e           k disk
+      *    Workfile: Hog group header
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Named constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *---------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------
+      *
+      * Workfields for date manipulation
+      *
+     D wkcymdiso       s               D   datfmt(*iso)
+      *
+      * Workfields for Feed Ticket processing
+      *
+     D wkfdam          s                   like(wgcgam)
+     D wkinam          s                   like(wgcgam)
+     D wkmfam          s                   like(wgcgam)
+     D wkdlam          s                   like(wgcgam)
+     D wkmdam          s                   like(wgcgam)
+      *
+     D wkfdlb          s                   like(wgcglb)
+     D wkinlb          s                   like(wgcglb)
+     D wkmflb          s                   like(wgcglb)
+     D wkdllb          s                   like(wgcglb)
+     D wkmdlb          s                   like(wgcglb)
+     D wklylb          s                   like(wgcglb)
+      *
+     D wkkcqt          s                   like(wgcgqt)
+      *
+     D wklypr          s              5  4
+     D wkqt            s             15  2
+     D wkhd            s             15  0
+     D wklb            s             15  4
+      *
+      *
+      * Workfields to accumulate DOA values on Transfers and Sales
+      *
+     D wkdhd           s                   like(wkhd)
+     D wkdlb           s                   like(wklb)
+      *
+      *
+      * Workfields to accumulate values for Transfers
+      *
+     D wkshhd          s                   like(wkhd)
+     D wkrchd          s                   like(wkhd)
+     D wkdohd          s                   like(wkhd)
+      *
+     D wkshlb          s                   like(wklb)
+     D wkrclb          s                   like(wklb)
+     D wkdolb          s                   like(wklb)
+      *
+      *
+      * Workfields to accumulate values for Cull Sales
+      *
+     D wcshhd          s                   like(wkhd)
+     D wcrchd          s                   like(wkhd)
+      *
+     D wcshlb          s                   like(wklb)
+     D wcrclb          s                   like(wklb)
+      *
+     D wkcullam        s                   like(wgcgam)
+      *
+      *
+      * Workfields to accumulate values for Feeder Pig Sales
+      *
+     D wfshhd          s                   like(wkhd)
+     D wfrchd          s                   like(wkhd)
+      *
+     D wfshlb          s                   like(wklb)
+     D wfrclb          s                   like(wklb)
+      *
+      *
+      * Workfields to accumulate values for Market Hog Sales
+      *
+     D wmshhd          s                   like(wkhd)
+     D wmrchd          s                   like(wkhd)
+      *
+     D wmshlb          s                   like(wklb)
+     D wmrclb          s                   like(wklb)
+      *
+      *
+      * Workfields for Expense Ticket processing
+      *
+     D wkxtam          s                   like(wgcgam)
+     D wkxthd          s                   like(wgcghd)
+     D wkxtlb          s                   like(wgcglb)
+     D wkxtqt          s                   like(wgcgqt)
+     D svrpcd          s                   like(xtrpcd)
+     D firstexp        s              1    inz('Y')
+      *
+      *
+      * Workfields for Pig Day calculations
+      *
+     D wkpday          s             11  0
+      *
+      *
+      * Workfields for Backfat calculations
+      *
+     D wkb1            s             15  4
+     D wkb2            s             15  4
+     D wkbllb          s                   like(wgcglb)
+     D wkbclb          s                   like(wgcrlb)
+     D wkbhd           s                   like(wgcghd)
+     D wkbcdhd         s                   like(wgcghd)
+     D wkbcdlb         s                   like(wgcglb)
+     D wkbydhd         s                   like(wgcghd)
+     D wkbydlb         s                   like(wgcglb)
+      *
+      *
+      * Workfields for Lean Percent calculations
+      *
+     D wkl1            s             15  4
+     D wkl2            s             15  4
+     D wklllb          s                   like(wgcglb)
+     D wklclb          s                   like(wgcrlb)
+     D wklhd           s                   like(wgcghd)
+     D wklcdhd         s                   like(wgcghd)
+     D wklcdlb         s                   like(wgcglb)
+     D wklydhd         s                   like(wgcghd)
+     D wklydlb         s                   like(wgcglb)
+      *
+      *
+      * Workfields for Loin Eye calculations
+      *
+     D wke1            s             15  4
+     D wke2            s             15  4
+     D wkellb          s                   like(wgcglb)
+     D wkeclb          s                   like(wgcrlb)
+     D wkehd           s                   like(wgcghd)
+     D wkecdhd         s                   like(wgcghd)
+     D wkecdlb         s                   like(wgcglb)
+     D wkeydhd         s                   like(wgcghd)
+     D wkeydlb         s                   like(wgcglb)
+      *
+      *
+      * Workfields for Carcass Yield calculations
+      *
+     D wkcy1           s             15  4
+      *
+     D wkcrlb          s                   like(wgcglb)
+     D wklvlb          s                   like(wgcglb)
+     D wkcyhd          s                   like(wgcghd)
+     D wkccdhd         s                   like(wgcghd)
+     D wkccdlb         s                   like(wgcglb)
+     D wkcydhd         s                   like(wgcghd)
+     D wkcydlb         s                   like(wgcglb)
+      *
+      *
+      * Workfields for Weight Gain
+      *
+     D wkolb           s                   like(wgcglb)
+     D wkilb           s                   like(wgcglb)
+     D wkslb           s                   like(wgcglb)
+      *
+      *
+      * Workfields for Costed Transfers
+      *
+     D wktiam          s             15  2
+     D wktidpam        s             15  2
+     D wktispam        s             15  2
+      *
+     D wktoam          s             15  2
+     D wktodpam        s             15  2
+     D wktospam        s             15  2
+      *
+      *
+      * Workfields for Total Cost
+      *
+     D cosam           s                   like(wgcgam)
+     D coshd           s                   like(wgcghd)
+     D coslb           s                   like(wgcglb)
+     D cosclb          s                   like(wgcrlb)
+      *
+      *
+      * Workfields to hold interim summed values
+      *
+     D wkcghd          s                   like(wgcghd)
+     D wkcdhd          s                   like(wgcghd)
+     D wkydhd          s                   like(wgcghd)
+     D wkmrkdohd       s                   like(wgcghd)
+      *
+     D wkcdlb          s                   like(wgcglb)
+     D wkcglb          s                   like(wgcglb)
+     D wkclb           s                   like(wgcglb)
+     D wkydlb          s                   like(wgcglb)
+     D wkmrkdolb       s                   like(wgcglb)
+      *
+     D wkcgqt          s                   like(wgcgqt)
+     D wkcgam          s                   like(wgcgam)
+      *
+      *
+      * General workfields
+      *
+     D svhgsn          s                   like(wghgsn)
+     D wkrpcd          s                   like(rprpcd)
+      *
+      *
+      *
+      * Parm fields for the generic movement program
+      *
+     D zzcymd          s              8  0
+      *
+     D @@nu50          s              5  0
+     D gpihd           s                   like(@@nu50)
+     D pinhd           s                   like(@@nu50)
+     D tinhd           s                   like(@@nu50)
+     D tisphd          s                   like(@@nu50)
+     D tidphd          s                   like(@@nu50)
+     D pouhd           s                   like(@@nu50)
+     D touhd           s                   like(@@nu50)
+     D tosphd          s                   like(@@nu50)
+     D todphd          s                   like(@@nu50)
+     D rinhd           s                   like(@@nu50)
+     D rouhd           s                   like(@@nu50)
+     D qinhd           s                   like(@@nu50)
+     D qouhd           s                   like(@@nu50)
+     D morhd           s                   like(@@nu50)
+     D inahd           s                   like(@@nu50)
+      *
+     D @@nu92          s              9  2
+     D pinlb           s                   like(@@nu92)
+     D tinlb           s                   like(@@nu92)
+     D tisplb          s                   like(@@nu92)
+     D tidplb          s                   like(@@nu92)
+     D poulb           s                   like(@@nu92)
+     D toulb           s                   like(@@nu92)
+     D tosplb          s                   like(@@nu92)
+     D todplb          s                   like(@@nu92)
+     D rinlb           s                   like(@@nu92)
+     D roulb           s                   like(@@nu92)
+     D qinlb           s                   like(@@nu92)
+     D qoulb           s                   like(@@nu92)
+     D morlb           s                   like(@@nu92)
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Process each hog group record selected by the open query
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsl034d                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Initialize accumulators
+      *
+     C                   exsr      $clear
+      *
+      * Set up group fields/flags
+      *
+     C                   z-add     hgfscd        wgfscd
+     C                   z-add     hghgsn        wghgsn
+     C                   movel     hghgcd        wghgcd
+     C                   move      yes           firstexp
+      *
+      * For each disposed group, read/process all:
+      *  Feed tickets
+      *  Expense tickets
+      *  Movements:
+      *      Inventory adjustments
+      *      Daily deads
+      *      Sales movements (including checks and adjustments)
+      *      Transfer movements
+      *      Costed transfer records
+      *      Adjusted transfer in movements
+      *
+     C                   exsr      $feed
+     C                   exsr      $expenses
+     C                   exsr      $adjust
+     C                   exsr      $dead
+     C                   exsr      $sales
+     C                   exsr      $tranmove
+     C                   exsr      $trancost
+     C                   exsr      $tranadj
+      *
+      * After processing each group, write the following records:
+      *     Cost of sales
+      *     Pig days
+      *     Weight gain
+      *     Performance records
+      *
+     C                   exsr      $cost
+     C                   exsr      $pday
+     C                   exsr      $wgain
+     C                   exsr      $perf
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * After all processing is complete, clean up the group workfile.
+      *
+     C                   exsr      $cleanup
+      *
+      * After clean-up is complete, write group header workfile records.
+      *
+     C                   exsr      $header
+      *
+      * Call utility program to reclaim resources---close files and clean up
+      * after the generic programs that do not set on the last record indicator.
+      *
+     C                   call      'UTRCRSC'
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve Category Code associate with the Report Code
+      *---------------------------------------------------------------
+      *
+     C     $cacd         begsr
+      *
+     C                   movel     wkrpcd        wgrpcd
+      *
+     C     wkrpcd        chain     hsp006                             92
+     C                   if        *in92 = *off
+     C                   movel     rpcacd        wgcacd
+     C                   z-add     rpseq         wgseq
+     C                   else
+     C                   move      *blank        wgcacd
+     C                   z-add     0             wgseq
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process all Feed Detail records for a Disposed Group
+      *--------------------------------------------------------------------------------------
+      *
+      * This subroutine first reads all feed ticket detail records for the group accumulating
+      * values. After all detail records have been processed for a group, the workfile records
+      * are written.
+      *
+     C     $feed         begsr
+      *
+      * Initialize accumulators
+      *
+     C                   z-add     0             wkfdam
+     C                   z-add     0             wkfdlb
+     C                   z-add     0             wkinam
+     C                   z-add     0             wkinlb
+     C                   z-add     0             wkmfam
+     C                   z-add     0             wkmflb
+     C                   z-add     0             wkdlam
+     C                   z-add     0             wkdllb
+     C                   z-add     0             wkmdam
+     C                   z-add     0             wkmdlb
+      *
+     C                   z-add     0             wkkcqt
+     C                   z-add     0             wklylb
+      *
+     C     hghgsn        setll     hsl038e
+      *
+     C                   dou       *in93 = *on                                  Do feed
+     C     hghgsn        reade     hsl038e                                93
+     C                   if        *in93 = *off                                 If not EOF
+      *
+      * Accumulate all costs into a total feed cost for the group
+      *
+     C                   add       fdinam        wkfdam
+     C                   add       fdmfam        wkfdam
+     C                   add       fddlam        wkfdam
+     C                   add       fdmdam        wkfdam
+      *
+      * Accumulate total feed pounds for the group
+      *
+     C                   add       fdfdlb        wkfdlb
+      *
+      * Make further accumulations based on the various cost values in the detail
+      * feed record
+      *
+     C                   if        fdinam <> 0                                  If ingredient
+     C                   add       fdfdlb        wkinlb
+     C                   add       fdinam        wkinam
+     C                   endif                                                  If ingredient
+      *
+      *
+     C                   if        fdmfam <> 0                                  If manufacturing
+     C                   add       fdfdlb        wkmflb
+     C                   add       fdmfam        wkmfam
+     C                   endif                                                  If manufacturing
+      *
+      *
+     C                   if        fddlam <> 0                                  If delivery
+     C                   add       fdfdlb        wkdllb
+     C                   add       fddlam        wkdlam
+     C                   endif                                                  If delivery
+      *
+      *
+     C                   if        fdmdam <> 0                                  If medicated
+     C                   add       fdfdlb        wkmdlb
+     C                   add       fdmdam        wkmdam
+     C                   endif                                                  If medicated
+      *
+      *
+      * Retrieve Lysine Percent for the ration
+      *
+     C     fdrncd        chain     hsp071                             92
+     C                   if        *in92 = *off and rnlypr <> 0                 If lysine
+     C     rnlypr        div(h)    100           wklypr
+     C     wklypr        mult      fdfdlb        wklb
+     C                   add       wklb          wklylb
+     C                   endif                                                  If lysine
+      *
+      * Retrieve the ration's Caloric Content. Use the Reference Ticket
+      * Date for the retrieval.
+      *
+     C     key01         chain     hsp073                             92
+     C                   if        *in92 = *on                                  If not exact
+     C     key01         setll     hsp073
+     C     fdrncd        readpe    hsp073                                 92
+     C                   endif                                                  If not exact
+      *
+     C                   if        *in92 = *off                                 If any
+     C     fdfdlb        mult      cpclrt        wkqt
+     C                   add       wkqt          wkkcqt
+     C                   endif                                                  If any
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do feed
+      *
+      *----------------------------------------------------------------
+      * All Feed Detail has been processed for a Hog Group, write the feed
+      * workfile records for the group using hardcoded Feed Report Codes
+      * (there are 7 feed codes) and retrieving the Category Code (which will
+      * probably always be Feed) for each report code.
+      *
+      *  Feed Record 1 - Ingredient
+      *
+     C                   if        wkinlb <> 0 or wkinam <> 0
+     C                   movel     'FING '       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     wkinlb        wgcglb
+     C                   z-add     wkinam        wgcgam
+     C                   exsr      $feedwrt
+     C                   endif
+      *
+      *  Feed Record 2 - Manufacturing
+      *
+     C                   if        wkmflb <> 0 or wkmfam <> 0
+     C                   movel     'FMFG '       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     wkmflb        wgcglb
+     C                   z-add     wkmfam        wgcgam
+     C                   exsr      $feedwrt
+     C                   endif
+      *
+      *  Feed Record 3 - Delivery
+      *
+     C                   if        wkdllb <> 0 or wkdlam <> 0
+     C                   movel     'FDEL '       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     wkdllb        wgcglb
+     C                   z-add     wkdlam        wgcgam
+     C                   exsr      $feedwrt
+     C                   endif
+      *
+      *  Feed Record 4 - Medication
+      *
+     C                   if        wkmdlb <> 0 or wkmdam <> 0
+     C                   movel     'FMED '       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     wkmdlb        wgcglb
+     C                   z-add     wkmdam        wgcgam
+     C                   exsr      $feedwrt
+     C                   endif
+      *
+      *  Feed Record 5 - Calories
+      *
+     C                   if        wkkcqt <> 0
+     C                   movel     'FCAL '       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     wkkcqt        wgcgqt
+     C                   exsr      $feedwrt
+     C                   endif
+      *
+      *
+      *  Feed Record 6 - Lysine
+      *
+     C                   if        wklylb <> 0
+     C                   movel     'FPRO '       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     wklylb        wgcglb
+     C                   exsr      $feedwrt
+     C                   endif
+      *
+      *  Feed Record 7 - Total
+      *
+     C                   if        wkfdlb <> 0 or wkfdam <> 0
+     C                   movel     'FCONS'       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     wkfdlb        wgcglb
+     C                   z-add     wkfdam        wgcgam
+     C                   exsr      $feedwrt
+     C                   endif
+      *
+      * Accumulate the Feed Dollars for this group into the field holding the
+      * Total Cost for this group.
+      *
+     C                   add       wkfdam        cosam
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write a Feed workfile record
+      *---------------------------------------------------------------
+      *
+     C     $feedwrt      begsr
+      *
+     C                   write     wgrec
+      *
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgcgqt
+     C                   z-add     0             wgcglb
+     C                   z-add     0             wgcghd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Process all Expense Records for a Disposed group
+      *---------------------------------------------------------------------------------------
+      *
+      * This subroutine processes all Expense Tickets for the hog group accumulating values
+      * by Report Code. When the Report Code in the Expense Ticket file changes, a record
+      * is written to the workfile and the accumulator fields are cleared.
+      *
+     C     $expenses     begsr
+      *
+     C     hghgsn        setll     hsl048b
+      *
+     C                   dou       *in93 = *on                                  Do expense
+     C     hghgsn        reade     hsl048b                                93
+     C                   if        *in93 = *off                                 If not EOF
+      *
+     C                   if        firstexp = yes
+     C                   move      xtrpcd        svrpcd
+     C                   move      no            firstexp
+     C                   endif
+      *
+      * When Report Code changes,
+      *    Retrieve Category Code
+      *    Write a workfile record for this expense
+      *    Clear accumulators
+      *
+     C                   if        xtrpcd <> svrpcd
+     C                   movel     svrpcd        wkrpcd
+     C                   exsr      $cacd
+     C                   exsr      $expwrite
+     C                   movel     xtrpcd        svrpcd
+     C                   endif
+      *
+      * Accumulate values for each record read
+      *
+     C                   add       xtxtam        wkxtam
+     C                   add       xtxthd        wkxthd
+     C                   add       xtxtlb        wkxtlb
+     C                   add       xtxtqt        wkxtqt
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do expense
+      *
+      * If any values were accumulated for the last Report Code, then write
+      * a workfile record for this last expense.
+      *
+     C                   if        wkxtam <> 0 or
+     C                             wkxtlb <> 0 or
+     C                             wkxthd <> 0 or
+     C                             wkxtqt <> 0
+     C                   movel     svrpcd        wkrpcd
+     C                   exsr      $cacd
+     C                   exsr      $expwrite
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write a workfile record for Expenses
+      *---------------------------------------------------------------
+      *
+     C     $expwrite     begsr
+      *
+     C                   z-add     wkxtam        wgcgam
+     C                   z-add     wkxthd        wgcghd
+     C                   z-add     wkxtlb        wgcglb
+     C                   z-add     wkxtqt        wgcgqt
+     C                   write     wgrec
+      *
+      * Accumulate the Expense Dollars for this record into the field holding the
+      * Total Cost for this group.
+      *
+     C                   add       wkxtam        cosam
+      *
+     C                   z-add     0             wkxtam
+     C                   z-add     0             wkxthd
+     C                   z-add     0             wkxtlb
+     C                   z-add     0             wkxtqt
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------------
+      * Process all Inventory Adjustments for a Group
+      *----------------------------------------------------------------------------------------
+      *
+     C     $adjust       begsr
+      *
+     C                   z-add     0             wkhd
+     C     hghgsn        setll     hsl069a
+      *
+     C                   dou       *in93 = *on                                  Do adjustments
+     C     hghgsn        reade     hsl069a                                93
+     C                   if        *in93 = *off
+     C                   add       iaiahd        wkhd
+     C                   endif
+     C                   enddo                                                  Do adjustments
+      *
+     C                   if        wkhd <> 0                                    If anything
+     C                   movel     'INADJ'       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     wkhd          wgcghd
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgcgqt
+     C                   z-add     0             wgcrlb
+     C                   z-add     0             wgcglb
+     C                   z-add     0             wgcdhd
+     C                   z-add     0             wgcdlb
+     C                   z-add     0             wgydhd
+     C                   z-add     0             wgydlb
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   write     wgrec
+     C                   endif                                                  If anything
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Process all Daily Killed/Dead hogs for a group
+      *---------------------------------------------------------------
+      *
+     C     $dead         begsr
+      *
+     C     hghgsn        setll     hsl068d
+     C                   z-add     0             wkdhd
+     C                   z-add     0             wkdlb
+      *
+     C                   dou       *in93 = *on                                  Do deads
+     C     hghgsn        reade     hsl068d                                93
+     C                   if        *in93 = *off
+     C                   add       kdkdhd        wkdhd
+     C                   add       kdkdlb        wkdlb
+     C                   endif
+     C                   enddo                                                  Do deads
+      *
+     C                   if        wkdhd <> 0 or wkdlb <> 0                     If anything
+      *
+      * Create the Report Code record that will hold  'Daily Dead and DOA'
+      *
+     C                   movel     'DEAD '       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgcgqt
+     C                   z-add     0             wgcrlb
+     C                   z-add     wkdhd         wgcghd
+     C                   z-add     wkdlb         wgcglb
+     C                   z-add     0             wgcdhd
+     C                   z-add     0             wgcdlb
+     C                   z-add     0             wgydhd
+     C                   z-add     0             wgydlb
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   write     wgrec
+      *
+      * Create the Report Code record that will hold only  'Daily Dead'
+      *
+     C                   movel     'DDEAD'       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgcgqt
+     C                   z-add     0             wgcrlb
+     C                   z-add     wkdhd         wgcghd
+     C                   z-add     wkdlb         wgcglb
+     C                   z-add     0             wgcdhd
+     C                   z-add     0             wgcdlb
+     C                   z-add     0             wgydhd
+     C                   z-add     0             wgydlb
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   write     wgrec
+     C                   endif                                                  If anything
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Process all Transfer movements for a group
+      *---------------------------------------------------------------------------------------
+      *
+     C     $tranmove     begsr
+      *
+      * Clear the accumulators for DOA values
+      *
+     C                   z-add     0             wkdhd
+     C                   z-add     0             wkdlb
+      *
+      * Read/process all transfer movement for the group using the movement
+      * event file.
+      *
+     C     hghgsn        setll     hsl058d
+      *
+     C                   dou       *in93 = *on                                  Do events
+     C     hghgsn        reade     hsl058d                                93
+     C                   if        *in93 = *off and memtcd = 'T'                If transfer
+      *
+      * Retrieve/process the Transfer Detail record for this movement/line
+      *
+     C     key05         chain     hsj075a                            92
+     C                   if        *in92 = *off                                 If dtl/hdr
+      *
+     C                   select
+     C                   when      meodfl = 'O'
+     C                   exsr      $trano
+      *
+     C                   when      meodfl = 'D'
+     C                   exsr      $trani
+     C                   endsl
+     C                   endif                                                  If dtl/hdr
+     C                   endif                                                  If transfer
+     C                   enddo                                                  Do events
+      *
+      *
+      * After you have processed all transfers for a group, update the
+      * 'DEAD' Report Code record with the accumulated Dead-on-Arrival values.
+      * Here, you are updating the record for the 'origin' group---since the
+      * DOA's count against the origin group--not the destination group.
+      *
+     C                   if        wkdlb <> 0 or wkdhd <> 0                     If DOA
+     C                   z-add     wkdlb         wklb
+     C                   z-add     wkdhd         wkhd
+     C                   movel     'DEAD '       wkrpcd
+     C                   exsr      $up371
+     C                   endif                                                  If DOA
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Process Transfers for Destination Groups
+      *---------------------------------------------------------------
+      *
+     C     $trani        begsr
+      *
+      * Accumulate Quality/Reject pounds for later Weight Gain calculation.
+      *
+     C                   add       mdqllb        wkilb
+     C                   add       mdrjlb        wkilb
+      *
+      *----------------------------------------------------
+      * Transferred in
+      *----------------------------------------------------
+      *
+     C                   if        mdqllb <> 0 or                               If received
+     C                             mdqlhd <> 0 or
+     C                             mdrjlb <> 0 or
+     C                             mdrjhd <> 0
+      *
+     C                   z-add     mdqllb        wklb
+     C                   add       mdrjlb        wklb
+     C                   z-add     mdqlhd        wkhd
+     C                   add       mdrjhd        wkhd
+      * Shipped
+     C                   z-add     mdshlb        wkshlb
+     C                   z-add     mdshhd        wkshhd
+      * Received
+     C                   z-add     mdqllb        wkrclb
+     C                   add       mdrjlb        wkrclb
+     C                   z-add     mdqlhd        wkrchd
+     C                   add       mdrjhd        wkrchd
+      * Dead-On-Arrival
+     C                   z-add     mddolb        wkdolb
+     C                   z-add     mddohd        wkdohd
+      *
+     C                   movel     'TRANI'       wkrpcd
+     C                   exsr      $up371
+      *
+     C                   if        mhorpp = mhdnpp
+     C                   movel     'TRISP'       wkrpcd
+     C                   else
+     C                   movel     'TRIDP'       wkrpcd
+     C                   endif
+     C                   exsr      $up371
+      *
+     C                   endif                                                  If received
+      *
+      * Clear the workfields holding Shipped/Received/DOA values. They are not
+      * written to any remaining transfer report codes.
+      *
+     C                   z-add     0             wkshhd
+     C                   z-add     0             wkrchd
+     C                   z-add     0             wkdohd
+     C                   z-add     0             wkshlb
+     C                   z-add     0             wkrclb
+     C                   z-add     0             wkdolb
+      *
+      *----------------------------------------------------
+      * Reject in
+      *----------------------------------------------------
+      *
+     C                   if        mdrjlb <> 0 or mdrjhd <> 0                   If reject
+     C                   z-add     mdrjlb        wklb
+     C                   z-add     mdrjhd        wkhd
+     C                   movel     'REJI '       wkrpcd
+     C                   exsr      $up371
+      *
+     C                   if        mhorpp = mhdnpp
+     C                   movel     'RJISP'       wkrpcd
+     C                   else
+     C                   movel     'RJIDP'       wkrpcd
+     C                   endif
+     C                   exsr      $up371
+     C                   endif                                                  If reject
+      *
+      *----------------------------------------------------
+      * Quality in
+      *----------------------------------------------------
+      *
+     C                   if        mdqllb <> 0 or mdqlhd <> 0                   If quality
+     C                   z-add     mdqllb        wklb
+     C                   z-add     mdqlhd        wkhd
+     C                   movel     'QUALI'       wkrpcd
+     C                   exsr      $up371
+      *
+     C                   if        mhorpp = mhdnpp
+     C                   movel     'QLISP'       wkrpcd
+     C                   else
+     C                   movel     'QLIDP'       wkrpcd
+     C                   endif
+     C                   exsr      $up371
+     C                   endif                                                  If quality
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Process Transfers for Origin groups
+      *---------------------------------------------------------------
+      *
+     C     $trano        begsr
+      *
+      * Accumulate Quality/Reject/DOA pounds for later Weight Gain calculation.
+      *
+     C                   add       mdqllb        wkolb
+     C                   add       mdrjlb        wkolb
+     C                   add       mddolb        wkolb
+      *
+      * Accumulate the total Quality/Reject Head and Pounds for the Cost
+      * of the group
+      *
+     C                   add       mdqllb        coslb
+     C                   add       mdrjlb        coslb
+     C                   add       mdqlhd        coshd
+     C                   add       mdrjhd        coshd
+      *
+      * Accumulate Dead-On-Arrival values at the destination group.
+      * (Note: The report cdoe for Mortality for the origin group will be
+      * updated with these accumulated values after all the transfers for
+      * a group are processed.)
+      *
+     C                   if        mddolb <> 0 or mddohd <> 0                   If DOA
+     C                   add       mddolb        wkdlb
+     C                   add       mddohd        wkdhd
+     C                   endif                                                  If DOA
+      *
+      *-------------------------------------------------------------------------------
+      * Transfer Out
+      *-------------------------------------------------------------------------------
+      *
+      * Note: The users want 'TRANSFER OUT' to omit DOA head.
+      *
+     C                   if        mdqlhd <> 0 or mdrjhd <> 0                   If received
+     C                   z-add     mdqllb        wklb
+     C                   add       mdrjlb        wklb
+     C                   z-add     mdqlhd        wkhd
+     C                   add       mdrjhd        wkhd
+      * Shipped
+     C                   z-add     mdshlb        wkshlb
+     C                   z-add     mdshhd        wkshhd
+      * Received
+     C                   z-add     mdqllb        wkrclb
+     C                   add       mdrjlb        wkrclb
+     C                   z-add     mdqlhd        wkrchd
+     C                   add       mdrjhd        wkrchd
+      * Dead-on-arrival
+     C                   z-add     mddolb        wkdolb
+     C                   z-add     mddohd        wkdohd
+      *
+     C                   movel     'TRANO'       wkrpcd
+     C                   exsr      $up371
+      *
+     C                   if        mhorpp = mhdnpp
+     C                   movel     'TROSP'       wkrpcd
+     C                   else
+     C                   movel     'TRODP'       wkrpcd
+     C                   endif
+     C                   exsr      $up371
+      *
+     C                   endif                                                  If received
+      *
+      *
+      * Clear the workfields holding SHipped/Received/DOA values. They are not
+      * written to any remaining transfer report codes.
+      *
+     C                   z-add     0             wkshhd
+     C                   z-add     0             wkrchd
+     C                   z-add     0             wkdohd
+     C                   z-add     0             wkshlb
+     C                   z-add     0             wkrclb
+     C                   z-add     0             wkdolb
+      *
+      *--------------------------------------------------------------------------
+      * REJECTED
+      *--------------------------------------------------------------------------
+      *
+     C                   if        mdrjhd <> 0 or mdrjlb <> 0                   If reject
+     C                   z-add     mdrjlb        wklb
+     C                   z-add     mdrjhd        wkhd
+     C                   movel     'REJO '       wkrpcd
+     C                   exsr      $up371
+      *
+     C                   if        mhorpp = mhdnpp
+     C                   movel     'RJOSP'       wkrpcd
+     C                   else
+     C                   movel     'RJODP'       wkrpcd
+     C                   endif
+      *
+     C                   exsr      $up371
+     C                   endif                                                  If reject
+      *
+      *--------------------------------------------------------------------------
+      * QUALITY
+      *--------------------------------------------------------------------------
+      *
+     C                   if        mdqlhd <> 0 or mdqllb <> 0                   If quality
+     C                   z-add     mdqllb        wklb
+     C                   z-add     mdqlhd        wkhd
+     C                   movel     'QUALO'       wkrpcd
+     C                   exsr      $up371
+      *
+     C                   if        mhorpp = mhdnpp
+     C                   movel     'QLOSP'       wkrpcd
+     C                   else
+     C                   movel     'QLODP'       wkrpcd
+     C                   endif
+      *
+     C                   exsr      $up371
+     C                   endif                                                  If quality
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Adjusted transfers-in
+      *----------------------------------------------------------------
+      *
+     C     $tranadj      begsr
+      *
+      * Retrieve the 'transfer-in' values for this group from the workfile
+      * record already written.
+      *
+     C                   eval      wkrpcd = 'TRANI'
+     C     key03         chain(n)  hsp371                             92
+     C                   if        *in92 = *off                                 If record hit
+      *
+      * Test the group's open date for a valid date.
+      *
+     C     *iso          test(d)                 hgopdt                 92
+     C                   if        *in92 = *off                                 If good date
+     C                   movel     hgopdt        wkcymdiso
+      *
+      * Calculate the 'cut-off' date as 7 days after the group's open date.
+      *
+     C                   adddur    7:*days       wkcymdiso
+     C                   move      wkcymdiso     zzcymd
+      *
+      *
+      * Retrieve the 'transfer out head and pounds' as of the cutoff date.
+      * Then, calculate the 'adjusted transfer in' head and pounds by subtracting
+      * the returned transfer out values from the transfer in values.
+      *
+     C                   call      'HPMOVE'      plist01
+     C     wgcghd        sub       touhd         wkhd
+     C     wgcglb        sub       toulb         wklb
+      *
+     C                   eval      wkrpcd = 'TRANA'
+     C                   exsr      $up371
+      *
+     C                   endif                                                  If good date
+     C                   endif                                                  If record hit
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Process all Costed Transfer records for a group
+      *---------------------------------------------------------------------------------------
+      *
+     C     $trancost     begsr
+      *
+      *----------------------------------------------------------
+      * Accumulate transfer costs where group is the Origin group
+      *----------------------------------------------------------
+      *
+     C     hghgsn        setll     hsl118b
+      *
+     C                   dou       *in93 = *on                                  Do origin
+     C     hghgsn        reade     hsl118b                                93
+     C                   if        *in93 = *off and cmmtcd = 'T'                If not EOF
+      *
+      * Accumulate cost of hogs transferred out
+      *
+     C                   add       cmam          wktoam
+      *
+      * Accumulate transfer out cost for same-phase and different-phase
+      *
+     C                   if        cmorppcd = cmdnppcd
+     C                   add       cmam          wktospam
+     C                   else
+     C                   add       cmam          wktodpam
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do origin
+      *
+      *---------------------------------------------------------------
+      * Accumulate transfer costs where group is the Destination group
+      *---------------------------------------------------------------
+      *
+     C     hghgsn        setll     hsl118c
+      *
+     C                   dou       *in93 = *on                                  Do destination
+     C     hghgsn        reade     hsl118c                                93
+     C                   if        *in93 = *off and cmmtcd = 'T'                If not EOF
+      *
+      * Accumulate transfer-in cost
+     C                   add       cmam          wktiam
+     C                   add       cmam          cosam
+      *
+      * Accumulate transfer-in cost for same-phase and different-phase
+      *
+     C                   if        cmorppcd = cmdnppcd
+     C                   add       cmam          wktispam
+     C                   else
+     C                   add       cmam          wktidpam
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do destination
+      *
+      *
+      *-----------------------------------------------------
+      * Update the report codes for Transfers for this group
+      *-----------------------------------------------------
+      *
+      * Transfer in
+     C                   movel(p)  'TRANI'       wkrpcd
+     C     key03         chain     hsp371                             92
+     C                   if        *in92 = *off
+     C                   z-add     wktiam        wgcgam
+     C                   update    wgrec
+     C                   endif
+      *
+      * Transfer in same phase
+      *
+     C                   movel(p)  'TRISP'       wkrpcd
+     C     key03         chain     hsp371                             92
+     C                   if        *in92 = *off
+     C                   z-add     wktispam      wgcgam
+     C                   update    wgrec
+     C                   endif
+      *
+      * Transfer in different phase
+      *
+     C                   movel(p)  'TRIDP'       wkrpcd
+     C     key03         chain     hsp371                             92
+     C                   if        *in92 = *off
+     C                   z-add     wktidpam      wgcgam
+     C                   update    wgrec
+     C                   endif
+      *
+      * Transfer out
+      *
+     C                   movel(p)  'TRANO'       wkrpcd
+     C     key03         chain     hsp371                             92
+     C                   if        *in92 = *off
+     C                   z-add     wktoam        wgcgam
+     C                   update    wgrec
+     C                   endif
+      *
+      * Transfer out same phase
+      *
+     C                   movel(p)  'TROSP'       wkrpcd
+     C     key03         chain     hsp371                             92
+     C                   if        *in92 = *off
+     C                   z-add     wktospam      wgcgam
+     C                   update    wgrec
+     C                   endif
+      *
+      * Transfer out different phase
+      *
+     C                   movel(p)  'TRODP'       wkrpcd
+     C     key03         chain     hsp371                             92
+     C                   if        *in92 = *off
+     C                   z-add     wktodpam      wgcgam
+     C                   update    wgrec
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Update workfile records
+      *---------------------------------------------------------------
+      *
+     C     $up371        begsr
+      *
+     C     key03         chain     hsp371                             92
+     C                   if        *in92 = *on                                  If new
+     C                   exsr      $cacd
+     C                   z-add     0             wgcgqt
+     C                   z-add     wkhd          wgcghd
+     C                   z-add     wklb          wgcglb
+     C                   z-add     0             wgcrlb
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgcdhd
+     C                   z-add     0             wgcdlb
+     C                   z-add     0             wgydhd
+     C                   z-add     0             wgydlb
+     C                   z-add     wkshhd        wgshhd
+     C                   z-add     wkshlb        wgshlb
+     C                   z-add     wkrchd        wgrchd
+     C                   z-add     wkrclb        wgrclb
+     C                   z-add     wkdohd        wgdohd
+     C                   z-add     wkdolb        wgdolb
+     C                   write     wgrec
+     C                   else
+      *
+      * Modify an existing record
+      *
+     C                   add       wkhd          wgcghd
+     C                   add       wklb          wgcglb
+     C                   add       wkshhd        wgshhd
+     C                   add       wkshlb        wgshlb
+     C                   add       wkrchd        wgrchd
+     C                   add       wkrclb        wgrclb
+     C                   add       wkdohd        wgdohd
+     C                   add       wkdolb        wgdolb
+      *
+     C                   update    wgrec
+     C                   endif                                                  If new
+      *
+     C                   endsr
+      /EJECT
+      *-----------------------------------------------------------------------------------
+      * Process all Sales movements for a Group
+      *-----------------------------------------------------------------------------------
+      *
+      * This subroutine processes Check Detail records for a sales movement and, also, all
+      * Check Adustment records associated with each Check Detail record.
+      *
+     C     $sales        begsr
+      *
+      * First, process all Sale movement detail records to accumulate Total Shipped/Live/DOA
+      * values for later processing.
+      *
+     C                   exsr      $saledtl
+      *
+      * Now, process each Check Detail record for this group
+      *
+     C     hghgsn        setll     hsl064i
+      *
+     C                   dou       *in93 = *on                                  Do check detail
+     C     hghgsn        reade     hsl064i                                93
+     C                   if        *in93 = *off                                 If not EOF
+      *
+      * Retrieve Sales movement Header to get the Type of Sale
+      *
+     C     cdmvsn        chain     hsp084                             92
+     C                   if        *in92 = *off                                 If sales header
+      *
+      * Using the 'Type of Sale' from the Sales Header and the 'Type of Payment'
+      * from the Check Detail Line, retrieve the Report Code for this Check
+      * Detail record.
+      *
+     C     key02         chain     hsp079                             92
+     C                   if        *in92 = *off                                 If code
+     C                   movel     srrpcd        wkrpcd
+      *
+      * Update the workfile record for this Group/Report Code with the Check
+      * info
+      *
+     C     key03         chain     hsp371                             92
+     C                   if        *in92 = *on                                  If new
+     C                   exsr      $cacd
+     C                   z-add     cdlvhd        wgcghd
+     C                   z-add     cdcrlb        wgcrlb
+     C                   z-add     cdlvlb        wgcglb
+     C                   z-add     cdcdhd        wgcdhd
+     C                   z-add     cdcdlb        wgcdlb
+     C                   z-add     cdydhd        wgydhd
+     C                   z-add     cdydlb        wgydlb
+     C                   z-add     cddohd        wgdohd
+     C                   z-add     cddolb        wgdolb
+     C                   z-add     0             wgcgqt
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+      *
+      * Accumulate dollars conditionally, use:
+      * 1) Net Amount for Cull Sales
+      * 2) Base Amount for Paid Carcass
+      * 3) Gross Amount for Paid Live
+      *
+     C                   select
+     C                   when      shstcd = 'CULLS'
+     C                   exsr      $cullnet
+     C                   z-add     wkcullam      wgcgam
+      *
+      *
+     C                   when      cdtpcd = 'C'
+     C                   z-add     cdbaam        wgcgam
+     C                   other
+      *
+     C                   z-add     cdgram        wgcgam
+     C                   endsl
+      *
+     C                   write     wgrec
+     C                   else
+      *
+      * Modify an existing record
+      *
+     C                   add       cdlvhd        wgcghd
+     C                   add       cdlvlb        wgcglb
+     C                   add       cdcrlb        wgcrlb
+     C                   add       cdcdhd        wgcdhd
+     C                   add       cdcdlb        wgcdlb
+     C                   add       cdydhd        wgydhd
+     C                   add       cdydlb        wgydlb
+     C                   add       cddohd        wgdohd
+     C                   add       cddolb        wgdolb
+      *
+      * Accumulate dollars conditionally, use:
+      * 1) Net Amount for Cull Sales
+      * 2) Base Amount for Paid Carcass
+      * 3) Gross Amount for Paid Live
+      *
+     C                   select
+     C                   when      shstcd = 'CULLS'
+     C                   exsr      $cullnet
+     C                   add       wkcullam      wgcgam
+      *
+     C                   when      cdtpcd = 'C'
+     C                   add       cdbaam        wgcgam
+     C                   other
+      *
+     C                   add       cdgram        wgcgam
+     C                   endsl
+      *
+     C                   update    wgrec
+     C                   endif                                                  If new
+      *
+      *
+      * Retrieve the flag indicating whether this is a Sales Revenue or a
+      * Reduction of Sales Cost from the Sales Type file.  Then, accumulate
+      * pounds and dollars associated with Sales for the Total Cost for the
+      * group.
+      *
+     C     shstcd        chain     hsp066                             92
+     C                   if        *in92 = *off                                 If type ok
+      *
+      * Where the sale is considered a 'sales revenue',
+      * (Feeder Pig and Market Hog Sales)
+      *
+     C                   select
+     C                   when      stscfl = 'S'
+     C                   add       cdlvhd        coshd
+     C                   add       cdlvlb        coslb
+     C                   add       cdcrlb        cosclb
+      *
+      * Where the sale is considered a 'reduction in the cost of sales',
+      * (Cull Sales)
+     C                   when      stscfl = 'C'
+     C                   sub       wkcullam      cosam
+     C                   endsl
+      *
+     C                   endif                                                  If type ok
+      *
+      * Now, accumulate values for calculating performance measurements for the
+      * group--only for check detail records that were paid as 'carcass' and
+      * have 'carcass' pounds.
+      *
+     C                   if        cdtpcd = 'C' and cdcrlb <> 0
+     C                   exsr      $carc
+     C                   endif
+      *
+      * Now, if this is NOT a Cull sale,
+      * retrieve and process all Check Adjustment records that may exist
+      * for the Check Detail record just processed.
+      *
+     C                   if        shstcd <> 'CULLS'
+     C                   exsr      $chkadj
+     C                   endif
+      *
+     C                   endif                                                  If code
+     C                   endif                                                  If sales header
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do check detail
+      *
+      * Execute the subroutine to update existing sales report codes with
+      * values accumulated for the group.
+      *
+     C                   exsr      $saleupd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Arrive at Net Amount for a Cull Sale Check Detail line
+      *---------------------------------------------------------------
+      *
+     C     $cullnet      begsr
+      *
+      * Initialize the workfield with the 'gross amount' value from the
+      * check detail line.
+      *
+     C                   z-add     cdgram        wkcullam
+      *
+      * Now, retrieve all the adjustments for this detail line so that
+      * you can get to the 'net' amount for the check detail line.
+      * (NOTE: Deductions/additions are carried in the Adjustment file
+      * with the appropriate +/- sign. So, just 'add' them to the 'gross'.)
+      *
+     C     key04         setll     hsl065c
+     C                   dou       *in92 = *on                                  Do ded/add
+     C     key04         reade     hsl065c                                92
+     C                   if        *in92 = *off and p1cjcjfl = 'D'
+     C                   add       p1cjcjam      wkcullam
+     C                   endif
+     C                   enddo                                                  Do ded/add
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Process all Sale movement Detail records for a group
+      *---------------------------------------------------------------
+      *
+     C     $saledtl      begsr
+      *
+     C                   z-add     0             wkdhd
+     C                   z-add     0             wkdlb
+      *
+     C     hghgsn        setll     hsl085b
+      *
+     C                   dou       *in93 = *on                                  Do sale detail
+     C     hghgsn        reade     hsl085b                                93
+     C                   if        *in93 = *off                                 If not EOF
+      *
+      * Retrieve the Sale Type for each movement from the Sales movement
+      * Header and accumulate values accordingly.
+      *
+     C     sgmvsn        chain     hsp084                             92
+     C                   if        *in92 = *off                                 If sale header
+      *
+      * Always accumulate live/DOA values for later Weight Gain calc.
+      *
+     C                   add       sglvlb        wkslb
+     C                   add       sgdolb        wkslb
+      *
+      * Accumulate DOA values for later updating of Mortality record.
+      *
+     C                   add       sgdohd        wkdhd
+     C                   add       sgdolb        wkdlb
+      *
+      * Feeder Pig Sales
+     C                   select
+     C                   when      shstcd = 'FPS  '
+     C                   add       sgshhd        wfshhd
+     C                   add       sgshlb        wfshlb
+     C                   add       sglvhd        wfrchd
+     C                   add       sglvlb        wfrclb
+      *
+      * Cull Sale
+     C                   when      shstcd = 'CULLS'
+     C                   add       sgshhd        wcshhd
+     C                   add       sgshlb        wcshlb
+     C                   add       sglvhd        wcrchd
+     C                   add       sglvlb        wcrclb
+      *
+      * Market hog sale
+      *
+     C                   when      shstcd = 'MRKTS'
+     C                   add       sgshhd        wmshhd
+     C                   add       sgshlb        wmshlb
+     C                   add       sglvhd        wmrchd
+     C                   add       sglvlb        wmrclb
+     C                   endsl
+      *
+     C                   endif                                                  If sale header
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do sale detail
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Update existing Sale Report codes for a group
+      *---------------------------------------------------------------------------------------
+      *
+      * Update existing Sales Report codes with values accumulated for the group from the
+      * processing of the Sales movement detail records.
+      *
+     C     $saleupd      begsr
+      *
+      * If there were any DOA head/pounds, udpate the 'DEAD' report code.
+      *
+     C                   if        wkdhd <> 0 or wkdlb <> 0
+     C                   z-add     wkdhd         wkhd
+     C                   z-add     wkdlb         wklb
+     C                   movel     'DEAD '       wkrpcd
+     C                   exsr      $up371
+     C                   endif
+      *
+      * If there were any Feeder Pig Sale head/pounds, udpate the report code
+      * for Feeder Pig Sales
+      *
+     C                   if        wfshhd <> 0 or
+     C                             wfshlb <> 0 or
+     C                             wfrchd <> 0 or
+     C                             wfrclb <> 0
+     C                   movel     'FPS  '       wkrpcd
+     C                   z-add     0             wkhd
+     C                   z-add     0             wklb
+     C                   z-add     0             wkdohd
+     C                   z-add     0             wkdolb
+     C                   z-add     wfshhd        wkshhd
+     C                   z-add     wfshlb        wkshlb
+     C                   z-add     wfrchd        wkrchd
+     C                   z-add     wfrclb        wkrclb
+     C                   exsr      $up371
+     C                   endif
+      *
+      * If there were any Cull Sale head/pounds, udpate the report code
+      * for Cull Sales
+      *
+     C                   if        wcshhd <> 0 or
+     C                             wcshlb <> 0 or
+     C                             wcrchd <> 0 or
+     C                             wcrclb <> 0
+     C                   movel     'CULLS'       wkrpcd
+     C                   z-add     0             wkhd
+     C                   z-add     0             wklb
+     C                   z-add     0             wkdohd
+     C                   z-add     0             wkdolb
+     C                   z-add     wcshhd        wkshhd
+     C                   z-add     wcshlb        wkshlb
+     C                   z-add     wcrchd        wkrchd
+     C                   z-add     wcrclb        wkrclb
+     C                   exsr      $up371
+     C                   endif
+      *
+      * If there were any Market Hog Sale head/pounds, write a new Report Code
+      * for Market Hog Sales.  The values for this record will be the summation
+      * of the values from the "BTCAR" and 'BTLIV" report codes with the
+      * accumulated Shipped/Received values for Market Sales.
+      *
+     C                   if        wmshhd <> 0 or                               If market
+     C                             wmshlb <> 0 or
+     C                             wmrchd <> 0 or
+     C                             wmrclb <> 0
+      *
+      * Clear the accumulators that will hold the values from the BTLIV and
+      * BTCAR report code records.
+      *
+     C                   z-add     0             wkcgam
+     C                   z-add     0             wkcghd
+     C                   z-add     0             wkcglb
+     C                   z-add     0             wkclb
+     C                   z-add     0             wkcgqt
+     C                   z-add     0             wkcdhd
+     C                   z-add     0             wkcdlb
+     C                   z-add     0             wkydhd
+     C                   z-add     0             wkydlb
+     C                   z-add     0             wkmrkdohd
+     C                   z-add     0             wkmrkdolb
+      *
+     C                   movel     'BTLIV'       wkrpcd
+     C     key03         chain(n)  hsp371                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   add       wgcgam        wkcgam
+     C                   add       wgcghd        wkcghd
+     C                   add       wgcglb        wkcglb
+     C                   add       wgcrlb        wkclb
+     C                   add       wgcgqt        wkcgqt
+     C                   add       wgcdhd        wkcdhd
+     C                   add       wgcdlb        wkcdlb
+     C                   add       wgydhd        wkydhd
+     C                   add       wgydlb        wkydlb
+     C                   add       wgdohd        wkmrkdohd
+     C                   add       wgdolb        wkmrkdolb
+     C                   endif                                                  If hit
+      *
+     C                   movel     'BTCAR'       wkrpcd
+     C     key03         chain(n)  hsp371                             92
+     C                   if        *in92 = *off                                 If found
+     C                   add       wgcgam        wkcgam
+     C                   add       wgcghd        wkcghd
+     C                   add       wgcglb        wkcglb
+     C                   add       wgcrlb        wkclb
+     C                   add       wgcgqt        wkcgqt
+     C                   add       wgcdhd        wkcdhd
+     C                   add       wgcdlb        wkcdlb
+     C                   add       wgydhd        wkydhd
+     C                   add       wgydlb        wkydlb
+     C                   add       wgdohd        wkmrkdohd
+     C                   add       wgdolb        wkmrkdolb
+     C                   endif                                                  If found
+      *
+     C                   movel     'MRKTS'       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     wkcgqt        wgcgqt
+     C                   z-add     wkcghd        wgcghd
+     C                   z-add     wkcglb        wgcglb
+     C                   z-add     wkclb         wgcrlb
+     C                   z-add     wkcgam        wgcgam
+     C                   z-add     wkcdhd        wgcdhd
+     C                   z-add     wkcdlb        wgcdlb
+     C                   z-add     wkydhd        wgydhd
+     C                   z-add     wkydlb        wgydlb
+     C                   z-add     wkmrkdohd     wgdohd
+     C                   z-add     wkmrkdolb     wgdolb
+      *
+     C                   z-add     wmshhd        wgshhd
+     C                   z-add     wmshlb        wgshlb
+     C                   z-add     wmrchd        wgrchd
+     C                   z-add     wmrclb        wgrclb
+     C                   write     wgrec
+     C                   endif                                                  If market
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Accumulate performance values for Carcass Payments
+      *---------------------------------------------------------------------------------------
+      *
+      * This subroutine accumulates values that will be used later in calculating
+      * group performance.
+      *
+     C     $carc         begsr
+      *
+      * Backfat inches
+      *
+     C                   if        cdbfam <> 0
+     C     cdbfam        mult      cdcrlb        wkb1
+     C                   add       wkb1          wkb2
+     C                   add       cdcrlb        wkbclb
+     C                   add       cdlvlb        wkbllb
+     C                   add       cdlvhd        wkbhd
+     C                   add       cdcdhd        wkbcdhd
+     C                   add       cdcdlb        wkbcdlb
+     C                   add       cdydhd        wkbydhd
+     C                   add       cdydlb        wkbydlb
+     C                   endif
+      *
+      * Carcass yield
+     C                   add       cdcrlb        wkcrlb
+     C                   add       cdlvlb        wklvlb
+     C                   add       cdlvhd        wkcyhd
+     C                   add       cdcdhd        wkccdhd
+     C                   add       cdcdlb        wkccdlb
+     C                   add       cdydhd        wkcydhd
+     C                   add       cdydlb        wkcydlb
+      *
+      * Lean percent
+      *
+     C                   if        cdlnpr <> 00
+     C     cdlnpr        mult      cdcrlb        WKL1
+     C                   add       WKL1          WKL2
+     C                   add       cdcrlb        wklclb
+     C                   add       cdlvlb        wklllb
+     C                   add       cdlvhd        wklhd
+     C                   add       cdcdhd        wklcdhd
+     C                   add       cdcdlb        wklcdlb
+     C                   add       cdydhd        wklydhd
+     C                   add       cdydlb        wklydlb
+     C                   endif
+      *
+      * Loin eye depth
+      *
+     C                   if        cdleam <> 0
+     C     cdleam        mult      cdcrlb        WKE1
+     C                   add       WKE1          WKE2
+     C                   add       cdcrlb        wkeclb
+     C                   add       cdlvlb        wkellb
+     C                   add       cdlvhd        wkehd
+     C                   add       cdcdhd        wkecdhd
+     C                   add       cdcdlb        wkecdlb
+     C                   add       cdydhd        wkeydhd
+     C                   add       cdydlb        wkeydlb
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process Check Adjustment records
+      *--------------------------------------------------------------------------------------
+      *
+      * This subroutine is not executed for Cull Sales.
+      *
+      * This subroutine processes all Check Adjustment records for each Check Detail record.
+      * Check adjustments will be either:
+      *     premiums/discounts or
+      *     deductions/additions
+      *
+     C     $chkadj       begsr
+      *
+     C     key04         setll     hsp065
+      *
+     C                   dou       *in94 = *on                                  Do check adj
+     C     key04         reade     hsp065                                 94
+     C                   if        *in94 = *off                                 If not EOF
+      *
+     C                   move      *blank        wkrpcd
+      *
+      * Premiums/discounts
+     C                   select
+     C                   when      cjcjfl = 'P'
+     C     cjcjcd        chain     hsp045                             92
+     C                   if        *in92 = *off
+     C                   movel     pdrpcd        wkrpcd
+     C                   endif
+      *
+      * Only process Deductions that have a 'report flag' of YES
+      *
+     C                   when      cjcjfl = 'D'
+     C     cjcjcd        chain     hsp044                             92
+     C                   if        *in92 = *off and darpfl = yes
+     C                   movel     darpcd        wkrpcd
+     C                   else
+     C                   move      *blank        wkrpcd
+     C                   endif
+     C                   endsl
+      *
+     C                   if        wkrpcd <> *blank                             If go ahead
+      *
+     C     key03         chain     hsp371                             92
+     C                   if        *in92 = *on                                  If new
+     C                   exsr      $cacd
+     C                   z-add     cdlvhd        wgcghd
+     C                   z-add     cjcjam        wgcgam
+     C                   z-add     cdcrlb        wgcrlb
+     C                   z-add     cdlvlb        wgcglb
+     C                   z-add     0             wgcgqt
+     C                   z-add     cdcdhd        wgcdhd
+     C                   z-add     cdcdlb        wgcdlb
+     C                   z-add     cdydhd        wgydhd
+     C                   z-add     cdydlb        wgydlb
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   write     wgrec
+     C                   else
+      *
+      * Modify an existing record
+      *
+     C                   add       cdlvhd        wgcghd
+     C                   add       cjcjam        wgcgam
+     C                   add       cdcrlb        wgcrlb
+     C                   add       cdlvlb        wgcglb
+     C                   add       cdcdhd        wgcdhd
+     C                   add       cdcdlb        wgcdlb
+     C                   add       cdydhd        wgydhd
+     C                   add       cdydlb        wgydlb
+      *
+     C                   update    wgrec
+     C                   endif                                                  If new
+     C                   endif                                                  If go ahead
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do check adj
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write the Cost record for the group
+      *---------------------------------------------------------------
+      *
+     C     $cost         begsr
+      *
+     C                   if        cosam <> 0 or
+     C                             coshd <> 0 or
+     C                             coslb <> 0 or
+     C                             cosclb <> 0
+     C                   movel     'COS  '       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     cosam         wgcgam
+     C                   z-add     coshd         wgcghd
+     C                   z-add     coslb         wgcglb
+     C                   z-add     cosclb        wgcrlb
+     C                   z-add     0             wgcgqt
+     C                   z-add     0             wgcdhd
+     C                   z-add     0             wgcdlb
+     C                   z-add     0             wgydhd
+     C                   z-add     0             wgydlb
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   write     wgrec
+     C                   endif
+      *
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgcghd
+     C                   z-add     0             wgcglb
+     C                   z-add     0             wgcrlb
+     C                   z-add     0             wgcgqt
+     C                   z-add     0             wgcdhd
+     C                   z-add     0             wgcdlb
+     C                   z-add     0             wgydhd
+     C                   z-add     0             wgydlb
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Calculate Pig Days for the group
+      *---------------------------------------------------------------
+      *
+     C     $pday         begsr
+      *
+     C                   z-add     0             wkpday
+     C                   call      'HPPDAY'                                                   002
+     C                   parm                    hghgsn
+     C                   parm                    hgopdt
+     C                   parm                    hgdsdt
+     C                   parm                    wkpday
+      *
+     C                   movel     'PDAYS'       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     wkpday        wgcgqt
+     C                   z-add     0             wgcghd
+     C                   z-add     0             wgcglb
+     C                   z-add     0             wgcrlb
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgcdhd
+     C                   z-add     0             wgcdlb
+     C                   z-add     0             wgydhd
+     C                   z-add     0             wgydlb
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   write     wgrec
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------------
+      * Calculate Weight Gain for the group
+      *----------------------------------------------------------------------------------------
+      *
+     C     $wgain        begsr
+      *
+      * Calculate gain:
+      *   quality/reject/doa pounds received at destination on transfers out
+      * + live/doa pounds received at customer on sales
+      * - transfer in pounds
+      *
+     C                   add       wkolb         wkslb
+     C     wkslb         sub       wkilb         wgcglb
+      *
+     C                   movel     'WGAIN'       wkrpcd
+     C                   exsr      $cacd
+     C                   z-add     0             wgcgqt
+     C                   z-add     0             wgcghd
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgcrlb
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   z-add     0             wgcdhd
+     C                   z-add     0             wgcdlb
+     C                   z-add     0             wgydhd
+     C                   z-add     0             wgydlb
+     C                   write     wgrec
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------------
+      * Calculate various Performance values
+      *----------------------------------------------------------------------------------------
+      *
+      * All of the performance calculations are made using Carcass pounds--not live pounds.
+      *
+     C     $perf         begsr
+      *
+      * Backfat inches
+      *
+     C                   movel     'BFIN '       wkrpcd
+     C                   exsr      $cacd
+      *
+     C                   if        wkbclb <> 0
+     C     wkb2          div       wkbclb        wgcgqt
+     C                   else
+     C                   z-add     0             wgcgqt
+     C                   endif
+      *
+     C                   z-add     wkbhd         wgcghd
+     C                   z-add     wkbllb        wgcglb
+     C                   z-add     wkbclb        wgcrlb
+     C                   z-add     wkbcdhd       wgcdhd
+     C                   z-add     wkbcdlb       wgcdlb
+     C                   z-add     wkbydhd       wgydhd
+     C                   z-add     wkbydlb       wgydlb
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   write     wgrec
+      *
+      * Carcass Yield
+     C                   movel     'CYIEL'       wkrpcd
+     C                   exsr      $cacd
+      *
+     C                   if        wklvlb <> 0
+     C     wkcrlb        div       wklvlb        wkcy1
+     C                   else
+     C                   z-add     0             wkcy1
+     C                   endif
+      *
+     C     wkcy1         mult      100           wgcgqt
+     C                   z-add     wkcyhd        wgcghd
+     C                   z-add     wkcrlb        wgcrlb
+     C                   z-add     wklvlb        wgcglb
+     C                   z-add     wkccdhd       wgcdhd
+     C                   z-add     wkccdlb       wgcdlb
+     C                   z-add     wkcydhd       wgydhd
+     C                   z-add     wkcydlb       wgydlb
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   write     wgrec
+      *
+      * Lean Percent
+     C                   movel     'LEAN '       wkrpcd
+     C                   exsr      $cacd
+      *
+     C                   if        wklclb <> 0
+     C     wkl2          div       wklclb        wgcgqt
+     C                   else
+     C                   z-add     0             wgcgqt
+     C                   endif
+      *
+     C                   z-add     wklhd         wgcghd
+     C                   z-add     wklllb        wgcglb
+     C                   z-add     wklclb        wgcrlb
+     C                   z-add     wklcdhd       wgcdhd
+     C                   z-add     wklcdlb       wgcdlb
+     C                   z-add     wklydhd       wgydhd
+     C                   z-add     wklydlb       wgydlb
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   write     wgrec
+      *
+      * Loin Eye Depth
+     C                   movel     'LEYE '       wkrpcd
+     C                   exsr      $cacd
+      *
+     C                   if        wkeclb <> 0
+     C     wke2          div       wkeclb        wgcgqt
+     C                   else
+     C                   z-add     0             wgcgqt
+     C                   endif
+      *
+     C                   z-add     wkehd         wgcghd
+     C                   z-add     wkellb        wgcglb
+     C                   z-add     wkeclb        wgcrlb
+     C                   z-add     wkecdhd       wgcdhd
+     C                   z-add     wkecdlb       wgcdlb
+     C                   z-add     wkeydhd       wgydhd
+     C                   z-add     wkeydlb       wgydlb
+     C                   z-add     0             wgcgam
+     C                   z-add     0             wgshhd
+     C                   z-add     0             wgshlb
+     C                   z-add     0             wgrchd
+     C                   z-add     0             wgrclb
+     C                   z-add     0             wgdohd
+     C                   z-add     0             wgdolb
+     C                   write     wgrec
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Clear workfields used in group calculations
+      *---------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+      * Clear workfields for Total Cost
+      *
+     C                   z-add     0             cosam
+     C                   z-add     0             coslb
+     C                   z-add     0             cosclb
+     C                   z-add     0             coshd
+      *
+      * Clear workfields for Backfat calculations
+      *
+     C                   z-add     0             wkb1
+     C                   z-add     0             wkb2
+     C                   z-add     0             wkbllb
+     C                   z-add     0             wkbclb
+     C                   z-add     0             wkbhd
+     C                   z-add     0             wkbcdhd
+     C                   z-add     0             wkbcdlb
+     C                   z-add     0             wkbydhd
+     C                   z-add     0             wkbydlb
+      *
+      * Clear workfields for Lean Percent calculations
+      *
+     C                   z-add     0             wkl1
+     C                   z-add     0             wkl2
+     C                   z-add     0             wklllb
+     C                   z-add     0             wklclb
+     C                   z-add     0             wklhd
+     C                   z-add     0             wklcdhd
+     C                   z-add     0             wklcdlb
+     C                   z-add     0             wklydhd
+     C                   z-add     0             wklydlb
+      *
+      * Clear workfields for Loin Eye calculations
+      *
+     C                   z-add     0             wke1
+     C                   z-add     0             wke2
+     C                   z-add     0             wkellb
+     C                   z-add     0             wkeclb
+     C                   z-add     0             wkehd
+     C                   z-add     0             wkecdhd
+     C                   z-add     0             wkecdlb
+     C                   z-add     0             wkeydhd
+     C                   z-add     0             wkeydlb
+      *
+      * Clear workfields for Carcass Yield calculations
+      *
+     C                   z-add     0             wkcy1
+     C                   z-add     0             wkcrlb
+     C                   z-add     0             wklvlb
+     C                   z-add     0             wkcyhd
+     C                   z-add     0             wkccdhd
+     C                   z-add     0             wkccdlb
+     C                   z-add     0             wkcydhd
+     C                   z-add     0             wkcydlb
+      *
+      * Clear workfields for Weight Gain
+      *
+     C                   z-add     0             wkolb
+     C                   z-add     0             wkilb
+     C                   z-add     0             wkslb
+      *
+      * Clear generic workfields for accumulating head/pounds
+      *
+     C                   z-add     0             wkhd
+     C                   z-add     0             wklb
+      *
+      * Clear workfields for Shipped/Received/DOA values on transfers
+      *
+     C                   z-add     0             wkshhd
+     C                   z-add     0             wkrchd
+     C                   z-add     0             wkdohd
+     C                   z-add     0             wkshlb
+     C                   z-add     0             wkrclb
+     C                   z-add     0             wkdolb
+      *
+      * Clear accumulators for Shipped/Received/DOA values on Cull Sales
+      *
+     C                   z-add     0             wcshhd
+     C                   z-add     0             wcrchd
+     C                   z-add     0             wcshlb
+     C                   z-add     0             wcrclb
+      *
+      * Clear accumulators for Shipped/Received/DOA values on Feeder Pig Sales
+      *
+     C                   z-add     0             wfshhd
+     C                   z-add     0             wfrchd
+     C                   z-add     0             wfshlb
+     C                   z-add     0             wfrclb
+      *
+      * Clear accumulators for Shipped/Received values on Market Hog Sales
+      *
+     C                   z-add     0             wmshhd
+     C                   z-add     0             wmrchd
+     C                   z-add     0             wmshlb
+     C                   z-add     0             wmrclb
+      *
+      * Clear accumulators used to sum values on Carcass and Live Report Code records
+      *
+     C                   z-add     0             wkcgam
+     C                   z-add     0             wkcgqt
+     C                   z-add     0             wkcghd
+     C                   z-add     0             wkcglb
+     C                   z-add     0             wkclb
+     C                   z-add     0             wkcdhd
+     C                   z-add     0             wkcdlb
+     C                   z-add     0             wkydhd
+     C                   z-add     0             wkydlb
+     C                   z-add     0             wkmrkdohd
+     C                   z-add     0             wkmrkdolb
+      *
+      * Clear accumulators used to accumulate DOA values on transfers and sales
+      *
+     C                   z-add     0             wkdhd
+     C                   z-add     0             wkdlb
+      *
+      * Clear accumulators for accumulating dollars from Costed Transfers
+      *
+     C                   z-add     0             wktiam
+     C                   z-add     0             wktidpam
+     C                   z-add     0             wktispam
+     C                   z-add     0             wktoam
+     C                   z-add     0             wktodpam
+     C                   z-add     0             wktospam
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------------------------
+      * Clean up group workfile
+      *------------------------------------------------------------------------------------
+      *
+      * Delete all workfile records that have values of zero. Zero-value records can occur
+      * due to the movement logic for adjustments where you are adding/subtracting values
+      * to a workfile record.
+      *
+     C     $cleanup      begsr
+      *
+     C     *loval        setll     hsp371
+      *
+     C                   dou       *in90 = *on                                  Do clean
+     C                   read      hsp371                                 90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             wgcgam = 0 and
+     C                             wgcghd = 0 and
+     C                             wgcglb = 0 and
+     C                             wgcrlb = 0 and
+     C                             wgcgqt = 0 and
+     C                             wgshhd = 0 and
+     C                             wgshlb = 0 and
+     C                             wgrchd = 0 and
+     C                             wgrclb = 0 and
+     C                             wgdohd = 0 and
+     C                             wgdolb = 0 and
+     C                             wgcdhd = 0 and
+     C                             wgcdlb = 0 and
+     C                             wgydhd = 0 and
+     C                             wgydlb = 0
+     C                   delete    wgrec
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do clean
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------------------------
+      * Write group header workfile records
+      *------------------------------------------------------------------------------------
+      *
+      * Read each group workfile record and write one header record per group to this
+      * group header workfile.
+      *
+     C     $header       begsr
+      *
+     C     *loval        setll     hsp371
+      *
+     C                   dou       *in90 = *on                                  Do header
+     C                   read      hsp371                                 90
+     C                   if        *in90 = *off and wghgsn <> svhgsn            If diff group
+      *
+     C                   z-add     wghgsn        whhgsn
+     C                   z-add     wgfscd        whfscd
+     C                   move      'CL'          whgscd
+      *
+     C                   write     whrec
+      *
+     C                   z-add     wghgsn        svhgsn
+     C                   endif                                                  If diff group
+     C                   enddo                                                  Do header
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    fdrncd
+     C                   kfld                    fdrtdt
+      *
+      *
+     C     key02         klist
+     C                   kfld                    shstcd
+     C                   kfld                    cdtpcd
+      *
+      *
+     C     key03         klist
+     C                   kfld                    hghgsn
+     C                   kfld                    wkrpcd
+      *
+      *
+     C     key04         klist
+     C                   kfld                    cdchdt
+     C                   kfld                    cdcvno
+     C                   kfld                    cdchno
+     C                   kfld                    cdlnno
+      *
+      *
+     C     key05         klist
+     C                   kfld                    memvsn
+     C                   kfld                    melnno
+      *
+      *
+      * Parm lists
+      *
+     C     plist01       plist
+     C                   parm                    hghgsn
+     C                   parm                    zzcymd
+      * Head
+     C                   parm                    gpihd                          GROUP INV
+     C                   parm                    pinhd                          PIG IN
+     C                   parm                    tinhd                          TRSF IN
+     C                   parm                    tisphd                         SAME PHASE
+     C                   parm                    tidphd                         DIFF PHASE
+     C                   parm                    pouhd                          PIGS OUT
+     C                   parm                    touhd                          TRSF OUT
+     C                   parm                    tosphd                         SAME PHASE
+     C                   parm                    tosphd                         DIFF PHASE
+     C                   parm                    rinhd                          REJECT IN
+     C                   parm                    rouhd                          REJECT OUT
+     C                   parm                    qinhd                          QUALITY IN
+     C                   parm                    qouhd                          QUALITY OUT
+     C                   parm                    morhd                          MORTALITY
+     C                   parm                    inahd                          INV ADJ
+      * Pounds
+     C                   parm                    pinlb                          PIG IN
+     C                   parm                    tinlb                          TRSF IN
+     C                   parm                    tisplb                         SAME PHASE
+     C                   parm                    tidplb                         DIFF PHASE
+     C                   parm                    poulb                          PIG OUT
+     C                   parm                    toulb                          TRSF OUT
+     C                   parm                    tosplb                         SAME PHASE
+     C                   parm                    todplb                         DIFF PHASE
+     C                   parm                    rinlb                          REJECT IN
+     C                   parm                    roulb                          REJECT OUT
+     C                   parm                    qinlb                          QUALITY IN
+     C                   parm                    qoulb                          QUALITY OUT
+     C                   parm                    morlb                          MORTALITY
+      *
+     C                   endsr
+      /EJECT

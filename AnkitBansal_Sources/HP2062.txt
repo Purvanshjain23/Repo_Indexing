@@ -1,0 +1,847 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      ****************************************************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP2062 - Move Receiving Data to Editing
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     06/26/09
+      *
+      * FUNCTION:    This function reads the Receiving File of Uploaded Transfer
+      *              Movement Data and writes the records to the Editng File.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 07/27/09  LeAnne Ramsey
+      *           Added logic to handle an upload of data for multiple dates.
+      *
+      * 07/29/09  LeAnne Ramsey
+      *           Recompile only. Added new field (Scheduled Ship Date in CCYYMMDD
+      *           format to HSP2062.) It is not populated in this program.
+      *
+      * 08/17/09  LeAnne Ramsey
+      *           The "history" files are for debugging purposes. I decided that
+      *           I would only keep 3 months of data in these files. So, I added
+      *           logic to delete all "history" records with "upload dates" older
+      *           than the system date less 60 days.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 01/17/17  Brad Baden    (E7986)
+      *           Modified to process either the existing Guymon files, otherwise
+      *           the new Iowa files depending on the Business Office that is passed
+      *           into this program.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp018    if   e           k disk
+      *  Farm site
+      *
+      *
+     Fhsl034o   if   e           k disk
+      *  Hog group  (LF omits VD, CL, DS)
+      *
+      *
+     Fhsl034p   if   e           k disk    rename(hgrec:hgrecp)
+      *  Hog group  (LF selects OP)
+      *
+      *
+     Fhsp2061   uf   e             disk
+      *  Receiving file for uploaded transfer movements - Guymon
+      *
+      *
+     Fhsp2062   uf a e           k disk
+      *   Editing file for uploaded transfer movements - Guymon
+      *
+      *
+     Fhsp2063   uf   e             disk
+      *  Receiving file for uploaded transfer movements for Iowa
+      *
+      *
+     Fhsp2064   uf a e           k disk
+      *   Editing file for uploaded transfer movements for Iowa
+      *
+      *
+     Fhsp9061   uf a e           k disk
+      *   History--Receiving file for uploaded transfers for Guymon
+      *
+      *
+     Fhsp9062   uf a e           k disk
+      *   History--Editing file for uploaded transfers for Guymon
+      *
+      *
+     Fhsp9063   uf a e           k disk
+      *   History--Receiving file for uploaded transfers for Iowa
+      *
+      *
+     Fhsp9064   uf a e           k disk
+      *   History--Editing file for uploaded transfers for Iowa
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control and save fields
+      *
+     D svmdy           s              6  0
+      *
+      *
+      * Parameters
+      *
+     D p1bobo          s              5
+      *
+      *
+      * Workfields
+      *
+     D wkdldt          s                   like(hgopdt)
+     D wkopdt          s                   like(hgopdt)
+     D wkmvsn          s              7  0
+     D wk1char         s              1
+     D wk2char         s              2
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+     D umdy            s                   like(u1mdy)
+     D uffscd          s                   like(u1ffscd)
+     D ufblcd          s                   like(u1fblcd)
+     D ufrmcd          s                   like(u1frmcd)
+     D utfscd          s                   like(u1tfscd)
+     D utblcd          s                   like(u1tblcd)
+     D utrmcd          s                   like(u1trmcd)
+     D uhd             s                   like(u1hd)
+     D usplit          s                   like(u1split)
+     D utype           s                   like(u1type)
+      *
+     D eeditfl         s                   like(e1editfl)
+     D emvsn           s                   like(e1mvsn)
+     D emdy            s                   like(e1mdy)
+     D escdt           s                   like(e1scdt)
+     D eticd           s                   like(e1ticd)
+     D effscd          s                   like(e1ffscd)
+     D efblcd          s                   like(e1fblcd)
+     D efrmcd          s                   like(e1frmcd)
+     D efhgsn          s                   like(e1fhgsn)
+     D efppcd          s                   like(e1fppcd)
+     D efptcd          s                   like(e1fptcd)
+     D etfscd          s                   like(e1tfscd)
+     D etblcd          s                   like(e1tblcd)
+     D etrmcd          s                   like(e1trmcd)
+     D ethgsn          s                   like(e1thgsn)
+     D etppcd          s                   like(e1tppcd)
+     D etptcd          s                   like(e1tptcd)
+     D ehd             s                   like(e1hd)
+     D esplit          s                   like(e1split)
+     D etype           s                   like(e1type)
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      ****************************************************************
+      * Data areas
+      ****************************************************************
+      *
+     Dnextmvsn         s              7  0 dtaara(damvsn)
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * MAINLINE
+      ***************************************************************************************
+      *
+      * Read each record in the Receiving file.
+      *
+     C                   dou       *in90 = *on                                  Main do
+
+      * Process Guymon or Iowa
+     C                   if        p1bobo = 'OKLIV'
+     C                   read      hsp2061                                90    GUYMON file
+     C                   endif
+
+     C                   if        p1bobo = 'IFLIV'
+     C                   read      hsp2063                                90    IOWA file
+     C                   endif
+
+     C                   if        *in90 = *off                                 If not EOF
+     C                   exsr      $loaduflds
+      *
+      * Only process a record if there are values in at least 1 of the fields.
+      * The XLS is tricky; the users have to do a lot of cutting/pasting into
+      * it before the upload. So, sometimes, they end up with blank lines.
+      * (Note: We will exclude the MMDDYY field on this check since Steve Brown
+      * is doing extra cutting/pasting on MMDDYY and may accidentally leave it
+      * on a line he meant to blank out.)
+      *
+     C                   if        uffscd = 0 and
+     C                             ufblcd = *blank and
+     C                             ufrmcd = *blank and
+     C                             utfscd = 0 and
+     C                             utblcd = *blank and
+     C                             utrmcd = *blank and
+     C                             uhd    = 0 and
+     C                             usplit = *blank and
+     C                             utype  = *blank
+     C                   else
+      *
+      * When Steve Brown is uploading data for multiple dates, he may put the "date"
+      * on each line or he can elect to only put it on the first row that goes with
+      * that new date. So, when it changes, we will save it to populate our records...
+      * until we hit the next/different date.
+      *
+     C                   if        umdy <> 0 and umdy <> svmdy
+     C                   z-add     umdy          svmdy
+     C                   endif
+      *
+      * Retrieve a new Movement Number--unless this is a Split.
+      *
+     C                   if        usplit = 'S' or usplit = 's'
+     C                   else
+     C     *lock         in        nextmvsn
+     C                   add       1             nextmvsn
+     C                   z-add     nextmvsn      wkmvsn
+     C                   out       nextmvsn
+     C                   endif
+      *
+      * Populate fields
+     C                   z-add     wkmvsn        emvsn
+     C                   z-add     svmdy         emdy
+     C                   move      uhd           ehd
+     C                   move      usplit        esplit
+     C                   move      utype         etype
+      *
+      * From side
+     C                   z-add     uffscd        effscd
+     C                   move      ufblcd        efblcd
+     C                   move      ufrmcd        efrmcd
+     C                   exsr      $fhgsn
+      * To side
+     C                   z-add     utfscd        etfscd
+     C                   move      utblcd        etblcd
+     C                   move      utrmcd        etrmcd
+     C                   exsr      $thgsn
+      *
+      * Write 1) an Editing record and 2) a "history" Editing record.
+      *
+     C                   exsr      $loadeflds
+
+     C                   if        p1bobo = 'OKLIV'
+     C                   write     e1rec                                        Write Guymon record
+     C                   else
+     C                   write     e2rec                                        Write Iowa record
+     C                   endif                                                  If p1bobo = 'OKLIV'
+
+     C                   exsr      $wrtehst
+     C                   clear                   e1rec
+     C                   clear                   e2rec
+     C                   eval      efhgsn = *zeros
+      *
+      * Write a "history" record for the Receiving file.
+      * Then, delete the Receiving record.
+      *
+     C                   exsr      $wrtrhst
+     C                   endif                                                  If nothing
+
+     C                   if        p1bobo = 'OKLIV'
+     C                   delete    u1rec
+     C                   else
+     C                   delete    u2rec
+     C                   endif                                                  If p1bobo = 'OKLIV'
+
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * EOF Processing
+     C                   seton                                        lr
+      /EJECT
+      *----------------------------------------------------------------
+      * Load receiving fields to generic name
+      *----------------------------------------------------------------
+      *
+     C     $loaduflds    begsr
+      *
+      * Load either Guymon fields or Iowa fields based upon Business Office.
+      *
+      *
+      * Guymon fields
+     C                   if        p1bobo = 'OKLIV'
+     C                   eval      umdy   = u1mdy
+     C                   eval      uffscd = u1ffscd
+     C                   eval      ufblcd = u1fblcd
+     C                   eval      ufrmcd = u1frmcd
+     C                   eval      utfscd = u1tfscd
+     C                   eval      utblcd = u1tblcd
+     C                   eval      utrmcd = u1trmcd
+     C                   eval      uhd    = u1hd
+     C                   eval      usplit = u1split
+     C                   eval      utype  = u1type
+     C                   else
+      * Iowa fields
+     C                   eval      umdy   = u2mdy
+     C                   eval      uffscd = u2ffscd
+     C                   eval      ufblcd = u2fblcd
+     C                   eval      ufrmcd = u2frmcd
+     C                   eval      utfscd = u2tfscd
+     C                   eval      utblcd = u2tblcd
+     C                   eval      utrmcd = u2trmcd
+     C                   eval      uhd    = u2hd
+     C                   eval      usplit = u2split
+     C                   eval      utype  = u2type
+     C                   endif
+      *
+     C                   eval      ethgsn = *zeros
+      *
+     C                   endsr                                                  if p1b0b0 = 'OKLIV'
+      /EJECT
+      *----------------------------------------------------------------
+      * Load edit fields to generic name
+      *----------------------------------------------------------------
+      *
+     C     $loadeflds    begsr
+      *
+      * Load either Guymon fields or Iowa fields based upon Business Office.
+      *
+      *
+      * Guymon fields
+     C                   if        p1bobo = 'OKLIV'
+     C                   eval      e1editfl = eeditfl
+     C                   eval      e1mvsn   = emvsn
+     C                   eval      e1mdy    = emdy
+     C                   eval      e1scdt   = escdt
+     C                   eval      e1ticd   = eticd
+     C                   eval      e1ffscd  = effscd
+     C                   eval      e1fblcd  = efblcd
+     C                   eval      e1frmcd  = efrmcd
+     C                   eval      e1fhgsn  = efhgsn
+     C                   eval      e1fppcd  = efppcd
+     C                   eval      e1fptcd  = efptcd
+     C                   eval      e1tfscd  = etfscd
+     C                   eval      e1tblcd  = etblcd
+     C                   eval      e1trmcd  = etrmcd
+     C                   eval      e1thgsn  = ethgsn
+     C                   eval      e1tppcd  = etppcd
+     C                   eval      e1tptcd  = etptcd
+     C                   eval      e1hd     = ehd
+     C                   eval      e1split  = esplit
+     C                   eval      e1type   = etype
+     C                   else
+      * Iowa fields
+     C                   eval      e2editfl = eeditfl
+     C                   eval      e2mvsn   = emvsn
+     C                   eval      e2mdy    = emdy
+     C                   eval      e2scdt   = escdt
+     C                   eval      e2ticd   = eticd
+     C                   eval      e2ffscd  = effscd
+     C                   eval      e2fblcd  = efblcd
+     C                   eval      e2frmcd  = efrmcd
+     C                   eval      e2fhgsn  = efhgsn
+     C                   eval      e2fppcd  = efppcd
+     C                   eval      e2fptcd  = efptcd
+     C                   eval      e2tfscd  = etfscd
+     C                   eval      e2tblcd  = etblcd
+     C                   eval      e2trmcd  = etrmcd
+     C                   eval      e2thgsn  = ethgsn
+     C                   eval      e2tppcd  = etppcd
+     C                   eval      e2tptcd  = etptcd
+     C                   eval      e2hd     = ehd
+     C                   eval      e2split  = esplit
+     C                   eval      e2type   = etype
+     C                   endif
+      *
+     C                   endsr                                                  if p1b0b0 = 'OKLIV'
+      /EJECT
+      *----------------------------------------------------------------
+      * From Group
+      *----------------------------------------------------------------
+      *
+     C     $fhgsn        begsr
+      *
+      * Retrieve Farm info that will be used in our FROM Farm Group retrieval logic.
+      *
+     C     uffscd        chain     hsp018                             92
+     C                   if        *in92 = *off                                 If Farm hit
+      *
+     C                   select
+      * GF/COM/GDU/Barn1
+     C                   when      ufblcd = '1    ' and fstfcd = 'GDU  '
+     C                             and fsppcd = 'GF   ' and fsptcd = 'COM  '
+     C                   exsr      $barn1from
+      *
+      *       BLDG/ROOM
+     C                   when      ufblcd <> *blank and ufrmcd <> *blank
+     C                             and fsppcd <> 'BGF  '
+     C                   exsr      $blrmfrom
+      *
+      *      WEAN/GENETIC
+     C                   when      ufblcd = *blank and ufrmcd = *blank
+      *
+     C                   if        (utype = 'W' or utype = 'w') and
+     C                             fsppcd  = 'BGF  '
+     C                   exsr      $weanfrom
+     C                   else
+     C                   exsr      $genfrom
+     C                   endif
+     C                   endsl
+      *
+     C                   endif                                                  If Farm hit
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * To Group
+      *----------------------------------------------------------------
+      *
+     C     $thgsn        begsr
+      *
+     C     utfscd        chain     hsp018                             92
+     C                   if        *in92 = *off                                 If Farm hit
+      *
+     C                   select
+      * GF/COM/GDU/Barn1
+     C                   when      utblcd = '1    ' and fstfcd = 'GDU  '
+     C                             and fsppcd = 'GF   ' and fsptcd = 'COM  '
+     C                   exsr      $barn1to
+      *
+      *       BLDG/ROOM
+     C                   when      utblcd <> *blank and utrmcd <> *blank
+     C                   exsr      $blrmto
+      *
+      *         GENETIC
+     C                   when      utblcd = *blank and utrmcd = *blank
+     C                   exsr      $gento
+     C                   endsl
+     C                   endif                                                  If Farm hit
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Retrieve the "G" group in FROM Barn 1 for GF/Commercial/GDU groups
+      *----------------------------------------------------------------------------------
+      *
+     C     $barn1from    begsr
+      *
+     C     key01         setll     hsl034p
+      *
+     C                   dou       *in91 = *on or efhgsn <> 0                   Do from barn1
+     C     key01         reade     hsl034p                                91
+     C                   if        *in91 = *off and efhgsn = 0                  If not EOF
+      *
+     C                   movel     hghgcd        wk1char
+     C                   if        p1bobo <> 'OKLIV'
+     C                   movel     hghgcd        wk2char
+     C                   endif
+      *
+     C                   if        wk1char = 'G' or wk2char = 'PG'              If G or PG
+     C                   exsr      $popfrom
+     C                   endif                                                  If G or PG
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do from barn1
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Retrieve the "G" group in TO Barn 1 for GF/Commercial/GDU groups
+      *----------------------------------------------------------------------------------
+      *
+     C     $barn1to      begsr
+      *
+     C     key02         setll     hsl034o
+      *
+     C                   dou       *in91 = *on or ethgsn <> 0                   Do to barn1
+     C     key02         reade     hsl034o                                91
+     C                   if        *in91 = *off and ethgsn = 0                  If not EOF
+      *
+     C                   movel     hghgcd        wk1char
+     C                   if        p1bobo <> 'OKLIV'
+     C                   movel     hghgcd        wk2char
+     C                   endif                                                  If <> OKLIV
+      *
+     C                   if        wk1char = 'G' or wk2char = 'PG'              If G or PG
+     C                   exsr      $popto
+     C                   endif                                                  If G or PG
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do to barn1
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Retrieve FROM Group when a Building/Room are entered
+      *----------------------------------------------------------------------------------
+      *
+     C     $blrmfrom     begsr
+      *
+      * Read all the OPEN groups in this Farm/Bldg/Room. Ultimately,
+      * pick the one with the OLDEST Opened Date.
+      *
+     C                   z-add     99999999      wkopdt
+      *
+     C     key03         setll     hsl034p
+      *
+     C                   dou       *in91 = *on                                  Do bldg/room
+     C     key03         reade     hsl034p                                91
+     C                   if        *in91 = *off and hgopdt < wkopdt             If older
+     C                   z-add     hgopdt        wkopdt
+     C                   exsr      $popfrom
+     C                   endif                                                  If older
+     C                   enddo                                                  Do bldg/room
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Retrieve TO Group when a Building/Room are entered
+      *----------------------------------------------------------------------------------
+      *
+     C     $blrmto       begsr
+      *
+      * If there is a group with CREATED status in this Farm/Bldg/Room, we
+      * want it for our Destination Group.
+      *
+     C     key04         setll     hsl034o
+      *
+     C                   dou       *in91 = *on or ethgsn <> 0                   Do created
+     C     key04         reade     hsl034o                                91
+     C                   if        *in91 = *off and ethgsn = 0 and              If not EOF
+     C                             hggscd = 'CR'
+     C                   exsr      $popto
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do created
+      *
+      *
+      * If you found a CREATED group, you're done. If not, find the newest
+      * OPEN group....the group with the most recent Open Date.
+      *
+     C                   if        ethgsn = 0                                   If no created
+      *
+     C                   z-add     0             wkopdt
+     C     key04         setll     hsl034p
+      *
+     C                   dou       *in91 = *on                                  Do bldg/room
+     C     key04         reade     hsl034p                                91
+     C                   if        *in91 = *off and hgopdt > wkopdt             If newer
+     C                   z-add     hgopdt        wkopdt
+     C                   exsr      $popto
+     C                   endif                                                  If newer
+     C                   enddo                                                  Do bldg/room
+      *
+     C                   endif                                                  If no created
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Retrieve Wean FROM Group/Bldg/Room by finding the Group eating "Farrowing" Feed
+      *----------------------------------------------------------------------------------
+      *
+     C     $weanfrom     begsr
+      *
+     C     uffscd        setll     hsl034o
+      *
+     C                   dou       *in91 = *on or efhgsn <> 0                   Do farrowing
+     C     uffscd        reade     hsl034o                                91
+     C                   if        *in91 = *off and hgfgcd = 'F'                If not EOF
+     C                             and efhgsn = 0
+     C                   exsr      $popfrom
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do farrowing
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------------------------
+      * Retrieve Genetic FROM Group/Bldg/Room by finding the Group eating "Gestation" Feed
+      *------------------------------------------------------------------------------------
+      *
+     C     $genfrom      begsr
+      *
+     C     uffscd        setll     hsl034o
+      *
+     C                   dou       *in91 = *on or efhgsn <> 0                   Do from gest
+     C     uffscd        reade     hsl034o                                91
+     C                   if        *in91 = *off and hgfgcd = 'G'                If not EOF
+     C                             and hggscd = 'OP' and efhgsn = 0
+     C                   exsr      $popfrom
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do from gest
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------------------------
+      * Retrieve Genetic TO Group/Bldg/Room by finding the Group eating "Gestation" Feed
+      *------------------------------------------------------------------------------------
+      *
+     C     $gento        begsr
+      *
+     C     utfscd        setll     hsl034o
+      *
+     C                   dou       *in91 = *on or ethgsn <> 0                   Do to gest
+     C     utfscd        reade     hsl034o                                91
+     C                   if        *in91 = *off and hgfgcd = 'G'                If not EOF
+     C                             and ethgsn = 0
+     C                   exsr      $popto
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do to gest
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Populate From Group
+      *----------------------------------------------------------------
+      *
+     C     $popfrom      begsr
+      *
+     C                   z-add     hghgsn        efhgsn
+     C                   move      hgblcd        efblcd
+     C                   move      hgrmcd        efrmcd
+     C                   move      hgppcd        efppcd
+     C                   move      hgptcd        efptcd
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Populate To Group
+      *----------------------------------------------------------------
+      *
+     C     $popto        begsr
+      *
+     C                   z-add     hghgsn        ethgsn
+     C                   move      hgblcd        etblcd
+     C                   move      hgrmcd        etrmcd
+     C                   move      hgppcd        etppcd
+     C                   move      hgptcd        etptcd
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Write a History record for the Receiving File
+      *----------------------------------------------------------------
+      *
+     C     $wrtrhst      begsr
+      *
+     C                   if        p1bobo = 'OKLIV'
+     C                   z-add     umdy          h1mdy
+     C                   z-add     uhd           h1hd
+     C                   move      usplit        h1split
+     C                   move      utype         h1type
+      *
+     C                   z-add     uffscd        h1ffscd
+     C                   move      ufblcd        h1fblcd
+     C                   move      ufrmcd        h1frmcd
+      *
+     C                   z-add     utfscd        h1tfscd
+     C                   move      utblcd        h1tblcd
+     C                   move      utrmcd        h1trmcd
+      *
+     C                   write     h1rec
+      *
+     C                   else
+     C                   z-add     umdy          h3mdy
+     C                   z-add     uhd           h3hd
+     C                   move      usplit        h3split
+     C                   move      utype         h3type
+      *
+     C                   z-add     uffscd        h3ffscd
+     C                   move      ufblcd        h3fblcd
+     C                   move      ufrmcd        h3frmcd
+      *
+     C                   z-add     utfscd        h3tfscd
+     C                   move      utblcd        h3tblcd
+     C                   move      utrmcd        h3trmcd
+      *
+     C                   write     h1rec
+      *
+     C                   endif                                                  if p1bobo = 'OKLIV'
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Write a History record for the Editing file
+      *----------------------------------------------------------------
+      *
+      * FYI: I wanted this file so I could ultimately distinguish the
+      * Bldg/Room/Groups assigned by the Upload Program (HP2061) versus the
+      * Groups assigned in the editing program (HP1062).
+      *
+     C     $wrtehst      begsr
+      *
+      * Time Stamp this record with the same values as the Receiving record...so they
+      * can be associated for debugging.
+      *
+     C                   if        p1bobo = 'OKLIV'
+     C                   z-add     h1uldt        h2uldt
+     C                   z-add     h1ultm        h2ultm
+     C                   move      h1crusr       h2crusr
+      *
+     C                   z-add     emvsn         h2mvsn
+     C                   z-add     emdy          h2mdy
+     C                   move      ehd           h2hd
+     C                   move      esplit        h2split
+     C                   move      etype         h2type
+      *
+      * From side
+     C                   z-add     effscd        h2ffscd
+     C                   move      efblcd        h2fblcd
+     C                   move      efrmcd        h2frmcd
+     C                   z-add     efhgsn        h2fhgsn
+     C                   move      efppcd        h2fppcd
+     C                   move      efptcd        h2fptcd
+      * To side
+     C                   z-add     etfscd        h2tfscd
+     C                   move      etblcd        h2tblcd
+     C                   move      etrmcd        h2trmcd
+     C                   z-add     ethgsn        h2thgsn
+     C                   move      etppcd        h2tppcd
+     C                   move      etptcd        h2tptcd
+      *
+     C                   write     h2rec
+      *
+     C                   else
+     C                   z-add     h1uldt        h4uldt
+     C                   z-add     h1ultm        h4ultm
+     C                   move      h1crusr       h4crusr
+      *
+     C                   z-add     emvsn         h4mvsn
+     C                   z-add     emdy          h4mdy
+     C                   move      ehd           h4hd
+     C                   move      esplit        h4split
+     C                   move      etype         h4type
+      *
+      * From side
+     C                   z-add     effscd        h4ffscd
+     C                   move      efblcd        h4fblcd
+     C                   move      efrmcd        h4frmcd
+     C                   z-add     efhgsn        h4fhgsn
+     C                   move      efppcd        h4fppcd
+     C                   move      efptcd        h4fptcd
+      * To side
+     C                   z-add     etfscd        h4tfscd
+     C                   move      etblcd        h4tblcd
+     C                   move      etrmcd        h4trmcd
+     C                   z-add     ethgsn        h4thgsn
+     C                   move      etppcd        h4tppcd
+     C                   move      etptcd        h4tptcd
+      *
+     C                   write     h4rec
+      *
+     C                   endif                                                  if p1bobo = 'OKLIV'
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Delete old History records
+      *----------------------------------------------------------------
+      *
+      * Our 2 "history" files are only for debugging/proving Upload issues.
+      * We will only keep the records for 60 days. So, we will clean up/delete
+      * old records in this subroutine.
+      *
+      *
+     C     $dlthist      begsr
+      *
+      * Historical Receiving File
+      *
+     C     *start        setll     hsp9061
+     C                   dou       *in91 = *on or h1uldt > wkdldt               Do receiving
+     C                   read      hsp9061                                91
+     C                   if        *in91 = *off and h1uldt < wkdldt
+     C                   delete    h1rec
+     C                   endif
+     C                   enddo                                                  Do receiving
+      *
+      *
+      * Historical Editing File
+      *
+     C     *start        setll     hsp9062
+     C                   dou       *in91 = *on or h2uldt > wkdldt               Do editing
+     C                   read      hsp9062                                91
+     C                   if        *in91 = *off and h2uldt < wkdldt
+     C                   delete    h2rec
+     C                   endif
+     C                   enddo                                                  Do editing
+      *
+     C                   clear                   h1rec
+     C                   clear                   h2rec
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C     *entry        plist
+     C                   parm                    p1bobo
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    effscd
+     C                   kfld                    efblcd
+      *
+     C     key02         klist
+     C                   kfld                    etfscd
+     C                   kfld                    etblcd
+      *
+     C     key03         klist
+     C                   kfld                    effscd
+     C                   kfld                    efblcd
+     C                   kfld                    efrmcd
+      *
+     C     key04         klist
+     C                   kfld                    etfscd
+     C                   kfld                    etblcd
+     C                   kfld                    etrmcd
+      *
+      * We will delete all "old" historical records....older than two months.
+      * So, calc that "deletion" date as the System Date less 60 days and delete.
+      *
+     C     *mdy          move      udate         wkisodate
+     C                   subdur    60:*days      wkisodate
+     C                   move      wkisodate     wkdldt
+     C                   exsr      $dlthist
+      *
+      * Set up the date/time/user for writing the Historical files.
+      *
+     C     *mdy          move      udate         wkisodate
+     C                   move      wkisodate     h1uldt
+     C                   time                    h1ultm
+     C                   move      sdusr         h1crusr
+      *
+     C                   endsr
+      /EJECT

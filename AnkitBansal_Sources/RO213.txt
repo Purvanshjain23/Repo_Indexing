@@ -1,0 +1,712 @@
+     h option(*SRCSTMT:*NODEBUGIO)
+      ****************************************************************
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Resource Optimization
+      * PROGRAM:     RO213-Assign Item Processing Sequence
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     12/18/06
+      *
+      * FUNCTION: Assign items a processing sequence code of:
+      *            BS = base item
+      *            EX = base exception item
+      *            PR = produced item
+      *
+      *           Build the Item Processing Sequence file (ROP300) that
+      *           will be used as the "driver file" for the Item
+      *           Component Meat Cost valuing process (RO214).
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/22/07  Alice Brownfield
+      *           Added Secondary Processing Sequence # so we could better
+      *           control the processing sequence.  We needed too process
+      *           Item Code 51110 after 51210.  These changes will allow
+      *           us to do that.
+      *           Also changed to NOT process Credit Items.
+      *
+      * 11/19/07  LeAnne Ramsey
+      *           The print fields were being cleared in the wrong place in the code.
+      *
+      * 01/18/08  Alice Brownfield
+      *           Changed the program to NOT exclude Credit Items in the selection
+      *           of items that get a meat cost calculated.  I also changed it
+      *           to only process items that are ACTIVE in the Item Default.
+      *
+      * 01/20/08  Alice Brownfield
+      *           Changed to code Credit item's with a RM component Item as a "BS"
+      *
+      * 11/20/08  LeAnne Ramsey
+      *           As a prep for synchronizing the TFS and Meat Cost LDAs, we
+      *           removed the unused LDA fields.
+      *
+      * 11/21/08  LeAnne Ramsey
+      *           As part of synchronizing the LDAs between the TFS Margin Adjustment Close
+      *           and the Meat Costing, we changed the LDA positions.
+      *
+      * 01/20/11  LeAnne Ramsey (E1292)
+      *           When they installed th PA changes last summer, Damon G. had to start entering
+      *           WPs as Consumed Items in the BOM. The up-front Meat Costing edits are
+      *           kicking out the Items that consume WPs. So, Damon G. will now start
+      *           entering in the BOM the true RM/Base Items that an Item consumes. He will set
+      *           these up with a BOM Meat Cost Consumed% <> 0. (He will set the consumed WPs
+      *           up with a BOM Meat Cost Consumed% of zero.) I will change the driver file
+      *           logic in this program to only process the consumed BOM records that have a
+      *           BOM Meat Cost Consumed%....this will keep the WPs out of this logic.
+      *
+      *           As part of this change, I will also have BOM LF PDIORELE changed to select
+      *           only those records where the BOM Meat Cost Consumed% is not zero. (Note:
+      *           It already selects only Active/Consumed records. Only 3 programs use this
+      *           LF: RO213, RO214, RO232.)
+      *
+      * 05/19/12  LeAnne Ramsey (E2100)
+      *           When Curt Becerra made BOM changes to accommodate PA, it messed up Damon's
+      *           Meat Costing logic. So, we will now force CVA Butts (100) and Ribs (300)
+      *           to be EX-Exception items. That way, when the code in RO214 executes, it
+      *           will calc the Base Price that Damon wants.
+      *
+      * 05/31/12  LeAnne Ramsey (E2100)
+      *           While researching an Adam Gross question on Single Rib Bellies, I saw that
+      *           I had not removed some non-functional code used for debug on the 5/19/12
+      *           change above. So, just to cleanup the code, I have removed it:
+      *
+      *                  if        iohgcd = 24166
+      *                  if        iohgcd = 24166
+      *                  endif
+      *                  endif
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     fombyrel1  if   e           k disk
+      * Item default
+      *
+      *
+     fpdiorel3  if   e           k disk
+      * Item bill of material
+      * (Note: the Logical file selects only Active/Consumed records.)
+      *
+      *
+     fpdiorele  if   e           k disk    prefix(p1)
+      * Item bill of material
+      * (Note: the Logical file selects only Active/Consumed records where
+      *        the BOM Meat Cost Consumed% is <> 0)
+      *
+     fpdiorel4  if   e           k disk    prefix(p2)
+      * Item bill of material
+      * (Note: the Logical file selects only Active/Produced records.)
+      *
+      *
+     fpocnrel3  if   e           k disk
+      * Production line/item structure
+      *
+      *
+     Frop003    if   e           k disk
+      *    Preliminary/final
+      *
+      *
+     Frop012    if   e           k disk
+      *    Item Control Data
+      *
+      *
+     frop300    uf a e           k disk
+      * Workfile: Item processing sequence
+      *
+      *
+     Fprint198  o    f  198        printer oflind(*inof)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      * Error messages
+      *
+     d arerr           s             75    dim(9) ctdata perrcd(1)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D dash            s            198    inz(*all'-')
+     d rtime           s              6  0
+      *
+      *
+      * Control fields
+      *
+     d errorfl         s              1
+     d recordfl        s              1
+     d printfl         s              1    inz('N')
+     d processfl       s              1
+     d svitcd          s                   like(w1itcd)
+     d svbyvmst        s                   like(byvmst)
+     d svbytcst        s                   like(bytcst)
+      *
+      *
+      * Print fields
+      *
+     D h1pfds          s                   like(pfpfds)
+      *
+     D l1msg           s             70
+     D l1itcd          s                   like(iohgcd)
+     D l1istycd        s                   like(byrgnb)
+     D l1isgrcd        s                   like(byrhnb)
+     D l1isclcd        s                   like(byrinb)
+     D l1ciitcd        s                   like(iohgcd)
+     D l1n0cd          s                   like(byn0cd)
+     D l1ciciitcd      s                   like(iohgcd)
+     D l1cicin0cd      s                   like(byn0cd)
+      *
+      *
+      * Array index
+      *
+     D x               s              3  0
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwedt                29     36  0
+     D  ldwemdy               44     49  0
+      *
+     D  ldfzfl                81     81
+     D  ldcono                82     84  0
+      *
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+     C                   exsr      $h1hdr
+      *
+      * Process each unique Item in the Item Bill of Material file for the Company.
+      * (Note: the Logical file selects only Active/Consumed records; and we
+      * also only process records where the BOM Meat Cost Consumed% is not zero.)
+      *
+      * The logic makes 2 attempts to assign each Item a "type":
+      *   1) assign a Raw Material type   OR
+      *   2) assign a Produced Item type
+      *
+     C     ldcono        setll     pdiorel3
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C     ldcono        reade     pdiorel3                               90
+     C                   if        *in90 = *off and                             If not eof
+     C                             ioixqt <> 0 and
+     C                             iohgcd <> svitcd
+      *
+      * Check if we want to process this record
+      *
+     C                   exsr      $clear
+     C                   exsr      $check
+      *
+     C                   z-add     iohgcd        svitcd
+      *
+     C                   if        processfl = yes                              If process
+     C                   move      no            errorfl
+     C                   move      no            recordfl
+      *
+      * Setup Secondary Sequence Code
+      * Use the Item Control Data file to determine if we should assign
+      * a Secondary Sequence Code to this item.  The only reason to do this
+      * currently is if the "Source Item Code" is NOT blank AND it is greater
+      * than the item we are currently working with we want to process it
+      * AFTER the Source Item Code.  We'll assign an "AA" to the Secondary Sequence
+      * code so it will force it after the Source.  Otherwise it will be blank.
+      *
+     C                   exsr      $secseq
+      *
+      * Raw Material:
+      * Try to "type" this Item as consuming a Raw Material Item.
+      * (It can consume either a Raw Material Base Item or a Raw Material
+      *  Exception Item.)
+      *
+     C                   exsr      $raw
+      *
+      * Produced (ie: Not Raw)
+      * If there are no errors BUT you didn't write a workfile record in the
+      * "raw" logic, then try to "type" this Item as a Produced Item.
+      *
+     C                   if        errorfl = no and
+     C                             recordfl = no
+     C                   exsr      $produced
+     C                   endif
+      *
+     C                   endif                                                  If Process
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Main do
+      *
+      *----------------
+      * EOF processing
+      *----------------
+      * If you did not print any error messages, print the 'No Error" message.
+      *
+     C                   if        printfl = no
+     C                   except    noerror
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Clear the print line on the Error Listing
+      *---------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   move      *blank        l1msg
+     C                   z-add     0             l1itcd
+     C                   z-add     0             l1istycd
+     C                   z-add     0             l1isgrcd
+     C                   z-add     0             l1isclcd
+     C                   z-add     0             l1ciitcd
+     C                   z-add     0             l1ciciitcd
+     C                   move      *blank        l1n0cd
+     C                   move      *blank        l1cicin0cd
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Assign the Secondary Sequence Code
+      *---------------------------------------------------------------
+      *
+     C     $secseq       begsr
+      *
+      * Retrieve the record from the Item Control Data file
+      *
+     C     key04         chain     rop012                             92
+     C                   if        *in92 = *off and icitcd < icsritcd           If item
+     C                   move      'AA'          w1sseq
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Check if want to process this record
+      *---------------------------------------------------------------
+      *
+     C     $check        begsr
+      *
+     C                   move      yes           processfl
+     C                   z-add     iohgcd        l1itcd
+     C                   z-add     ioc9nb        l1ciitcd
+      *
+      * An Item Default record must exist for this Item or it is an error
+      *    and we will not process the record
+      *
+     C     iohgcd        chain     ombyrel1                           92
+     C                   if        *in92 = *on                                  If no item
+     C                   z-add     1             x
+     C                   exsr      $l1dtl
+     C                   move      no            processfl
+     C                   else
+      *
+      * Set up Item Structure Print fields
+      *
+     C                   z-add     byrgnb        l1istycd
+     C                   z-add     byrhnb        l1isgrcd
+     C                   z-add     byrinb        l1isclcd
+      *
+      * Save: Credit Item Flag
+      *       TF Classification Code (CVA, CVC, etc)
+      *
+     C                   move      byvmst        svbyvmst
+     C                   move      bytcst        svbytcst
+      *
+      * If have an Item Default but the item is NOT active or it is a seconds item
+      *  it is NOT an error but we don't want to process so set the process flag to NO
+      *
+     C                   if        byvsst <> 'A' or byx5st = yes
+     C                   move      no            processfl
+     C                   endif
+      *
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Raw Material logic
+      *---------------------------------------------------------------
+      *
+     C     $raw          begsr
+      *
+      * You found an Item Default record for this Item.
+      * To make subsequent logic choices, you will need "department" from the
+      * Production Line/Item Structure record. Retrieve the record using the
+      * Item Default values:
+      *   1) item structure type code
+      *   2) item structure group code
+      *   3) item structure class code
+      *   4) company
+      *
+     C     key02         chain     pocnrel3                           92
+     C                   if        *in92 = *on
+     C                   z-add     2             x
+     C                   exsr      $l1dtl
+     C                   endif
+      *
+      * An Item Default record must also exist for the Component Item Code.
+      *
+     C                   if        errorfl = no                                 If OK so far
+     C     ioc9nb        chain     ombyrel1                           92
+     C                   if        *in92 = *on                                  If bad comp
+     C                   z-add     3             x
+     C                   exsr      $l1dtl
+     C                   else
+      *
+      * When the Component Item is a Raw-Material,
+      *   1) classify the Item as a Base Item when it is department 'CUT' or if
+      *                  it is a Credit Item regardless of the department
+      *   2) classify the Item as an Exception Item for all other departments
+      *      (an example of an "other" department is 'TRIM')
+      * When the Component Item is not Raw and not Finished Good,
+      *   it's an error
+      *
+     C                   move      byn0cd        l1n0cd
+      *
+     C                   select
+      *  Raw material
+     C                   when      byn0cd = 'RM '
+      *
+     C                   select
+     C                   when      svbytcst = 'CVA' and
+     C                             (l1istycd = 100 or l1istycd = 300)
+     C                   move      'EX'          w1seq
+     C                   when      cnr3cd = 'CUT' or svbyvmst = 'Y'
+     C                   move      'BS'          w1seq
+     C                   other
+     C                   move      'EX'          w1seq
+     C                   endsl
+      *
+     C                   exsr      $wrt300
+      *
+      * When the Component Item is not "Raw" and not "Finished Good", it is
+      * an error.
+     c                   when      byn0cd <> 'FG '
+     C                   z-add     4             x
+     C                   exsr      $l1dtl
+     C                   endsl
+      *
+     C                   endif                                                  If bad comp
+     C                   endif                                                  If OK so far
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Produced Item Logic
+      *---------------------------------------------------------------
+      *
+     C     $produced     begsr
+      *
+      * Using the Component Item from the primary record as the "Item",
+      * retrieve the Component Item's BOM record.
+      * (Note: This Logical file selects only Active/Consumed records where
+      *        the BOM Meat Cost Consumed% is <> 0)
+      *
+     C     key01         chain     pdiorele                           92
+     C                   if        *in92 = *on                                  If no BOM
+     C                   z-add     5             x
+     C                   exsr      $l1dtl
+     C                   else
+      *
+      * Retrieve the Item Default record for the Component Item of the
+      * Component Item.
+      *
+     C                   z-add     p1ioc9nb      l1ciciitcd
+      *
+     C     p1ioc9nb      chain     ombyrel1                           92
+     C                   if        *in92 = *on                                  If no item default
+     C                   z-add     6             x
+     C                   exsr      $l1dtl
+     C                   else
+      *
+      * It is an error if the Component's Component Item is not a Raw
+      * Material.
+     C                   move      byn0cd        l1cicin0cd
+     C                   if        byn0cd <> 'RM '                              If not raw
+     C                   z-add     7             x
+     C                   exsr      $l1dtl
+     C                   else
+      *
+      * For Produced items, the Item must have a Produced BOM record for
+      * itself with a Sales Yield.
+      *
+     C     key03         chain     pdiorel4                           92
+     C                   select                                                 Select 1
+     C                   when      *in92 = *on
+     C                   z-add     8             x
+     C                   exsr      $l1dtl
+      *
+     C                   when      p2iobopr = 0
+     C                   z-add     9             x
+     C                   exsr      $l1dtl
+     C                   other
+      *
+     C                   eval      w1seq = 'PR'
+     C                   exsr      $wrt300
+     C                   endsl                                                  Select 1
+      *
+     C                   endif                                                  If not raw
+     C                   endif                                                  If no item default
+     C                   endif                                                  If no BOM
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a workfile record
+      *---------------------------------------------------------------
+      *
+     C     $wrt300       begsr
+      *
+      * Populate the Item Code field in the workfile record with the "Item"
+      * from the primary/driver BOM file.
+      *
+     C                   z-add     iohgcd        w1itcd
+      *
+      * Retrieve:
+      *   1) Primal Group Code
+      *   2) Item Type Code
+      *   3) Production Department Code
+      *   4) Production Department Line
+      *
+     C     w1itcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off                                 If item
+     C                   move      byxrcd        w1pgcd
+     C                   eval      w1ittycd = byn0cd
+      *
+      * Retrieve the Item's Production Department/Line using a key of:
+      *  1) item structure type code
+      *  2) item structure group code
+      *  2) item structure class code
+      *
+     c     key02         chain     pocnrel3                           92
+     c                   if        *in92 = *off                                 If line hit
+     c                   move      cnr3cd        w1pdcd
+     c                   move      cnewaa        w1plcd
+     c                   endif                                                  If line hit
+     C                   endif                                                  If item
+      *
+     C                   write     w1rec
+     C                   clear                   w1rec
+      *
+     C                   move      yes           recordfl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Exception/Error line
+      *---------------------------------------------------------------
+      *
+     C     $l1dtl        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   eval      l1msg = arerr(x)
+     C                   except    l1dtl
+      *
+     C                   move      yes           errorfl
+     C                   move      yes           printfl
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Print headings
+      *-----------------------------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+      *
+     c     key01         klist
+     c                   kfld                    ldcono
+     c                   kfld                    ioc9nb
+      *
+     c     key02         klist
+     c                   kfld                    byrgnb
+     c                   kfld                    byrhnb
+     c                   kfld                    byrinb
+     c                   kfld                    ldcono
+      *
+     c     key03         klist
+     c                   kfld                    ldcono
+     c                   kfld                    svitcd
+     c                   kfld                    svitcd
+      *
+     c     key04         klist
+     c                   kfld                    ldcono
+     c                   kfld                    ldwedt
+     c                   kfld                    svitcd
+      *
+      * Set up heading info.
+      *
+     C                   time                    rtime
+      *
+      * Retrieve 'preliminary/final' description
+      *
+     C     ldpfcd        chain     rop003                             92
+     C                   select
+     C                   when      *in92 = *on
+     C                   eval      h1pfds = 'Unknown'
+      *
+     C                   when      ldpfcd = 'P'
+     C                   movel     pfpfds        h1pfds
+      *
+     C                   when      ldpfcd = 'F'
+     C                   eval      %subst(h1pfds:4:5) = %subst(pfpfds:1:5)
+     C                   endsl
+      *
+     c                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report lines
+      *-------------------------------------------------------------
+      *
+     Oprint198  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           91 'Item Sequence Error'
+     O                                           99 ' Listing'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                       h1pfds              90
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+     O          e            h1hdr          1
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+      *
+     O          e            h1hdr          1
+     O                                           23 'Year/week:'
+     O                       ldyr          z     29
+     O                       ldwk          z     33
+      *
+     O          e            h1hdr          1
+     O                                           23 'Week-ending date:'
+     O                       ldwemdy             33 '  /  /  '
+      *
+     O          e            h1hdr          2
+     O                                           23 'Include frozen product:'
+     O                       ldfzfl              26
+      *
+      *
+      *-------------------------------------------------------------
+      * Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr          1
+     O                                          139 'Components'
+     O          e            h1hdr          1
+     O                                          102 '- Item Structure -'
+     O                                          120 'Component Item'
+     O                                          140 'Consumed Item'
+     O          e            h1hdr          1
+     O                                           82 'Item'
+     O                                           88 'Type'
+     O                                           95 'Group'
+     O                                          102 'Class'
+     O                                          112 'Item'
+     O                                          119 'Type'
+     O                                          132 'Item'
+     O                                          139 'Type'
+      *
+     O          e            h1hdr          1
+     O                                           13 'Error Message'
+     O                                           82 'Code'
+     O                                           88 'Code'
+     O                                           95 'Code'
+     O                                          102 'Code'
+     O                                          112 'Code'
+     O                                          119 'Code'
+     O                                          132 'Code'
+     O                                          139 'Code'
+      *
+     O          e            h1hdr          1
+     O                       dash               198
+      /eject
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl          2
+     O                       l1msg               70
+     O                       l1itcd        z     82
+     O                       l1istycd      z     87
+     O                       l1isgrcd      z     94
+     O                       l1isclcd      z    102
+     O                       l1ciitcd      z    112
+     O                       l1n0cd             119
+     O                       l1ciciitcd    z    132
+     O                       l1cicin0cd         139
+      *
+      *-------------------------------------------------------------
+      * The "no error" message.
+      *-------------------------------------------------------------
+      *
+     O          e            noerror        2
+     O                                           21 'There were no errors.'
+      /eject
+     ******************************************************************
+      * Error messages
+     ******************************************************************
+** Error Text
+Item has no Item Default (OMBYREL1) record.
+Item has no Production Line/Item Structure (POCNREL3) record.
+Component-item has no item-default (OMBYREL1) record.
+Component-item is not a raw-material or finished-good.
+Component-item has no item-BOM (PDIOREL3) record.
+Component's consumed-item has no item-default (OMBYREL1) record.
+Component's consumed-item is not a raw material.
+Item has no Produced record for itself in BOM file (PDIOREL4).
+Item's Sales Yield is 0 on Produced BOM (PDIOREL4) record for itself.

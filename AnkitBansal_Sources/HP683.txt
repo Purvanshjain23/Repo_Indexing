@@ -1,0 +1,830 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP683
+      * TITLE:       CHECK REGISTER
+      *
+      * PROGRAMMER:  ROSE MARTIN
+      * CREATED:     8/10/94
+      *
+      *  FUNCTION:   THIS PROGRAM PRINTS THE CHECK REGISTER EDIT.
+      *
+      *              THE SELECTIONS ARE ENTERED THROUGH HP483 AND AN
+      *              OPNQRY IS USED IN HP483CL TO SELECT CHECK DETAIL
+      *              RECORDS.
+      *
+      *              REQUIRED SELECTIONS:
+      *                 FROM CHECK DATE
+      *                 TO CHECK DATE
+      *
+      *              OPTIONAL SELECTIONS:
+      *                 CUSTOMER/VENDOR NUMBER
+      *
+      *              REPORT SEQUENCE:
+      *                 CHECK DATE
+      *                 CUSTOMER/VENDOR
+      *                 CHECK NUMBER
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      * 09/02/94  LEANNE FEDOR
+      *           REWRITTEN.
+      *
+      * 09/27/94  LEANNE FEDOR
+      *           RECOMPILE ONLY. REMOVED THE FOLLOWING UNUSED
+      *           DATABASE FIELDS FROM THE CHECK FILES:
+      *             HSP063-CHECK HEADER        CHCHBO CHHRDT
+      *             HSP064-CHECK DETAIL        CDCHBO CDCSAM
+      *             HSP065-CHECK ADJUSTMENTS   CJCHBO
+      *
+      * 10/03/94  MARY PALMER
+      *           SORT ON KILL DATE INSTEAD OF CHECK DATE USING JOIN
+      *           FILE HSJ063C INSTEAD OF HSL064D. CHANGE LEVEL BREAK
+      *
+      * 04/26/95  LEANNE FEDOR
+      *           CHANGED FARM SITE CODE FROM ALPHA TO NUMERIC.
+      *
+      * 07/07/95  LEANNE FEDOR
+      *           FOR MOVEMENT REWRITE, CHANGED LOGIC TO USE THE
+      *           CHECK DETAIL FILE INSTEAD OF A JOIN OF THE CHECK
+      *           HEADER AND CHECK DETAIL. AND, WE NOW SORT ON THE
+      *           'SALES ACCRUAL DATE' INSTEAD OF KILL DATE. THE
+      *           'SALES ACCRUAL DATE' IS DEFAULTED IN THE CHECK
+      *           FUNCTION TO BE EITHER KILL DATE (IF THERE IS ONE)
+      *           OR CHECK DATE (IF KILL DATE IS ZERO).
+      *
+      *           HOWEVER, FOR THE MOVEMENT CONVERSION, SINCE THE OLD
+      *           FUNCTIONS ALWAYS REQUIRED KILL DATE, WE USED KILL
+      *           DATE FOR 'SALES ACCRUAL DATE'--EVEN FOR CULL AND
+      *           FEEDER PIG SALES.
+      *
+      * 03/13/96  LEANNE FEDOR
+      *           CHANGED THE WORDING ON THE TOTAL LINE FROM 'CHECK
+      *           TOTAL' TO 'CHECK TOTAL FOR SALES ACCRUAL DATE'.
+      *           CHANGED THE WORDING IN THE HEADING FROM
+      *           'CUSTOMER/VENDOR' TO 'CUSTOMER'.
+      *
+      * 05/13/96  LEANNE FEDOR
+      *           MADE CHANGES TO FACILITATE NEW JDE RELEASE CONVERSION
+      *           CHANGED SEARCH TYPE TO 3A; CALL NEW GENERIC
+      *           PROGRAM HPJDEV TO VALIDATE INSTEAD OF HPJDEA SINCE
+      *           NO VENDOR ADDRESS IS REQUIRED.
+      *
+      * 03/04/98  LeAnne Fedor
+      *           The following fields were added to the database for
+      *           the sales movement detail and check detail files:
+      *                     condemned head and pounds
+      *                     yard dead head and pounds
+      *           The logic was changed to subtract condemned and yard
+      *           dead values out of the live values (head and pounds)
+      *           and add them into the DOA values. The headings were
+      *           changed accordingly.
+      *
+      * 03/04/00  LeAnne Fedor
+      *           Added totals by a) date and 2) report to help Rindy
+      *           Powell at the Guyman Live Office balance this report
+      *           to the HPE Purchase Journal.
+      *
+      * 06/02/04  LeAnne Fedor
+      *           We can now generate this report from the Work With Checks
+      *           function for a single, selected check. So, added logic to control
+      *           Heading/Total printing.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 11/09/17  Brad Baden    E010812
+      *           Add Business Office to top of report from the LDA.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSP009    IF   E           K DISK
+      *    Business Office
+      *
+      *
+     FHSL034D   IF   E           K DISK
+      *    HOG GROUP
+      *
+      *
+     FHSJ064J   IF   E           K DISK
+      *    CHECK DETAIL     (records selected/keyed in OPNQRY)
+      *
+      *
+     FHSL065C   IF   E           K DISK
+      *    CHECK ADJUSTMENTS
+      *
+      *
+     FQPRINT    O    F  198        PRINTER OFLIND(*INOF)
+      *
+      /EJECT
+      ****************************************************************
+      * Definition Specifications
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  DEDUCTION/ADDS AND PREMIUM/DISCOUNTS CODES AND AMOUNTS FOR
+      *  A CHECK DETAIL LINE -- USED TO PRINT
+      *---------------------------------------------------------------
+      *
+     D DD              S              5    DIM(20)                              DED/ADD CD/AMT
+     D DA              S              7  2 DIM(20)
+     D PD              S              5    DIM(20)                              PRM/DIS CD/AMT
+     D PA              S              7  2 DIM(20)
+      *
+      *---------------------------------------------------------------
+      * Arrays for total lines
+      *---------------------------------------------------------------
+      *
+     D lvhd            S              9  0 DIM(3)
+     D dohd            S              9  0 DIM(3)
+     D lvlb            S             11  0 DIM(3)
+     D dolb            S             11  0 DIM(3)
+     D crlb            S             11  0 DIM(3)
+     D baam            S             11  2 DIM(3)
+     D pdam            S             11  2 DIM(3)
+     D gram            S             11  2 DIM(3)
+     D daam            S             11  2 DIM(3)
+     D ntam            S             11  2 DIM(3)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+     D x               s              1  0
+      *
+      *---------------------------------------------------------------
+      *  STANDARD MESSAGE ARRAYS (REQUIRED IN BATCH FOR JDE CUSTOMER)
+      *---------------------------------------------------------------
+     D MGW             S              1    DIM(50)                              MSG WORK PARMS
+      *
+      *---------------------------------------------------------------
+      * STANDARD ERROR MESSAGE HANDLING DATA STRUCTURES
+      *---------------------------------------------------------------
+      * THE FOLLOWING ERROR MESSAGE DATA STRUCTURES ARE REQUIRED IN
+      * THIS BATCH PROGRAM BECAUSE THEY ARE USED AS STANDARD INPUT
+      * PARMS TO THE GENERIC PROGRAM THAT RETRIEVES THE JDE CUSTOMER
+      * NAME.
+      *
+      * FOR ERROR MESSAGE HANDLING, A PACKED INDEX (E) IS REQUIRED.
+      * FOR PROGRAM READABILITY, DEFINE A CORRESPONDING ERROR COUNT
+      * FIELD CALLED 'ERROR'
+      *
+     D                 DS                  INZ
+     D  ERROR                  1      2P 0
+     D  E                      1      2P 0
+      *
+     D MGI             DS           140    INZ
+     D  MGID                   1    140
+     D                                     DIM(20)                              MSG ID ARRAY
+      *
+     D MGD             DS          1000    INZ
+     D  MGDT                   1   1000
+     D                                     DIM(20)                              MSG PARMS
+      *
+      *---------------------------------------------------------------
+      *  DATE FORMATS
+      *---------------------------------------------------------------
+      *
+      * DATE IN MMDDYY FORMAT
+      *
+     D                 DS
+     D  WKMDY                  1      6  0
+     D  WKMM                   1      2  0
+     D  WKDD                   3      4  0
+     D  WKYY                   5      6  0
+      *
+      * DATE IN CCYYMMDD FORMAT
+      *
+     D                 DS
+     D  WKCYMD                 1      8  0
+     D  WKCEN                  1      2  0
+     D  WKYER                  3      4  0
+     D  WKMON                  5      6  0
+     D  WKDAY                  7      8  0
+      *
+      *----------------------------------------------------------------
+      * LDA - REPORT SELECTIONS
+      *----------------------------------------------------------------
+      *
+     D                UDS
+     D  LDFMDY                 1      6  0
+     D  LDFYMD                 7     14  0
+     D  LDTMDY                15     20  0
+     D  LDTYMD                21     28  0
+     D  LDCVNO                29     36  0
+     D  LDCHNO                37     43  0
+     D  LD435                 44     44
+     D  LDBOCD                45     49
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *---------------------------------------------------------------
+      * NAMED CONSTANTS
+      *---------------------------------------------------------------
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D check           c                   'CHECK TOTAL FOR SALES ACCRUAL DATE:'
+     D date            c                   '                    TOTAL FOR DATE:'
+     D report          c                   '                      REPORT TOTAL:'
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+      *
+      * PROCESS EACH CHECK DETAIL RECORD
+      *
+     C     *IN90         DOUEQ     *ON                                          MAIN DO
+     C                   READ      HSJ064J                                90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+      *
+      * IF THIS IS THE FIRST TIME,
+      *    PRINT REPORT HEADINGS
+      *    RETRIEVE CUSTOMER NAME FOR FIRST RECORD
+      *    SAVE ALL CONTROL BREAK VALUES.
+      *
+     C     FIRST         IFEQ      YES                                          IF FIRST
+     C                   SETON                                        101112
+     C                   EXCEPT    HRHDR
+     C                   EXSR      $CUST
+      *
+     C                   Z-ADD     CDSADT        SVSADT
+     C                   Z-ADD     CDCVNO        SVCVNO
+     C                   Z-ADD     CDCHNO        SVCHNO
+     C                   MOVEL     NO            FIRST
+      *
+      * FLIP SALES ACCRUAL DATE FROM CCYYMMDD TO MMDDYY
+      *
+     C                   Z-ADD     CDSADT        WKCYMD
+     C                   EXSR      $TOMDY
+     C                   Z-ADD     WKMDY         DTSADT
+      *
+      * FLIP CHECK DATE FROM CCYYMMDD TO MMDDYY
+      *
+     C                   Z-ADD     CDCHDT        WKCYMD
+     C                   EXSR      $TOMDY
+     C                   Z-ADD     WKMDY         DTCHDT
+     C                   ENDIF                                                  IF FIRST
+      *
+      * Control breaks
+     C                   exsr      $break
+      *
+      *---------------------------------------------------
+      * PROCESSING FOR DETAIL LINE
+      *---------------------------------------------------
+      *
+      * SET UP PRINT FIELDS FROM CHECK DETAIL RECORD
+      *
+      * Add condemned and yard dead head into the DOA head
+      *
+     C                   eval      dtmoddohd = cddohd + cdcdhd + cdydhd
+     C                   add       dtmoddohd     dohd
+      *
+      * Add condemned and yard dead pounds into the DOA pounds
+      *
+     C                   eval      dtmoddolb = cddolb + cdcdlb + cdydlb
+     C                   add       dtmoddolb     dolb
+      *
+      * Subtract the yard dead and condemned head from live head
+      *
+     C                   eval      dtmodlvhd = cdlvhd - cdcdhd - cdydhd
+     C                   add       dtmodlvhd     lvhd
+      *
+      * Subtract the yard dead and condemned pounds from live pounds
+      *
+     C                   eval      dtmodlvlb = cdlvlb - cdcdlb - cdydlb
+     C                   add       dtmodlvlb     lvlb
+      *
+      *
+     C                   ADD       CDCRLB        crlb
+     C                   ADD       CDBAAM        baam
+     C                   ADD       CDGRAM        gram
+      *
+      * RETRIEVE GROUP INFO
+      *
+     C     CDHGSN        CHAIN     HSL034D                            97
+     C     *IN97         IFEQ      *OFF                                         IF GROUP HIT
+     C                   Z-ADD     HGFSCD        DTFSCD
+     C                   MOVEL     HGHGCD        DTHGCD
+     C                   MOVEL     HGBLCD        DTBLCD
+     C                   MOVEL     HGRMCD        DTRMCD
+     C                   ENDIF                                                  IF GROUP HIT
+      *
+      *  LOAD DEDUCTION/ADDS & PREMIUM/DISCOUNTS INTO ARRAYS
+      *  FOR PRINTING
+     C                   EXSR      $TOTDA
+     C                   XFOOT     DA            DTDAAM
+     C                   XFOOT     PA            DTPDAM
+      *
+      * CALCULATE NET AMOUNT
+      *
+     C     CDGRAM        ADD       DTDAAM        DTNTAM
+      *
+      * ACCUMULATE FOR CHECK TOTALS
+      *
+     C                   ADD       DTNTAM        ntam
+     C                   ADD       DTDAAM        daam
+     C                   ADD       DTPDAM        pdam
+      *
+      * PRINT DETAIL LINE
+      *
+     C     *INOF         IFEQ      *ON
+     C                   SETON                                        101112
+     C                   EXCEPT    HRHDR
+     C                   ENDIF
+      *
+     C                   EXCEPT    DTLINE
+     C                   SETOFF                                       101112
+      *
+      * PRINT CHECK ADJUSTMENT ARRAYS
+      *
+     C                   EXSR      $PRTDA
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  MAIN DO
+      *
+      *----------------------------------------------------------------
+      * EOF PROCESSING
+      *----------------------------------------------------------------
+      *
+      *  IF NO DETAIL RECORDS MATCHED THE SELECTION CRITERIA,
+      *         PRINT THE STANDARD 'NO DATA...' ERROR MESSAGE
+      *  OTHERWISE, PRINT THE TOTAL LINES FOR:
+      *             a) the last check
+      *             b) the last day
+      *             c) the report
+      *
+     C     FIRST         IFEQ      YES                                          IF NO DATA
+     C                   EXCEPT    HRHDR
+     C                   EXCEPT    NODATA
+     C                   ELSE
+      *
+      * Only print 'check' total if the selections include ALL customers or
+      * ALL checks. (This keeps you from printing a check total when the report
+      * is for a single check.)
+      *
+     C                   if        ldcvno = 0 or ldchno = 0
+     C                   z-add     1             x
+     C                   move      check         t1desc
+     C                   exsr      $total
+     C                   endif
+      *
+     C                   z-add     2             x
+     C                   move      date          t1desc
+     C                   exsr      $total
+      *
+     C                   z-add     3             x
+     C                   move      report        t1desc
+     C                   exsr      $total
+      *
+     C                   ENDIF                                                  IF NO DATA
+      *
+     C                   SETON                                        LR
+      /EJECT
+      *----------------------------------------------------------------
+      * Control break logic
+      *----------------------------------------------------------------
+      *
+     C     $break        begsr
+      *
+      * IF BREAK ON SALES ACCRUAL DATE, CHECK NUMBER OR CUSTOMER
+      *    PRINT CHECK TOTALS AND FLIP DATES TO MMDDYY FOR NEXT
+      *    LINE.
+      *
+     C     CDSADT        IFNE      SVSADT
+     C                   SETON                                        101112
+     C                   Z-ADD     CDSADT        WKCYMD
+     C                   EXSR      $TOMDY
+     C                   Z-ADD     WKMDY         DTSADT
+     C                   ENDIF
+      *
+     C     CDCVNO        IFNE      SVCVNO
+     C                   SETON                                        1112
+     C                   ENDIF
+      *
+     C     CDCHNO        IFNE      SVCHNO
+     C                   SETON                                        12
+      *
+      * FLIP CHECK DATE FROM CCYYMMDD TO MMDDYY
+      *
+     C                   Z-ADD     CDCHDT        WKCYMD
+     C                   EXSR      $TOMDY
+     C                   Z-ADD     WKMDY         DTCHDT
+     C                   ENDIF
+      *
+     C     CDSADT        IFNE      SVSADT                                       IF BREAK
+     C     CDCVNO        ORNE      SVCVNO
+     C     CDCHNO        ORNE      SVCHNO
+      *
+      *
+      * Only print 'check' total if the selections include ALL customers or
+      * ALL checks. (This keeps you from printing a check total when the report
+      * is for a single check.)
+      *
+     C                   if        ldcvno = 0 or ldchno = 0
+     C                   z-add     1             x
+     C                   move      check         t1desc
+     C                   exsr      $total
+     C                   endif
+      *
+      * Print total for date
+      *
+     C                   if        cdsadt <> svsadt
+     C                   z-add     2             x
+     C                   move      date          t1desc
+     C                   exsr      $total
+     C                   endif
+      *
+     C     CDCVNO        IFNE      SVCVNO
+     C                   EXSR      $CUST
+     C                   ENDIF
+      *
+     C                   Z-ADD     CDSADT        SVSADT
+     C                   Z-ADD     CDCVNO        SVCVNO
+     C                   Z-ADD     CDCHNO        SVCHNO
+     C                   ENDIF                                                  IF BREAK
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * BUILD ARRAY OF DEDUCTION/ADDS, PREMIUM/DISCOUNTS
+      *----------------------------------------------------------------
+      *
+     C     $TOTDA        BEGSR
+      *
+     C                   MOVE      *BLANK        DD
+     C                   Z-ADD     0             DA
+     C                   Z-ADD     0             F
+     C                   MOVE      *BLANK        PD
+     C                   Z-ADD     0             PA
+     C                   Z-ADD     0             Q
+     C                   SETOFF                                       70
+      *
+     C     key01         SETLL     HSL065C
+      *
+     C     *IN70         DOWEQ     *OFF                                         DO LOOP
+     C     key01         READE     HSL065C                                70
+     C     *IN70         IFEQ      *OFF                                         IF HIT
+      *
+      * LOAD DEDUCTIONS/ADDITIONS IN ARRAY (DA)
+      *
+     C     CJCJFL        IFEQ      'D'                                          IF DEDUCTION
+     C                   Z-ADD     1             D                 2 0
+     C     CJCJCD        LOOKUP    DD(D)                                  50
+     C     *IN50         IFEQ      *OFF                                         IF DA FOUND
+     C                   ADD       1             F                 2 0
+     C                   MOVEL     CJCJCD        DD(F)
+     C                   Z-ADD     CJCJAM        DA(F)
+     C                   ELSE
+     C                   ADD       CJCJAM        DA(D)
+     C                   ENDIF                                                  IF DA FOUND
+     C                   ELSE
+      *
+      * LOAD PREMIUM/DISCOUNTS INTO <PD> ARRAY
+      *
+     C                   Z-ADD     1             P                 2 0
+     C     CJCJCD        LOOKUP    PD(P)                                  50
+     C     *IN50         IFEQ      *OFF                                         IF PD FOUND
+     C                   ADD       1             Q                 2 0
+     C                   MOVEL     CJCJCD        PD(Q)
+     C                   Z-ADD     CJCJAM        PA(Q)
+     C                   ELSE
+     C                   ADD       CJCJAM        PA(P)
+     C                   ENDIF                                                  IF PD FOUND
+     C                   ENDIF                                                  IF DEDUCTION
+     C                   ENDIF                                                  IF HIT
+     C                   ENDDO                                                  DO LOOP
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * RETRIEVE CUSTOMER NAME FROM JD EDWARDS SYSTEM
+      *----------------------------------------------------------------
+      *
+     C     $CUST         BEGSR
+      *
+     C                   Z-ADD     CDCVNO        INAJD
+     C                   MOVEL(P)  'C'           INAT1
+     C                   EXSR      $JDEV
+     C     JDEFL         IFEQ      YES
+     C                   MOVEL(P)  'UNKNOWN'     DTCNAM
+     C                   ELSE
+     C                   MOVEL     OUALPH        DTCNAM
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * PRINT ARRAYS OF DEDUCTION/ADDS, PREMIUMS/DISCOUNTS
+      *----------------------------------------------------------------
+      *
+     C     $PRTDA        BEGSR
+      *
+      * START AT ELEMENT 2 SINCE ELEMENT 1 WAS PRINTED IN DTLINE.
+      *
+     C                   Z-ADD     1             D
+      *
+     C     2             DO        20            P
+     C                   ADD       1             D
+     C     PA(P)         IFNE      0
+     C     DA(D)         ORNE      0
+     C                   EXCEPT    DTLIN2
+     C                   ENDIF
+     C                   ENDDO
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * FLIP DATE FROM YYMMDD TO MMDDYY
+      *----------------------------------------------------------------
+      *
+     C     $TOMDY        BEGSR
+      *
+     C                   Z-ADD     WKMON         WKMM
+     C                   Z-ADD     WKDAY         WKDD
+     C                   Z-ADD     WKYER         WKYY
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * Print total line
+      *----------------------------------------------------------------
+      *
+     C     $total        BEGSR
+      *
+     C     *INOF         IFEQ      *ON
+     C                   SETON                                        101112
+     C                   EXCEPT    HRHDR
+     C                   ENDIF
+      *
+     C                   EXCEPT    t1tot
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * SUBROUTINE TO CALL THE EXTERNAL PROGRAM TO VALIDATE JDE
+      *         ADDRESS NUMBERS.
+      *----------------------------------------------------------------
+      *
+     C     $JDEV         BEGSR
+      *
+     C                   MOVEL     NO            JDEFL                          JDE ERRORS
+      *
+     C                   CALL      'HPJDEV'
+     C                   PARM                    MGI                            MSG ID'S
+     C                   PARM                    MGD                            MSG DATA FLD
+     C                   PARM                    ERROR                          # ERR MSGS
+     C                   PARM                    INAJD                          JDE ADDR #
+     C                   PARM                    INAT1                          JDE ADDR TYP
+     C                   PARM                    JDEFL                          ERROR FLAG
+     C                   PARM      *BLANK        OUALPH                         JDE NAME
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * INITIALIZATION SUBROUTINE
+      *---------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      * KEY FOR FILE HSL065 -CHECK ADJUSTMENTS
+      *
+     C     key01         KLIST
+     C                   KFLD                    CDCHDT
+     C                   KFLD                    CDCVNO
+     C                   KFLD                    CDCHNO
+     C                   KFLD                    CDLNNO
+      *
+      * Total line description
+      *
+     C                   MOVE      *BLANK        t1desc           35
+      *
+      * SAVE FIELDS FOR LEVEL BREAK COMPARISONS
+      *
+     C     *LIKE         DEFINE    CDCHNO        SVCHNO
+     C     *LIKE         DEFINE    CDSADT        SVSADT
+     C     *LIKE         DEFINE    CDCVNO        SVCVNO
+      *
+      * PRINT FIELDS FOR THE DETAIL LINE
+      *
+     C     *LIKE         DEFINE    HGHGCD        DTHGCD
+     C     *LIKE         DEFINE    HGFSCD        DTFSCD
+     C     *LIKE         DEFINE    HGBLCD        DTBLCD
+     C     *LIKE         DEFINE    HGRMCD        DTRMCD
+     C     *LIKE         DEFINE    LDFMDY        DTCHDT
+     C     *LIKE         DEFINE    LDFMDY        DTSADT
+     C     *LIKE         DEFINE    CDDOHD        dtmoddohd
+     C     *LIKE         DEFINE    cddolb        dtmoddolb
+     C     *LIKE         DEFINE    cdlvhd        dtmodlvhd
+     C     *LIKE         DEFINE    cdlvlb        dtmodlvlb
+     C                   MOVE      *BLANK        DTCNAM            8
+     C     *LIKE         DEFINE    CDGRAM        DTDAAM
+     C     *LIKE         DEFINE    CDGRAM        DTPDAM
+     C     *LIKE         DEFINE    CDGRAM        DTNTAM          + 2
+      *
+      *
+      * J.D. EDWARDS PARMS
+      *
+     C                   MOVE      *BLANK        JDEFL             1            JDE ERR FLAG
+     C                   MOVE      *BLANK        INAT1             3            JDE ADDR TYP
+     C     *LIKE         DEFINE    CJCVNO        INAJD                          JDE NUMBER
+     C                   MOVE      *BLANK        OUALPH           40            JDE NAME
+      *
+      * SET UP A FIRST TIME FLAG
+      * SET UP A DASHED LINE FOR UNDERLINING THE HEADING
+      * RETRIEVE TIME FOR REPORT HEADING
+      *
+     C                   MOVE      YES           FIRST             1
+     C                   MOVEL     *ALL'-'       DASH            198
+     C                   TIME                    RTIME             6 0
+      *
+      * Set indicators to control printing in headings
+      *
+     C                   if        ld435 = no
+     C                   seton                                        98
+     C                   endif
+      *
+     C                   if        ldchno = 0
+     C                   seton                                        96
+     C                   endif
+      *
+      * RETRIEVE CUSTOMER NAME
+      *
+     C     LDCVNO        IFNE      0
+     C                   Z-ADD     LDCVNO        INAJD
+     C                   MOVEL(P)  'C'           INAT1
+     C                   EXSR      $JDEV
+      *
+     C     JDEFL         IFEQ      YES
+     C                   MOVEL     'UNKNOWN'     HDCNAM
+     C                   ELSE
+     C                   MOVEL     OUALPH        HDCNAM           30
+     C                   ENDIF
+      *
+     C                   ELSE
+     C                   SETON                                        95
+     C                   ENDIF
+      *
+      * Get the Business Office Name
+      *
+     C     ldbocd        chain     hsp009
+      *
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------
+      * REPORT HEADINGS
+      *-------------------------------------------------------------
+     OQPRINT    E            HRHDR          1 01
+     O                       SDPGM               10
+     O                                          108 'HOG PRODUCTION SYSTEM'
+     O                                          188 'DATE'
+     O                       UDATE         Y    198
+      *
+     O          E            HRHDR          1
+     O                       SDUSR               10
+     O                                          107 'CHECK REGISTER EDIT'
+     O                                          188 'TIME'
+     O                       RTIME              198 '  :  :  '
+      *
+     O          E            HRHDR          1
+     O                                          188 'PAGE'
+     O                       PAGE          Z    198
+      *
+     O          E            HRHDR          1
+     O                                           26 'BUSINESS OFFICE:'
+     O                       LDBOCD              32
+     O                       BOBODS              67
+      *
+     O          E    98      HRHDR          1
+     O                                           26 'FROM SALES ACCRUAL DATE:'
+     O                       LDFMDY        Y     36
+      *
+     O          E    98      HRHDR          1
+     O                                           26 'TO SALES ACCRUAL DATE:'
+     O                       LDTMDY        Y     36
+      *
+     O          E            HRHDR          1
+     O                                           26 'CUSTOMER:'
+     O              N95      LDCVNO        Z     36
+     O              N95      HDCNAM              70
+     O               95                          31 'ALL'
+      *
+     O          E            HRHDR          2
+     O                                           26 'CHECK NUMBER:'
+     O              N96      LDCHNO        Z     36
+     O               96                          31 'ALL'
+      *
+      *-------------------------------------------------------------
+      * COLUMN HEADINGS
+      *-------------------------------------------------------------
+     O          E            HRHDR          1
+     O                                            8 'SALE ACC'
+     O                                           25 'CHECK'
+     O                                           40 'CHECK'
+     O                                           51 'MOVEMENT'
+     O                                           56 'FARM'
+     O                                           94 'LIVE - Y/D & CD'
+     O                                          111 'DOA + Y/D & CD'
+     O                                          121 'CARCASS'
+     O                                          135 'BASE'
+     O                                          166 'GROSS'
+     O                                          196 'NET'
+     O          E            HRHDR          1
+     O                                            6 'DATE'
+     O                                           17 'CUSTOMER'
+     O                                           25 'NUMBER'
+     O                                           32 'TATTOO'
+     O                                           39 'DATE'
+     O                                           51 'NUMBER'
+     O                                           57 'SITE'
+     O                                           63 'GROUP'
+     O                                           71 'BLDNG'
+     O                                           76 'ROOM'
+     O                                           84 'HEAD'
+     O                                           94 'POUNDS'
+     O                                          101 'HEAD'
+     O                                          111 'POUNDS'
+     O                                          121 'POUNDS'
+     O                                          135 'AMOUNT'
+     O                                          153 'PREMIUM/DISCOUNT'
+     O                                          166 'AMOUNT'
+     O                                          184 'DEDUCTION/ADD-ON'
+     O                                          197 'AMOUNT'
+     O          E            HRHDR          1
+     O                       DASH               198
+      *-------------------------------------------------------------
+      * DETAIL LINE
+      *-------------------------------------------------------------
+     O          E            DTLINE         1
+     O               10      DTSADT        Y      8
+     O               11      DTCNAM              17
+     O               12      CDCHNO        Z     25
+     O                       CDTANO        ZB    31
+     O               12      DTCHDT        Y     41
+     O                       CDMVSN        ZB    50
+     O                       DTFSCD        MB    57
+     O                       DTHGCD         B    65
+     O                       DTBLCD         B    71
+     O                       DTRMCD         B    77
+      *
+     O                       dtmodlvhd     KB    85
+     O                       dtmodlvlb     KB    95
+     O                       dtmoddohd     KB   102
+     O                       dtmoddolb     KB   112
+      *
+     O                       CDCRLB        KB   122
+     O                       CDBAAM        KB   136
+     O                       PD(1)              142
+     O                       PA(1)         K    153
+     O                       CDGRAM        KB   167
+     O                       DD(1)              173
+     O                       DA(1)         K    184
+     O                       DTNTAM        KB   198
+      *
+     O          E            DTLIN2         1
+     O                       PD(P)              142
+     O                       PA(P)         K    153
+     O                       DD(D)              173
+     O                       DA(D)         K    184
+      *
+      *-------------------------------------------------------------
+      * Total lines
+      *-------------------------------------------------------------
+     O          E            t1tot       1  1
+     O                       t1desc              70
+     O                       lvhd(x)       KB    85
+     O                       dohd(x)       KB   102
+      *
+     O                       crlb(x)       KB   122
+     O                       pdam(x)       KB   153
+     O                       daam(x)       KB   184
+      *
+     O          E            t1tot       0  2
+     O                       lvlb(x)       KB    95
+     O                       dolb(x)       KB   112
+      *
+     O                       baam(x)       KB   136
+     O                       gram(x)       KB   167
+     O                       ntam(x)       KB   198
+      *
+      *-------------------------------------------------------------
+      * NO DATA MESSAGE LINE
+      *-------------------------------------------------------------
+      *
+     O          E            NODATA      2
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'

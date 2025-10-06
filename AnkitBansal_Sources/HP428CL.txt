@@ -1,0 +1,221 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  HP428CL   - MOVED INTO E1IDEVMDL              */
+/*  PROGRAM NAME:    SPECIFY G/L EXPENSE DATA TO COPY TO HPS EDIT  */
+/*                   FILE                                          */
+/*  PROGRAMMER:      LEANNE FEDOR / ROSE CENTONZE                  */
+/*  CREATE DATE:     12/30/97    / 9/24/2020                       */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS SUBMITTED WITH QCMDEXC FROM        */
+/*                   HP428-SPECIFY G/L EXPENSE DATA TO COPY TO     */
+/*                   HPS EDIT FILE.                                */
+/*                   OPTIONS ARE PASSED THROUGH THE LDA.           */
+/*                                                                 */
+/*******************************************************************/
+/*  MODIFIED:                                                      */
+/*  ROSE CENTONZE 9/24/2020 MOVE INTO E1IDEVMDL AND ADDED CALL TO  */
+/*                PGM GETACTBAL TO GET THE ACCOUNT BALANCES FROM E1 */
+/*                SERVER. IF IT ERRORS, THEN SEND MESSAGE.          */
+/*                Scan: GETACTBAL                        */
+/*  JAGDISH M 12/21/2023  WHEN RETRIEVING ACCOUNT BALANCES FROM E1   */
+/*                        (GETACTBAL), RESET THE EOP STATUS FOR THE */
+/*                        COMPANY BEING PROCESSED BY CALLING HP229  */
+/*                        SO THEY CAN TRY AGAIN LATER IF THE ERROR  */
+/*                        FLAG IS = Y.                              */
+/*******************************************************************/
+
+             PGM
+
+
+/* DEFINE THE VARIABLE REQUIRED IN THE COMMAND TO OVERRIDE THE     */
+/* PRINT FILE TO A LASER PRINTER                                   */
+
+             DCL        VAR(&CMD) TYPE(*CHAR) LEN(512)
+
+             DCL        VAR(&USER) TYPE(*CHAR) LEN(10)
+
+             DCL        VAR(&HOLD) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&COPYS) TYPE(*DEC) LEN(2)
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&ISCD) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&COCD) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&CCYY) TYPE(*DEC) LEN(4)
+             DCL        VAR(&PER)  TYPE(*DEC) LEN(2)
+             DCL        VAR(&YR )  TYPE(*CHAR) LEN(2)
+             DCL        VAR(&ERR)  TYPE(*CHAR) LEN(1)
+             DCL        VAR(&LIVEE1) TYPE(*CHAR) LEN(1)  /*    LIVE WITH E1 */
+             DCL        VAR(&COCDN) TYPE(*DEC) LEN(3 0)
+             DCL        VAR(&RETRN) TYPE(*CHAR) LEN(7)
+
+/*********************************************************************/
+/*  SET UP PRINT FILE OVERRIDES                                      */
+/*********************************************************************/
+
+/* SET PARAMETERS FROM LDA                                           */
+
+ HOLD:       IF         COND(%SST(*LDA 411 1) = 'Y') THEN(CHGVAR +
+                          VAR(&HOLD) VALUE(*YES))
+             ELSE       CMD(CHGVAR VAR(&HOLD) VALUE(*NO))
+
+COPYS:       CHGVAR     VAR(&COPYS) VALUE(%SST(*LDA 412 1))
+             IF         COND(&COPYS = 0) THEN(CHGVAR VAR(&COPYS) +
+                          VALUE(1))
+
+OUTQ:        CHGVAR     VAR(&OUTQ) VALUE(%SST(*LDA 413 10))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(%SST(*LDA 401 10)))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(*JOB))
+
+
+/*********************************************************************/
+/*  CLEAR RECEIVING AND EDITING FILES                                */
+/*********************************************************************/
+
+             CLRPFM     FILE(HSP230)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CANTCLEAR))
+
+             CLRPFM     FILE(HSP231)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CANTCLEAR))
+
+
+/*------------------------------------------------------------------*/
+/* OVERRIDE PRINT FILE                                              */
+/*------------------------------------------------------------------*/
+
+/* USE THE CUSTOMIZED SEABOARD COMMAND TO OVERRIDE THE PRINT FILE.  */
+/* THIS COMMAND ALLOWS THE REPORT TO BE GENERATED ON A STANDARD LINE*/
+/* PRINTER OR A LASER PRINTER. TO USE THIS OVERRIDE YOU MUST DECLARE*/
+/* A COMMAND VARIABLE AND FOLLOW THE OVERRIDE WITH A CALL TO        */
+/* QCMDEXC.                                                         */
+
+/* THE ERROR LISTING THAT PRINTS FROM THE MAIN DRIVER PROGRAM       */
+/* PRINTS AT STANDARD 10CPI.                                        */
+/* SHARE THE OPEN DATA PATH SO ERROR MESSAGES WILL PRINT RIGHT.     */
+/* THE PAGE BREAKS MAY BE WEIRD SINCE WE HAVE TO 'COUNT' LINES      */
+/* IN THE MAIN RPG PROGRAM THAT PRINTS THE LISTING                  */
+
+             SBDPRTOVR  CMDVAR(&CMD) FILE(QPRINT) OUTQ(&OUTQ) +
+                          WIDTH(132) LANDSCAPE(*NO)  DRAWER(1) +
+                          COPIES(&COPYS) HOLD(&HOLD) SHARE(*YES)
+
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+/*********************************************************************/
+/*  CALL MAIN DRIVER PROGRAM TO:                                     */
+/* P16169  A) GET ACCOUNT BALANCES FROM E1 SERVER -FALLOUT IF FAIL   */
+/*         B) PROCESS HPS EXPENSE CODES                              */
+/*         C) RETRIEVE G/L ACCOUNT INFO ASSOCIATED WITH EXPENSE CODE */
+/*         D) EXTRACT G/L DATA FOR YEAR/PERIOD/ACCOUNT INFO          */
+/*         E) WRITE RECEIVING FILE OF G/L DATA                       */
+/*********************************************************************/
+
+/*********************************************************************/
+/*  GETACTBAL:   Get Account Balances from the E1 Server           */
+/*               IF E1LIVE IS YES OR PARALLEL FOR THE COMPANY */
+/*********************************************************************/
+
+             CHGVAR     VAR(&COCD) VALUE(%SST(*LDA 23 3))
+             CHGVAR     VAR(&YR) VALUE(%SST(*LDA 21 2))
+             CHGVAR     VAR(&COCDN) VALUE(%SST(*LDA 23 3))
+
+ E1:         CALL       PGM(POMTXFR) PARM(&RETRN  &COCDN 'E1LIVE    +
+                          ' &LIVEE1)
+             IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1 *EQ 'P') +
+                          THEN(DO)
+
+             CALL       PGM(GETACTBAL) PARM(&YR &COCD &ERR)
+
+             IF         COND(&ERR *EQ 'Y') THEN(DO)
+             RTVJOBA    USER(&USER)
+/* S000255 - START */
+/*           SNDMSG     MSG('***** Your G/L Expense Copy function + */
+/*                        did not run because the ACCOUNT BALANCES +*/
+/*                        were not retrieved from the E1 Server. +  */
+/*                        Please submit your job again +            */
+/*                        later. *****') TOUSR(&USER)               */
+/*           GOTO       CMDLBL(EXIT)                                */
+             SNDMSG     MSG('***** Your G/L Expense Copy function +
+                          did not run because the ACCOUNT BALANCES +
+                          were not retrieved from the E1 Server. +
+                          Please submit your job again later. +
+                          Contact the Helpdesk if it continues to +
+                          fail. *****') TOUSR(&USER)
+             GOTO       CMDLBL(SETSTS)
+/* S000255 - END   */
+             ENDDO
+             ENDDO
+/*********************************************************************/
+/*  CALL PROGRAM TO PROCESS EXPENSE CODES                            */
+/*********************************************************************/
+
+             CALL       PGM(HP230)
+             DLTOVR     FILE(QPRINT)
+
+
+/*********************************************************************/
+/*  CALL PROGRAM TO WRITE RECEIVING FILE TO EDITING FILE             */
+/*********************************************************************/
+
+             CALL       PGM(HP231)
+
+
+
+/*------------------------------------------------------------------*/
+/* OVERRIDE PRINT FILE AND CALL BATCH EDIT PROGRAM                  */
+/*------------------------------------------------------------------*/
+
+/* USE THE CUSTOMIZED SEABOARD COMMAND TO OVERRIDE THE PRINT FILE.  */
+/* THIS COMMAND ALLOWS THE REPORT TO BE GENERATED ON A STANDARD LINE*/
+/* PRINTER OR A LASER PRINTER. TO USE THIS OVERRIDE YOU MUST DECLARE*/
+/* A COMMAND VARIABLE AND FOLLOW THE OVERRIDE WITH A CALL TO        */
+/* QCMDEXC.                                                         */
+
+/* THIS ERROR LISTING PRINTS AT STANDARD 10 CPI FOR 132 CHARACTERS. */
+/* SHARE THE OPEN DATA PATH SO ERROR MESSAGES WILL PRINT RIGHT.     */
+/* THE PAGE BREAKS MAY BE WEIRD SINCE WE HAVE TO 'COUNT' LINES      */
+/* IN THE BATCH EDIT PROGRAM TO PRINT ERROR MESSAGES.               */
+
+             SBDPRTOVR  CMDVAR(&CMD) FILE(QPRINT) OUTQ(&OUTQ) +
+                          WIDTH(132) COPIES(&COPYS) HOLD(&HOLD) +
+                          SHARE(*YES)
+
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+/*------------------------------------------------------------------*/
+/* CALL BATCH EDIT PROGRAM                                          */
+/*------------------------------------------------------------------*/
+
+             CALL       PGM(HP232)
+             DLTOVR     FILE(QPRINT)
+
+/*------------------------------------------------------------------*/
+/* CALL PROGRAM TO UPDATE EXPENSE INTERFACE STATUS TO 'EDITING'     */
+/*------------------------------------------------------------------*/
+
+
+ SETSTS:
+             CHGVAR     VAR(&COCD) VALUE(%SST(*LDA 23 3))
+             CHGVAR     VAR(&CCYY) VALUE(%SST(*LDA 19 4))
+             CHGVAR     VAR(&PER)  VALUE(%SST(*LDA 17 2))
+             CHGVAR     VAR(&ISCD) VALUE('E')
+             CALL       PGM(HP229) PARM(&COCD &CCYY &PER &ISCD)
+
+             GOTO       CMDLBL(EXIT)
+
+/*------------------------------------------------------------------*/
+/* ISSUE A MESSAGE IF YOU CAN'T CLEAR THE RECEIVING/EDITING FILES   */
+/*------------------------------------------------------------------*/
+ CANTCLEAR:
+             RTVJOBA    USER(&USER)
+             SNDMSG     MSG('***** Your G/L Expense Copy function +
+                          did not run because the receiving or +
+                          editing file was in use and could not be +
+                          cleared for the copy. Please submit your +
+                          job again later when no one is working +
+                          with the existing G/L edit file data. +
+                          *****') TOUSR(&USER)
+
+ EXIT:
+             ENDPGM
+

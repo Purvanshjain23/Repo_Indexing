@@ -1,0 +1,115 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  TFBLDMARG                                     */
+/*  PROGRAM NAME:    DATAMART MARGIN: BUILD TFS MARGINS            */
+/*  PROGRAMMER:      LEANNE RAMSEY                                 */
+/*  CREATE DATE:     02/06/08                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS SUBMITTED FROM THE JOB SCHEDULER.  */
+/*                   JOB: BIBLDMARG                                */
+/*                                                                 */
+/*  WE INTEND TO KICK THIS OFF EVERY NIGHT FROM THE JOB SCHEDULER. */
+/*  WE WILL COMPARE THE 'LAST' DATAMART DATE WITH THE 'LAST'       */
+/*  MARGIN DATE FROM THE CONTROL FILE IN TF FEES & PAYMENTS.       */
+/*  THAT COMPARISON WILL DETERMINE WHETHER WE DO ANY ACTUAL        */
+/*  PROCESSING.                                                    */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFICATIONS:                                                  */
+/*                                                                 */
+/* 08/14/09  ALICE BROWNFIELD                                      */
+/*           E00472 - Data Mart Build changes for DR Test          */
+/*           Change CPYF from PRKFLIB to PRKDMFLIB to build        */
+/*             directly into PRKDMFLIB.  files in PRKFLIB will be  */
+/*           empty  ----- this works better for MIMIX              */
+/*           Took out the &COPYFL input parm . .                   */
+/*                                                                 */
+/* 05/30/13  LeAnne Ramsey (E2610)                                 */
+/*           Adam Gross wants Converting %s for Dashboards.        */
+/*           I created a new Datamart file (TFP8018) over          */
+/*           TFP018-Volume Summary Weekly and added the logic      */
+/*           for it into this CL.                                  */
+/*******************************************************************/
+
+             PGM
+
+             DCL        VAR(&BLDFL)  TYPE(*CHAR) LEN(1)
+             DCL        VAR(&ERR)    TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&ALPHDT) TYPE(*CHAR) LEN(8)
+
+             DCL        VAR(&EMAIL)    TYPE(*CHAR) LEN(38)
+             DCL        VAR(&TSTPRDFL) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&SUBJECT)  TYPE(*CHAR) LEN(60) +
+                          VALUE('TFBLDMARG-Datamart MARG: Build +
+                          Files...DIST LIST: prk cognos')
+
+/*------------------------------------------------------------------*/
+/* Set up the Email Recipient (either Test or Production)           */
+/*------------------------------------------------------------------*/
+
+/* Retrieve the Data Area that lets us know whether we are in TEST  */
+/* or PRODUCTION. (Always default to the 'TEST' Distribution List.) */
+
+             CHGVAR     VAR(&EMAIL) VALUE('prk cognos test')
+             RTVDTAARA  DTAARA(DATSTPRD (1 1)) RTNVAR(&TSTPRDFL)
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('prk cognos'))
+
+/*-----------------------------------------------------------------*/
+/* Add PRKDMFLIB so we will process directly into that library.    */
+/* We do not expect PRKDMFLIB to already be in the library list;   */
+/* but, since we want it at the top of the list, we will remove/add*/
+/* it.                                                             */
+/*-----------------------------------------------------------------*/
+             RMVLIBLE   LIB(PRKDMFLIB)
+             MONMSG     MSGID(CPF0000)
+             ADDLIBLE   LIB(PRKDMFLIB)
+
+/*-----------------------------------------------------------------*/
+/* Delete records and reorg files                                  */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(TF2210)
+
+             RGZPFM     *LIBL/TFP8014
+             MONMSG     MSGID(CPF0000)
+
+             RGZPFM     *LIBL/TFP8015
+             MONMSG     MSGID(CPF0000)
+
+             RGZPFM     *LIBL/TFP8018
+             MONMSG     MSGID(CPF0000)
+
+/*-----------------------------------------------------------------*/
+/* Make date comparisons to determine whether to build records     */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(TF2209) PARM(&BLDFL &ALPHDT)
+             IF         COND(&BLDFL *EQ 'Y') THEN(DO)      /* If Build   */
+
+             CALL       PGM(TF2211)  /* Weekly Margins            */
+             CALL       PGM(TF2212)  /* Weekly Mix Adjustments    */
+             CALL       PGM(TF2214)  /* Volume Summary--Weekly    */
+
+/* Set the "Datamart Last End Date" in the Data Area   */
+
+             CHGDTAARA  DTAARA(DATFMARG (80 8)) VALUE(&ALPHDT)
+
+/* Send Completion Message to I.S. Folks   */
+
+             IF         COND(&ERR = 'N') THEN(ESNDMAIL +
+                          RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG('All TFS Margin Data was successfully +
+                          written to PRKDMFLIB; the +
+                          build completed normally.') IMPORTANCE(*HIGH))
+
+             ENDDO                                            /* If Build  */
+
+/*----------------------------------------------------------------------*/
+/* Reset the Data Area to indicate that the job is finished             */
+/*----------------------------------------------------------------------*/
+
+             CHGDTAARA  DTAARA(DATFMARG (100 1)) VALUE(' ')
+
+             ENDPGM
+

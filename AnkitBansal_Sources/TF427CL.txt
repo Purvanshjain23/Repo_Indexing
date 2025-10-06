@@ -1,0 +1,333 @@
+/***************************************************************** */
+/*                                                                 */
+/*  SYSTEM:          TRIUMPH FOODS                                 */
+/*  PROGRAM NUMBER:  TF427CL                                       */
+/*  PROGRAM NAME:    CARRIER INVOICE CLOSE                         */
+/*  PROGRAMMER:      LEANNE FEDOR                                  */
+/*  CREATE DATE:     03/20/06                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS FUNCTION WAS INITIALLY SUBMITTED ON-     */
+/*                   DEMAND BY TRAFFIC. BUT, IT IS NOW CALLED      */
+/*                   FROM THE WEEKLY REVENUE CLOSE FUNCTION WHEN   */
+/*                    1) THE CLOSE IS A FINAL                      */
+/*                    2) IT IS THE LAST WEEK IN A PERIOD           */
+/*                                                                 */
+/*                   THIS FUNCTION CREATES A SNAPSHOT OF LOAD DATA.*/
+/*                   THIS "FROZEN" DATA IS USED IN THE EOP CLOSE   */
+/*                   TO COME UP WITH THE FREIGHT VARIANCE.         */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFIED:                                                       */
+/*                                                                 */
+/* 05/21/07  LEANNE RAMSEY                                         */
+/*           ADDED A NEW DATA AREA (DATSTPRD) TO CONTROL E-MAILS.  */
+/*                                                                 */
+/* 07/17/08  LEANNE RAMSEY                                         */
+/*           COMMENTED OUT THE CALL TO TF627; PURVA D. SAYS NO ONE */
+/*           IS USING IT.  IF NO ONE MISSES IT AFTER A FEW MONTHS, */
+/*           WE'LL GET RID OF IT PERMANENTLY. (THERE ARE 4 FIELDS  */
+/*           IN TFP027 THAN CAN GO WHEN THE REPORT GOES.)          */
+/*                                                                 */
+/* 11/25/08  LEANNE RAMSEY                                         */
+/*           DELETED THE LOGIC FOR TF627; THAT REPORT WAS NOT USED */
+/*           AND HAS BEEN DELETED.                                 */
+/*                                                                 */
+/* 03/10/09  LEANNE RAMSEY                                         */
+/*           ADDED LOGIC FOR THE NEW TF228-EXCESSIVE FREIGHT       */
+/*           CHARGE RESPONSIBILITY REPORT.                         */
+/*                                                                 */
+/* 05/06/09  LEANNE RAMSEY                                         */
+/*           CHANGED PRINT LOGIC TO MATCH MEAT COSTING.            */
+/*                                                                 */
+/* 10/29/20  Brad Baden   E16971                                   */
+/*           Create duplicate object TFP0271 in library QTEMP.     */
+/*           After call to TF228, check the number of records      */
+/*           in file TFP0271.  If record count > 0, then execute   */
+/*           sequel script TFP0271.S to email the generated        */
+/*           spreadsheet to users on the ESEND list:               */
+/*           tf eop excessive frt chg xls                          */
+/* PIO 03/04/24 -  REPLACE OPNQRYF WITH OPNSQLF FOR OMHSTPP FILE   */
+/*                 ADDED NEEDED OVRDBF AROUND THE COMMAND.         */
+/*                 CHANGE *AND TO AND, *EQ TO =, *GE TO >=, *LE TO */
+/*                 <=, *GT TO > IN &Q                              */
+/* PIO 03/04/24 -  REPLACE OPNQRYF WITH OPNSQLF FOR OMFJCPP FILE   */
+/*                 ADDED NEEDED OVRDBF AROUND THE COMMAND.         */
+/*                 CHANGE *AND TO AND, *EQ TO =, *GE TO >=, *LE TO */
+/*                 <=, *GT TO > IN &Q                              */
+/* PIO 03/04/24 -  REPLACE OPNQRYF WITH OPNSQLF FOR PMDKCPP FILE   */
+/*                 ADDED NEEDED OVRDBF AROUND THE COMMAND.         */
+/*                 CHANGE *AND TO AND, *EQ TO =, *GE TO >=, *LE TO */
+/*                 <=, *GT TO > IN &Q                              */
+/* 05/27/24 PIO COMMENTED THE OPNSQLF LOGIC AND UNCOMMENTED THE    */
+/*              OPNQRYF LOGIC FOR OMHSTPP FILE                     */
+/* 10/04/24 PIO UNCOMMENTED THE LOGIC FOR OPNSQLF FOR OMHSTPLB FILE*/
+/*              COMMENTED THE OPNQRYF LOGIC                        */
+/*                                                                 */
+/*******************************************************************/
+
+             PGM
+
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(75)
+
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&HOLD) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&SAVE) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&COPY) TYPE(*DEC)  LEN(1)
+
+             DCL        VAR(&EMAIL) TYPE(*CHAR) LEN(38)
+             DCL        VAR(&EMAIL2) TYPE(*CHAR) LEN(38)
+             DCL        VAR(&LDBEGSYN) TYPE(*DEC) LEN(7)
+             DCL        VAR(&LDENDSYN) TYPE(*DEC) LEN(7)
+
+             DCL        VAR(&LDYR) TYPE(*DEC) LEN(4)
+             DCL        VAR(&LDPE) TYPE(*DEC) LEN(2)
+             DCL        VAR(&TSTPRDFL) TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&RCDCOUNT) TYPE(*DEC) LEN(10 0)
+
+             CHGVAR     VAR(&LDBEGSYN) VALUE(%SST(*LDA 22 7))
+             CHGVAR     VAR(&LDENDSYN) VALUE(%SST(*LDA 43 7))
+
+             CHGVAR     VAR(&LDYR)    VALUE(%SST(*LDA 2 4))
+             CHGVAR     VAR(&LDPE)    VALUE(%SST(*LDA 6 2))
+
+/*----------------------------------------------------------------*/
+/* For sending Emails:                                            */
+/* Retrieve Data Area that lets us know whether we are in Test    */
+/* or Production (Always default to the "TEST" Distribution List.)*/
+/*----------------------------------------------------------------*/
+
+             CHGVAR     VAR(&EMAIL) VALUE('TF Test')
+             CHGVAR     VAR(&EMAIL2) VALUE('TF Test')
+             RTVDTAARA  DTAARA(DATSTPRD (1 1)) RTNVAR(&TSTPRDFL)
+
+/*----------------------------------------------------------------*/
+/* Set up print parms                                             */
+/*----------------------------------------------------------------*/
+
+ OUTQ:       CHGVAR     VAR(&OUTQ) VALUE(%SST(*LDA 401 10))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(*JOB))
+
+ HOLD:       CHGVAR     VAR(&HOLD) VALUE(%SST(*LDA 411 4))
+             IF         COND(&HOLD *NE '*YES' *AND &HOLD *NE '*NO ') +
+                          THEN(CHGVAR VAR(&HOLD) VALUE(*NO))
+
+ SAVE:       CHGVAR     VAR(&SAVE) VALUE(%SST(*LDA 415 4))
+             IF         COND(&SAVE *NE '*YES' *AND &SAVE *NE '*NO ') +
+                          THEN(CHGVAR VAR(&SAVE) VALUE(*NO))
+
+ COPY:       CHGVAR     VAR(&COPY) VALUE(%SST(*LDA 419 1))
+             IF         COND(&COPY = 0) THEN(CHGVAR VAR(&COPY) +
+                          VALUE(1))
+
+
+/*----------------------------------------------------------------*/
+/* Override the print files                                       */
+/*----------------------------------------------------------------*/
+
+             OVRPRTF    FILE(PRINT132) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(&HOLD) SAVE(&SAVE)
+
+             OVRPRTF    FILE(PRINT198) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(&HOLD) SAVE(&SAVE)
+
+/*----------------------------------------------------------------*/
+/* Preliminary Step: Update as "paid" Load Header records for     */
+/* Seaboard Transportation (with listing)                         */
+/*----------------------------------------------------------------*/
+
+             CALL       PGM(TF230) PARM(&LDENDSYN)
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('TF EOP Fgt Variance +
+                          STI Loads'))
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT('STI Updated +
+                          Loads') MSG('Distribution List: TF EOP +
+                          Fgt Variance STI Loads') ATTLIST((* *PDF +
+                          *N PRINT132 *))
+             MONMSG     MSGID(CPF0000)
+
+/******************************************************************/
+/* Continue with "freeze" logic                                   */
+/******************************************************************/
+
+/*--------------------*/
+/* Sales History file */
+/*--------------------*/
+
+   /*PIO     OVRDBF     FILE(OMHSTPLB) SHARE(*YES)   +
+             OPNQRYF    FILE((OMHSTPLB)) KEYFLD((F4AIC3) (F4RMNB) + +
+                          (F4C4NB) (F4S5NB)) SEQONLY(*YES)       */
+
+  /*PIO*/    OVRDBF     FILE(OMHSTPP) TOFILE(OMHSTPP) LVLCHK(*NO)
+  /*PIO*/    OPNSQLF    SQL('Select * from OMHSTPP ORDER BY F4AIC3 +
+                          ASC, F4RMNB ASC, F4C4NB ASC') +
+                          OPNID(OMHSTPLB) OPTION(*ALL) SEQONLY(*NO) +
+                          RCDFMT(@HSTPMK) ALWCPY(*IFRQD)
+  /*PIO*/    OVRDBF     FILE(OMHSTPLB) TOFILE(OMHSTPP) LVLCHK(*NO) +
+                          OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+/*--------------------*/
+/* "UNPAID" loads     */
+/*--------------------*/
+/* Override the key fields to a Load Header logical file.          */
+/* (Record selections are made in the program.)                    */
+
+ /*PIO OMFJCPLC is applied 2 keys via OPNQRYF, we replaced it with OMFJCPMU */
+ /* New ACP is created because OPNSQLF is not allowed twice on same file    */
+ /* As new ACP is created, we don't need OPNQRYF anymore                    */
+   /*PIO     OVRDBF     FILE(OMFJCPLC) SHARE(*YES)    +
+             OPNQRYF    FILE((OMFJCPLC)) KEYFLD((FJAIC3) (FJRMNB)) + +
+                          SEQONLY(*YES)                      */
+
+/*--------------------*/
+/* "PAID" loads       */
+/*--------------------*/
+/* Using a different Load Header logical file, extract records for: */
+/*    Carrier Paid Date is in the period being processed            */
+/*    LH Carrier Payment Status is P=Paid                           */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+    /*PIO    CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('FJPYDT *GE') */
+    /*PIO*/  CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('FJPYDT >= ')
+             CHGVAR     VAR(%SST(&QDATA 12 7)) VALUE(&LDBEGSYN)
+    /*PIO    CHGVAR     VAR(%SST(&QDATA 20 15)) VALUE('*AND FJPYDT + +
+                          *LE')                                   */
+    /*PIO*/  CHGVAR     VAR(%SST(&QDATA 20 15)) VALUE(' AND FJPYDT +
+                          <= ')
+             CHGVAR     VAR(%SST(&QDATA 36 7)) VALUE(&LDENDSYN)
+   /*PIO     CHGVAR     VAR(%SST(&QDATA 44 19)) VALUE('*AND FJRNST + +
+                          *EQ "P"')                                */
+   /*PIO*/   CHGVAR     VAR(%SST(&QDATA 44 19)) VALUE(' AND FJRNST +
+                            = "P"')
+
+   /*PIO     OVRDBF     FILE(OMFJCPMC) SHARE(*YES)    +
+             OPNQRYF    FILE((OMFJCPMC)) QRYSLT(&QDATA) + +
+                          KEYFLD(*FILE) SEQONLY(*YES)    */
+
+  /*PIO*/    OVRDBF     FILE(OMFJCPP) TOFILE(OMFJCPP) LVLCHK(*NO)
+  /*PIO*/    OPNSQLF    SQL('Select * from OMFJCPP where   ' *BCAT +
+                          &QDATA *BCAT ' ORDER BY FJAIC3 ASC, +
+                          FJRMNB ASC') OPNID(OMFJCPMC) OPTION(*ALL) +
+                          SEQONLY(*NO) RCDFMT(@FJCPCB) +
+                          ALWCPY(*IFRQD)
+  /*PIO*/    OVRDBF     FILE(OMFJCPMC) TOFILE(OMFJCPP) LVLCHK(*NO) +
+                          OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+/*-----------------------------------------------------------------*/
+/* Build a snapshot of Unpaid/Paid loads                           */
+/* E-mail the notification                                         */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(TF227)
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('TF EOP Carrier Invoices'))
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT('Carrier Invoices +
+                          are Closed for the Period') +
+                          MSG('Distribution List: TF EOP Carrier +
+                          Invoices') ATTLIST((* *PDF *N PRINT132 *))
+             MONMSG     MSGID(CPF0000)
+
+             CLOF       OPNID(OMFJCPMC)    /* Load Header   */
+   /*PIO     DLTOVR     FILE(OMFJCPMC)  */
+             DLTOVR     FILE(OMFJCPMC) LVL(*JOB) /*PIO*/
+
+   /*PIO     CLOF       OPNID(OMFJCPLC)  *//* Load Header   */
+   /*PIO     DLTOVR     FILE(OMFJCPLC)   */
+
+             CLOF       OPNID(OMHSTPLB)    /* Sales History */
+   /*PIO     DLTOVR     FILE(OMHSTPLB)   */
+             DLTOVR     FILE(OMHSTPLB) LVL(*JOB) /*PIO*/
+
+
+/******************************************************************/
+/* Excessive Freight Charge Responsiblity Report                */
+/******************************************************************/
+
+/* Create TFP0271 in QTEMP for Sequel ViewPoint execution       */
+
+             CRTDUPOBJ  OBJ(TFP0271) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPD2104 CPF2130) EXEC(CLRPFM +
+                          FILE(QTEMP/TFP0271))
+
+/* Select "paid" records for the Year/Period                    */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA 1 8))   VALUE('FDYR *EQ')
+             CHGVAR     VAR(%SST(&QDATA 10 4))  VALUE(&LDYR)
+             CHGVAR     VAR(%SST(&QDATA 15 13)) VALUE('*AND FDPE *EQ')
+             CHGVAR     VAR(%SST(&QDATA 29 2))  VALUE(&LDPE)
+             CHGVAR     VAR(%SST(&QDATA 32 19)) VALUE('*AND FDPUFL +
+                          *EQ "P"')
+
+             OVRDBF     FILE(TFP027)  SHARE(*YES)
+             OPNQRYF    FILE((TFP027)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+
+
+/* Select Load Freight Charge Reference records where:          */
+/*     1) Reference Type = (R)esponsible                        */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+  /*PIO      CHGVAR     VAR(%SST(&QDATA 1 14)) VALUE('DKAZST *EQ "R"') */
+  /*PIO*/    CHGVAR     VAR(%SST(&QDATA 1 14)) VALUE('DKAZST  =  "R"')
+
+  /*PIO      OVRDBF     FILE(PMDKCPL1) SHARE(*YES)   +
+             OPNQRYF    FILE((PMDKCPL1)) QRYSLT(&QDATA) KEYFLD(*FILE) + +
+                          SEQONLY(*YES)                  */
+
+ /*PIO*/     OVRDBF     FILE(PMDKCPP) TOFILE(PMDKCPP) LVLCHK(*NO)
+             OPNSQLF    SQL('Select * from PMDKCPP Where  ' *BCAT +
+                          &QDATA *BCAT ' ORDER BY DKRMNB ASC, +
+                          DKCDAA ASC, DKEPNY ASC, DKIYAA ASC') +
+                          OPNID(PMDKCPL1) OPTION(*ALL) SEQONLY(*NO) +
+                          RCDFMT(@DKCPRF) ALWCPY(*IFRQD) /*PIO*/
+ /*PIO*/    OVRDBF     FILE(PMDKCPL1) TOFILE(PMDKCPP) LVLCHK(*NO) +
+                         OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+
+/* Generate and EMail Report                                    */
+
+             CALL       PGM(TF228) /* Excessive Frt Chrg Responsiblity Rpt */
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('TF EOP Excessive Frt +
+                          Charges'))
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT('Excessive Freight +
+                          Charge Responsibility Report') +
+                          MSG('Distribution List: TF EOP Excessive +
+                          Frt Charges') ATTLIST((* *PDF *N PRINT198 *))
+             MONMSG     MSGID(CPF0000)
+
+/* Run Sequel ViewPoint/email spreadsheet if recourd count > 0  */
+
+             RTVMBRD    FILE(TFP0271) NBRCURRCD(&RCDCOUNT)
+             IF         COND(&RCDCOUNT > 0) THEN(DO)
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL2) VALUE('tf eop excessive frt +
+                          chg xls '))
+
+             EXECUTE    VIEW(TFP0271V) PCFMT(*XLS) RECIPIENT(&EMAIL2)
+             MONMSG     MSGID(CPF0000)
+             ENDDO
+
+             CLOF       OPNID(TFP027)
+             CLOF       OPNID(PMDKCPL1)
+     /*PIO   DLTOVR     FILE(*ALL)  */
+             DLTOVR     FILE(*ALL) LVL(*JOB) /*PIO*/
+
+/*--------------------------------------------------------------*/
+/*  Change the Data Area to indicate that the "freeze" function */
+/*  has finished running.                                       */
+/*--------------------------------------------------------------*/
+
+             CHGDTAARA  DTAARA(DATFLOAD (1 1)) VALUE(' ')
+
+             ENDPGM

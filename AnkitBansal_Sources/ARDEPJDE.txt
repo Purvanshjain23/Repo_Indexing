@@ -1,0 +1,1171 @@
+      *****************************************************************
+      *
+      *  Program number:  ARDEPJDE - movd into E1IDEVMDL
+      *  Program name:    CREATE J.E.'S IN JDE FOR HOG A/R DEPOSITS
+      *  Programmer:      BARB GUTIERREZ
+      *  Date created:    08/07/95
+      *  Program purpose: CREATE JOURNAL ENTRIES FOR A/R DEPOSITS.
+      *                   COMPANY, BANK AND DEPOSIT DATE WILL BE PASSED
+      *                   INTO THIS PROGRAM FOR PROCESSING.  A SUMMARY
+      *                   RECORD FOR EACH ACCOUNT I.D. WILL BE WRITTEN
+      *                   AS UNPOSTED TO JDE.
+      *
+      *                   ONLY PROCESS RECORDS WITH A STATUS OF 'A'.
+      *
+      *                   WILL UPDATE THE A/R HEADER, A/R DETAIL AND/OR
+      *                   NON-AR CASH WITH THE BATCH NUMBER, POST DATE E
+      *                   AND A STATUS CODE OF A 'P'. (PROCESSED)
+      *
+      *                   THE USER MUST THEN GO INTO JDE TO ACTUALLY
+      *                   POST THE BATCH OF JOURNAL ENTRIES.
+      *
+      *                   This program is called from CL PDHEUPR
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 01/31/96  Barb Gutierrez
+      *           Print Invalid account Message on report.
+      *
+      * 05/06/96  Joni Miller
+      *           JDE NEW RELEASE A7.1
+      *
+      * 07/16/98  Barb Gutierrez
+      *           RECOMPILE ONLY FOR PROJECT ARS073.  FIELD HAD
+      *           CHANGED IN A/R DETAIL FILE AND WERE NOT USING
+      *           FIELD IN THIS PROGRAM.
+      *
+      * 02/03/99  Barb Gutierrez
+      *           Y2K problem.  Not populating century position of
+      *           field WKPSDT with a 1 come the year 2000.
+      *
+      * 05/23/05  Rose Centonze
+      *           Changes for multi-deposits in a day: added deposit
+      *           time to keys & took company off of keys to oms
+      *           files PDJ5CPP, PDJ2CPP, ARBKCPP. PDJ5CPP still has
+      *           the company, but dont read by company. A deposit
+      *           can have multi-company invoices in it.
+      *
+      * 08/01/05  Rose Centonze
+      *           USE NEW KEY TO UPDATE BANK DEPOSIT
+      *
+      * 08/05/05  Barb Gutierrez
+      *           RECOMPILED ONLY DUE TO AR DETAIL FILE CHANGE PER
+      *           REQUEST TFS010.
+      *
+      * 12/28/05  LeAnne Fedor & Alice
+      *           Rewrote in ILE.  Changed to allow for 960 company
+      *
+      * 02/07/06  Barb Gutierrez
+      *           Fix problem of not writing out the batch date and also
+      *           changed to not write out the journal entry line where the
+      *           amount is 0.
+      * 02/20/06  Barb Gutierrez
+      *           Do not write out the offsetamt if the amount is zero.  Also
+      *           changed to user control the open and close of the report so we can
+      *           print a separate spool file of the 960 entries and duplicate this
+      *           spool file on Triumphs outq (TFPRT01).
+      * 02/28/06  Barb Gutierrez
+      *           Do not write out the batch header record if no detail was written to
+      *           f0911.
+      *
+      * 03/02/06  LeAnne Fedor
+      *           Added another *entry parm. If data is processed for Company 960, this
+      *           new field will be set to Y=Yes so that, on returning to the calling
+      *           CL, we can make the determination of whether to "DUP" the spool file
+      *           to Triumph's outq.
+      *
+      * 12/01/06  LeAnne Ramsey
+      *           Replaced the call to generic program TF814 to convert Synon dates with
+      *           ILE date logic.
+      * 11/26/07  Barb Gutierrez
+      *           Needed the ability to duplicate spooled files for Dailys when a user at
+      *           one location applied cash to invoices at the other location.  To accomodate
+      *           this request, the logic was changed to determine which location to duplicate
+      *           the spooled file for (Triumph, Salt Lake, or Missoula).  Changed the coding
+      *           of the xxtfflag to be generic (xxdupsplf).
+      *
+      * 03/19/09  Barb Gutierrez
+      *           Subledger was added to the A/R adjustment screen.  Need to retrieve this
+      *           subledger number to write to JDE.  E00039.
+      *
+      * 02/10/10  Barb Gutierrez
+      *           Corrected problem of entries not being summarized by account id and
+      *           subledger number before writing to JDE.  Changed logical from
+      *           pdj5cpl2 to pdj5cpl6.  E000470
+      *
+      * 03/08/10  Barb Gutierrez
+      *           Had commented out the deletion of the work file and forgot to uncomment .
+      *
+      * 03/31/20  Rose Centonze  P16169
+      *           Add parm for Live with World JDE. If not live, then dont update tables.
+     H* 08/17/20  Rose Centonze (P16169)
+     H*           Update glcff1 with "I" so it wont sync to E1
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fpdj5cpl6  uf   e           k disk
+      * A/R Posting & reporting key: Bank Code, Deposit Date, GL Posting Co, GLID, sub ledger
+      *
+     Farbdcpl3  uf   e           k disk
+      * A/R Header
+      *
+     Farbecpl1  uf   e           k disk
+      * A/R Detail
+      *
+     Farbkcpl5  uf   e           k disk
+      * A/R Non-A/R cash
+      *
+     Fpdj2cpl1  uf   e           k disk
+      * A/R Bank deposit
+      *
+     Ff0011     uf a e           k disk
+      *   JDE Batch header
+      *
+     Ff0901     if   e           k disk
+      *   JDE Account master
+      *   (This file is only used to define the fields that are used in what was a /Copy).
+      *
+     Ff0911     o    e             disk
+      * JDE G/L ledger
+      *
+     Fprint132  o    f  132        printer oflind(*inof)
+     F                                     usropn
+      *
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D parallel        c                   'P'
+      *
+     D gldct           c                   'UA'
+     D gllt            c                   'AA'
+     D glam            c                   '2'
+     D glpkco          c                   '00000'
+     D glokco          c                   '00000'
+     D glpsfx          c                   '000'
+     D glpost          c                   ' '
+      *
+      *---------------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------------
+      *
+      * Standard fields
+      *
+     d rtime           s              6  0
+     d return          s              7
+      *
+      *
+      * Control fields
+      *
+     d first           s              1    inz('Y')
+     d svc1ny          s                   like(j5c1ny)
+     d svacctco        s                   like(j5c1ny)
+     D svglid          s              8
+     D svdepjul        s              7  0
+     d svglvl          s                   like(j5glvl)
+      *
+      *
+      * Accumulators
+      *
+     D acttot          s             15  2
+     D wkoffsetam      s             15  2
+     D batamt          s             15  0
+     D batndo          s              5  0
+      *
+      *
+      * Workfields
+      *
+     d wktype          s              2
+     d wkco            s                   like(glco)
+     d wkco960         s                   like(bfaic3) inz(960)
+     d wkaid           s              8
+     d wkglcode        s              8
+     d wkani           s             29
+     d wk363fl         s              1    inz('N')
+     d wk364fl         s              1    inz('N')
+      *
+     d wktime          s             12  0
+     d wkdate          s              6  0
+     d wksyssyndt      s              7  0
+     D wkisodate       s               D   datfmt(*iso)
+      *
+     d wkbanknm        s             30
+     d wkdesc          s             29
+      *
+     d wksbl           s              9  0
+     d wksbl8          s              8  0
+     d svconb          s                   like(j5conb)
+     d svcest          s                   like(j5cest)
+     d svdxnb          s                   like(j5dxnb)
+      *
+      * Parm fields
+      *
+     d xxerror         s              7
+     D xxbank          s              6
+     D xxbanknm        s             30
+     D xxdepdt         s              7  0
+     D xxdeptm         s              4  0
+     d xxdupsplf       s              1
+     d xxlivew         s              1
+      *
+      *
+     D xxmmddyy        s              6  0
+     D xxccyymmdd      s              8  0
+     D xxsyssyndt      s              7  0
+      *
+     d xxcalc          s              1
+     d xxpn            s                   like(glpn)
+     d xxfy            s                   like(glfy)
+     d xxctry          s                   like(glctry)
+     d xxedt           s              1
+     d xxdgsy          s              1
+      *
+     d xxsidat         s              6
+     d xxedat          s              8
+     d xxffmt          s              7
+     d xxtfmt          s              7
+     d xxsep           s              7
+     d xxertst         s              1
+     d xxctryalph      s              2
+      *
+     d xxbatch         s                   like(glicu)
+     d xxsy            s              4
+     d xxidx           s              2
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxerrm          s              4
+      *
+     d xxani           s                   like(glani)
+     d xxicu           s                   like(glicu)
+     d xxdoc           s                   like(gldoc)
+      *
+     D xxacctco        s              3  0
+     D xxnumco         s              3  0
+     d xxglcode        s              8
+     d xxsubtype       s              1
+     d xxbalsheet      s              1
+      *
+     d xxrtncd         s              7                                         return code
+     d xxco#           s              3  0                                      company #
+     d xxinv#          s              7  0                                      invoice #
+     d xxcest          s              2                                         suffix number
+     d xxdxnb          s              3  0                                      sequence #
+     d xxsbl           s             11  2                                      subledger
+      *
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+      * Explanation
+     D                 ds
+     D  wkexa                  1     30
+     D  wk1                    1      3    inz('A/R')
+     D  wk2bank                5     10
+     D  wk3dt                 12     18  0
+      *
+      * Replaces /Copy.
+      *
+     d i0901ds         ds           500
+     d xxco                                like(gmco)
+     d xxaid                               like(gmaid)
+     d xxmcu                               like(gmmcu)
+     d xxobj                               like(gmobj)
+     d xxsub                               like(gmsub)
+     d xxans                               like(gmans)
+     d xxdl01                              like(gmdl01)
+     d xxlda                               like(gmlda)
+     d xxbpc                               like(gmbpc)
+     d xxpec                               like(gmpec)
+     d xxbill                              like(gmbill)
+     d xxcrcd                              like(gmcrcd)
+     d xxum                                like(gmum)
+     d xxr001                              like(gmr001)
+     d xxr002                              like(gmr002)
+     d xxr003                              like(gmr003)
+     d xxr004                              like(gmr004)
+     d xxr005                              like(gmr005)
+     d xxr006                              like(gmr006)
+     d xxr007                              like(gmr007)
+     d xxr008                              like(gmr008)
+     d xxr009                              like(gmr009)
+     d xxr010                              like(gmr010)
+     d xxr011                              like(gmr011)
+     d xxr012                              like(gmr012)
+     d xxr013                              like(gmr013)
+     d xxr014                              like(gmr014)
+     d xxr015                              like(gmr015)
+     d xxr016                              like(gmr016)
+     d xxr017                              like(gmr017)
+     d xxr018                              like(gmr018)
+     d xxr019                              like(gmr019)
+     d xxr020                              like(gmr020)
+     d xxr021                              like(gmr021)
+     d xxr022                              like(gmr022)
+     d xxr023                              like(gmr023)
+     d xxobja                              like(gmobja)
+     d xxsuba                              like(gmsuba)
+     d xxwcmp                              like(gmwcmp)
+     d xxcct                               like(gmcct)
+     d xxerc                               like(gmerc)
+     d xxhtc                               like(gmhtc)
+     d xxqlda                              like(gmqlda)
+     d xxccc                               like(gmccc)
+     d xxfmod                              like(gmfmod)
+     d xxuser                              like(gmuser)
+     d xxpid                               like(gmpid)
+     d xxjobn                              like(gmjobn)
+     d xxupmj                              like(gmupmj)
+     d xxupmt                              like(gmupmt)
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Mainline
+      *----------------------------------------------------------------------------------
+      *
+      * Read A/R Posting file for the incoming Bank/Deposit Date.
+      *   The Logical File selects the appropriate records
+      *
+     C     key01         setll     pdj5cpl6
+     C                   dou       *in80 = *on                                  Main do
+     C     key01         reade     pdj5cpl6                               80
+     C                   if        *in80 = *off                                 If not EOF
+      *
+      * Determine if this is a Daily Foods company and set the appropriate flag
+      *
+     C                   select
+     C                   when      j5aic3 = 363
+     C                   move      yes           wk363fl
+      *
+     C                   when      j5aic3 = 364
+     C                   move      yes           wk364fl
+      *
+     C                   endsl
+      * Break logic:
+      *  1) First time
+      *  2) When Posting Company changes AND it is Company 960
+      *  3) When Account ID or subledger changes
+      *
+     C                   select
+      * 1. first
+     C                   when      first = yes
+     C                   exsr      $first
+     C                   exsr      $setsave
+      *
+      * 2. Posting Co 960 - first time
+      *     Write last 3xx record and print total   ($write)
+      *     create offset records and setup new batch for Company 960
+      *
+     C                   when      j5c1ny <> svc1ny and j5c1ny = 960
+     C                   exsr      $write
+      *
+     C                   if        *inof = *on
+     C                   except    hdg
+     C                   except    actdes
+     C                   endif
+     C                   except    totact
+     C                   z-add     0             acttot
+      *
+     C                   exsr      $offsets
+     C                   exsr      $setsave
+      *
+     C                   move      'T'           xxdupsplf
+      *
+      * 3.  GL ID or sub ledger change
+      *
+     C                   when      j5iztx <> svglid or j5glvl <> svglvl
+     C                   exsr      $write
+      *
+     C                   if        *inof = *on
+     C                   except    hdg
+     C                   except    actdes
+     C                   endif
+     C                   except    totact
+     C                   z-add     0             acttot
+      *
+     C                   move      *blanks       glsbl                          Subledger
+     C                   move      *blanks       glsblt                         Subledger type
+     C                   z-add     *zeros        wksbl
+     C                   z-add     *zeros        wksbl8
+      * setup for next
+     C                   exsr      $setsave
+     C                   endsl
+      *
+      * Detail processing:
+      *   1. Accumulate amount into total for the Account
+      *   2. Accumulate amount into total for OFFSET if  Transaction Co   = 960
+      *1.                                            but Posting Company <> 960
+     C                   add       j5bsva        acttot
+      *2.
+     C                   if        j5aic3 = 960 and j5c1ny <> 960
+     C                   add       j5bsva        wkoffsetam
+     c                   endif
+      *
+      * Print detail line
+     C                   if        *inof = *on
+     C                   except    hdg
+     C                   except    actdes
+     C                   endif
+     C                   except    l1dtl
+      *
+      * Determine which A/R files to update by reading the originating file code.
+      *
+      *  Update files if Live with JW is Y     -- otherwise the E1 pgm ARDEPJE1 updates them
+      *
+     C     xxlivew       ifeq      'Y'
+      *
+      * A/R Header
+     C                   select
+     C                   when      j5adst = 'H'
+     C                   exsr      $header
+      * A/R Detail
+     C                   when      j5adst = 'D'
+     C                   exsr      $header
+     C                   exsr      $detail
+      * Non-A/R
+     C                   when      j5adst = 'N'
+     C                   exsr      $nonar
+     C                   endsl
+      *
+      * Delete the record just processed from the posting file
+      *
+     C                   delete    @J5CPER
+     C                   endif                                                  If JWLIVE=Y
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *------------------
+      * EOF PROCESSING:
+      *------------------
+      *
+     C                   select
+     C                   when      first = yes
+     C                   except    hdg
+     C                   except    norec
+     C                   other
+      *
+      * Write out last record
+      *
+     C                   exsr      $write
+     C                   if        *inof = *on
+     C                   except    hdg
+     C                   except    actdes
+     C                   endif
+     C                   except    totact
+      *
+      * Conditionally write a Batch record
+      *
+     C                   if        batamt <> 0
+     C                   exsr      $writebatch
+     C                   endif
+      *
+      * Update Bank Deposit record with 3 fields:
+      *  1) process status
+      *  2) batch number
+      *  3) G/L post date
+      *
+      * Update file if Live with E1 is Y
+      *
+     C     xxlivew       ifeq      yes
+     C     key02         chain     pdj2cpl1                           92
+     C                   if        *in92 =  *off
+     C                   move      'P'           j2ajst
+     C                   z-add     xxbatch       j2cknb
+     C                   z-add     xxsyssyndt    j2hydt
+     C                   update    @j2cpcn
+     C                   endif
+     C                   endif
+      *
+     C                   endsl
+      *
+      * Determine if the spooled file needs to be duplicated for Dailys
+      *
+     C                   if        wk363fl = yes and wk364fl = yes
+     C                   move      'D'           xxdupsplf
+     C                   endif
+      *
+      * This will close any files that are left open from any called programs.
+      *
+     C                   call      'UTRCRSC'
+     C                   close     print132
+      *
+     C                   seton                                        lr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Write a JDE G/L Ledger record
+      *----------------------------------------------------------------------------------
+      *
+     C     $write        begsr
+      *
+     C                   move      acttot        glaa
+      *
+     C                   move      svglid        wkaid
+     C                   move      wkaid         glaid
+      *
+     C                   movel     wktype        glicut                         Batch type
+     C                   z-add     xxbatch       glicu                          Batch number
+     C                   move      gldsyj        gldicj                         Batch date
+     C                   move      'R'           glrcnd                         Reconciled code
+     C                   move      'I'           glcff1                         p16169
+      *
+     C                   z-add     xxdoc         gldoc                          Document nbr
+      *
+     C                   move      0             wkco
+     C                   move      svacctco      wkco                           GL Acct Posting
+     C                   move      wkco          glco                           Company nbr
+      *
+     C                   movel     sdusr         gluser                         User id
+     C                   movel     sdusr         gltorg                         Transaction Orginato
+     C                   movel     sdjob         gljobn                         Workstation ID
+     C                   move      svdepjul      gldgj                          G/L Date
+      *
+     C                   move      *blank        glcn                           Check number
+     C                   z-add     0             gldkj                          Check date
+     C                   z-add     0             gldkc                          Check clear date
+      *
+     C                   add       1             gljeln                         Line number
+      *
+      * Retrieve the structured Account Number.
+      *
+     C                   move      *blank        wkani
+      *
+     C                   call      'X0901'
+     C                   parm                    xxsym
+     C                   parm      '2'           xxomod
+     C                   parm      '9'           xximod
+     C     wkani         parm                    xxani
+     C                   parm      glmcu         xxmcu
+     C                   parm      globj         xxobj
+     C                   parm      glsub         xxsub
+     C                   parm                    xxerrm
+     C                   parm                    i0901ds
+      *
+     C                   if        xxerrm = *blank
+     C                   movel     wkani         glani                          Account nbr
+     C                   else
+     C                   move      *blank        glani
+     C                   endif
+      *
+     C                   z-add     xxpn          glpn                           Period
+     C                   z-add     xxfy          glfy                           Fiscal year
+     C                   z-add     xxctry        glctry                         Century
+      *
+     C                   move      svdepjul      gldsvj                         Service/tax date
+      *
+     C                   z-add     xxmmddyy      wk3dt
+     C                   movel     wkexa         glexa                          Explanation
+     C                   movel     sdusr         gltorg                         Transaction orig
+     C                   movel     sdusr         gluser                         User ID
+     C                   move      *blank        glre                           Reverse/Void
+      *
+      *  Move 11.2 vendor (subledger) number into an 8.0 field.
+      *
+     C                   if        svglvl <> 0
+     C                   movel     svglvl        wksbl                          9.0
+     C                   move      wksbl         wksbl8                         8.0
+     C                   movel     wksbl8        glsbl
+     C                   move      'A'           glsblt                         Subledger type
+     C                   endif
+      *
+     C                   move      *zero         glcrr                          Exchange rate
+     C                   move      *zero         glhcrr                         Hist exch rate
+      *
+      * Only write the record if there is an amount
+      *
+     C                   if        glaa <> 0
+     C                   write     i0911
+     C                   endif
+      *
+      * Accumulate Debit Amounts for Batch Header
+      *
+     C                   if        glaa > 0
+     C                   add       glaa          batamt
+     C                   add       1             batndo
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve the Account info
+      *---------------------------------------------------------------
+      *
+     C     $account      begsr
+      *
+      * Retrieve JDE account ID for the cost center/object/subsidiary
+      *
+     C                   call      'X0901'
+     C                   parm                    xxsym
+     C                   parm      '9'           xxomod
+     C                   parm      '1'           xximod
+     C                   parm      svglid        xxani
+     C                   parm      *blank        xxmcu
+     C                   parm      *blank        xxobj
+     C                   parm      *blank        xxsub
+     C                   parm      *blank        xxerrm
+     C                   parm                    i0901ds
+      *
+     C                   if        xxerrm = *blank
+     C                   movel     xxdl01        wkdesc
+     C                   movel     xxmcu         glmcu
+     C                   movel     xxobj         globj
+     C                   movel     xxsub         glsub
+     C                   else
+     C                   eval      wkdesc = '*** Invalid Account ***'
+     C                   move      *blank        glmcu
+     C                   move      *blank        globj
+     C                   move      *blank        glsub
+     C                   endif
+      *
+     C                   endsr
+      *
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * get the GLID code from PKCWREP for the Account Codes
+      *----------------------------------------------------------------------------------
+      *
+     C     $getglid      begsr
+      *
+      * get account ID from pkcwrel5  based on the offset accounts
+      *
+     C                   eval      svglid  = *blanks                             Account ID
+      *
+      * Retrieve Account I.D. associated with G/L Code.
+      *
+     C                   call      'PKTIXFR'
+     C                   parm                    return
+     C                   parm      wkco960       xxnumco                        Co # 960
+     C                   parm      wkglcode      xxglcode
+     C     svglid        parm      *blank        xxaid
+     C                   parm      *blank        xxsubtype
+     C                   parm      *blank        xxbalsheet
+     C                   parm      *zeros        xxacctco
+      *
+     C                   z-add     xxacctco      svacctco                        Post Account CO
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write the Batch Record to JDE
+      *---------------------------------------------------------------
+      *
+     C     $writebatch   begsr
+     C
+     C     key06         chain     f0011                              92
+     C                   if        *in92 = *on                                  If no rec
+     C                   move      xxbatch       icicu
+     C                   movel     wktype        icicut
+     C                   move      batamt        icaicu
+     C                   move      gldicj        icdicj
+     C                   move      batndo        icndo
+     C                   move      batamt        icame
+     C                   move      batndo        icdocn
+     C                   movel     sdusr         icuser
+     C                   move      'A'           iciapp
+     C                   move      'Y'           icbal
+     C                   move      ' '           icbalj
+     C                   move      ' '           icist
+     C                   move      'N'           icpob
+     C                   move      'Y'           iciboi
+     C                   write     i0011
+     C                   endif                                                  If no rec
+      *
+     C                   z-add     0             batndo
+     C                   z-add     0             batamt
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Update the A/R Header record
+      *----------------------------------------------------------------------------------
+      *
+     C     $header       begsr
+      *
+     C     key03         setll     arbdcpl3
+      *
+      * Update 3 fields:
+      *  1) process status
+      *  2) batch number
+      *  3) G/L post date
+      *
+     C                   dou       *in81 = *on                                  Do loop
+     C     key03         reade     arbdcpl3                               81
+     C                   if        *in81 = *off                                 If hit
+     C                   move      'P'           bdajst
+     C                   z-add     xxbatch       bdcknb
+     C                   z-add     xxsyssyndt    bdh5dt
+     C                   update    @bdcpf7
+     C                   endif                                                  If hit
+     C                   enddo                                                  Do loop
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Update the A/R Detail record
+      *----------------------------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+     C     key04         setll     arbecpl1
+      *
+      * Update 3 fields:
+      *  1) process status
+      *  2) batch number
+      *  3) G/L post date
+      *
+     C                   dou       *in82 = *on
+     C     key04         reade     arbecpl1                               82    Do loop
+     C                   if        *in82 = *off                                 If hit
+     C                   move      'P'           bfajst
+     C                   z-add     xxbatch       bfcknb
+     C                   z-add     xxsyssyndt    bfhydt
+     C                   update    @bfcpfo
+     C                   endif                                                  If hit
+     C                   enddo                                                  Do loop
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Update the Non-A/R record
+      *----------------------------------------------------------------------------------
+      *
+     C     $nonar        begsr
+      *
+     C     key05         setll     arbkcpl5
+      *
+      * Update 3 fields:
+      *  1) process status
+      *  2) batch number
+      *  3) G/L post date
+      *
+     C                   dou       *in83 = *on                                  Do loop
+     C     key05         reade     arbkcpl5                               83
+     C                   if        *in83 = *off
+     C                   move      'P'           bkajst
+     C                   z-add     xxbatch       bkcknb
+     C                   z-add     xxsyssyndt    bkhydt
+     C                   if        xxlivew  = yes                                       p16169
+     C                   update    @bkcpct
+     C                   endif
+     C                   endif
+     C                   enddo
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Format a date to Julian format
+      *----------------------------------------------------------------------------------
+      *
+     C     $julian       begsr
+      *
+     C                   move      xxdepdt       xxsidat
+      *
+     C                   call      'X0028'
+     C                   parm                    xxsidat
+     C                   parm      *blank        xxedat
+     C                   parm      '*YMD   '     xxffmt
+     C                   parm      '*JUL   '     xxtfmt
+     C                   parm      '*NONE  '     xxsep
+     C                   parm      *blank        xxertst
+     C                   parm      *blank        xxctryalph
+      *
+     C                   move      xxsidat       svdepjul
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Setup save fields and account description
+      *---------------------------------------------------------------
+      *
+     C     $setsave      begsr
+     C                   z-add     0             acttot
+      *
+      * Save control fields
+     C                   move      j5iztx        svglid                         GL ID code
+     C                   move      j5c1ny        svc1ny                         Acct Posting CO
+     C                   move      j5c1ny        svacctco                       Acct Posting CO
+      *
+     C                   z-add     j5conb        svconb                         invoice number
+     C                   move      j5cest        svcest                         invoice suffix
+     C                   z-add     j5dxnb        svdxnb                         sequence number
+     C                   z-add     j5glvl        svglvl                         subledger
+     C                   movel     j5glvl        wkglvl            9 0          print subledger
+     C                   move      wkglvl        prglvl            8 0          print subledger
+      *
+      * Retrieve account description
+      *
+     C                   exsr      $account
+     C   of              except    hdg
+     C                   except    actdes
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * One-time routine for first time through
+      *---------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+     C                   move      no            first
+     C                   open      print132
+     C                   z-add     0             page
+      *
+      * Retrieve a Batch Number from JDE
+      *
+     C                   exsr      $batnbr
+      *
+      * Generate a Document Number from JDE
+      *
+     C                   exsr      $docnbr
+      *
+     C                   except    hdg
+     C                   move      *zeros        glkco                          Document comp nbr
+     C                   move      j5aic3        glkco                          Document comp nbr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Create Offsetting Company entries for 960 transactions
+      * and create new batch
+      *---------------------------------------------------------------
+      *
+     C     $offsets      begsr
+      *
+      * 1.  Write 3xx Offset Record  ($getglid and $write)
+      * 2.  Write 3xx Batch Record   ($writebatch)
+      * 3.  Setup for first 960 record/batch/document # etc.  ($first)
+      * 4.  Setup generic user name for TF JDE GL batch posting
+      * 5.  Write 960 Offset Record  ($getglid and $write)
+      *
+      *
+     C                   eval      wkglcode = 'OFFAR362'                         GL acct Code
+     C                   exsr      $getglid
+     C                   exsr      $account
+     c                   eval      acttot = (wkoffsetam * -1)
+     C                   if        acttot <> 0
+     C                   exsr      $write
+     C                   endif
+      *
+     C   of              except    hdg
+     C                   except    actdes
+     C                   except    totact
+      *
+     C                   if        batamt <> 0
+     C                   exsr      $writebatch
+     c                   endif
+      *
+     C                   close     print132
+     C                   exsr      $first
+     C                   move      *blanks       sdusr
+     C                   movel     'TFGLPOST'    sdusr
+     C                   z-add     0             gljeln                         g/l line counter
+      *
+      * Write the 960 Offset record
+      *
+     C                   eval      wkglcode = 'OFFAR960'                         GL acct Code
+     C                   exsr      $getglid
+     C                   exsr      $account
+     c                   eval      acttot = wkoffsetam
+     C                   if        acttot <> 0
+     C                   exsr      $write
+     C                   endif
+      *
+     C                   except    actdes
+     C                   except    totact
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Calculate the Period and Fiscal Year for a date
+      *---------------------------------------------------------------
+      *
+     C     $period       begsr
+      *
+     C                   move      *zero         wkco
+     C                   move      360           wkco
+     C                   call      'X09031'
+     C                   parm      '1'           xxcalc
+     C                   parm      wkco          xxco
+     C                   parm      xxmmddyy      wkdate
+     C                   parm      0             xxpn
+     C                   parm      0             xxfy
+     C                   parm      0             xxctry
+     C                   parm      *blank        xxedt
+     C                   parm      *blank        xxdgsy
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve a Document Number from JDE
+      *---------------------------------------------------------------
+      *
+     C     $docnbr       begsr
+      *
+     C                   call      'X0010 '
+     C                   parm      '09  '        xxsy
+     C                   parm      '02'          xxidx
+     C                   parm                    xxdoc
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve a Batch Number from JDE
+      *---------------------------------------------------------------
+      *
+     C     $batnbr       begsr
+      *
+     C                   call      'X0010 '
+     C                   parm      '00  '        xxsy
+     C                   parm      '01'          xxidx
+     C                   parm      0             xxbatch
+      *
+     C                   movel     'G'           wktype
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parms
+      *
+     C     *entry        plist
+     C                   parm                    return
+     C                   parm                    xxbank
+     C                   parm                    xxdepdt
+     C                   parm                    xxdeptm
+     C                   parm                    xxdupsplf
+     C                   parm                    xxlivew                         p16169 live/world
+      *
+      * Key Lists
+      *
+     C     key01         klist
+     C                   kfld                    xxbank                         Bank nbr
+     C                   kfld                    xxdepdt                        Deposit date
+      *
+      * A/R bank deposit
+      *
+     C     key02         klist
+     C                   kfld                    xxbank                         Bank nbr
+     C                   kfld                    xxdepdt                        Deposit date
+     C                   kfld                    xxdeptm                        Deposit time
+      *
+      * A/R Header
+      *
+     C     key03         klist
+     C                   kfld                    j5aic3                         Company nbr
+     C                   kfld                    j5conb                         Invoice nbr
+     C                   kfld                    j5cest                         Invoice suffix
+      *
+      * A/R Detail
+      *
+     C     key04         klist
+     C                   kfld                    j5aic3                         Company nbr
+     C                   kfld                    j5conb                         Invoice nbr
+     C                   kfld                    j5cest                         Invoice suffix
+     C                   kfld                    j5dxnb                         Sequence nbr
+      *
+      * Non-A/R Cash
+      *
+     C     key05         klist
+     C                   kfld                    xxbank                         Bank nbr
+     C                   kfld                    xxdepdt                        Deposit date
+     C                   kfld                    xxdeptm                        Deposit time
+     C                   kfld                    j5ujcd                         Reference nbr
+      *
+      * JDE Batch header
+      *
+     C     key06         klist
+     C                   kfld                    wktype
+     C                   kfld                    xxbatch
+      *
+      *
+     C                   time                    rtime
+      *
+      * Move incoming bank into the "Explanation" data structure.
+      *
+     C                   move      xxbank        wk2bank
+      *
+      * Retrieve Bank Name
+      *
+     C                   call      'PDXDXFR'
+     C                   parm      *blank        return
+     C                   parm                    xxbank
+     C     wkbanknm      parm      *blank        xxbanknm
+     C                   parm      *blank        xxerror
+      *
+     C                   if        xxerror = 'ERR    '
+     C                   movel     'No Name'     wkbanknm
+     C                   endif
+      *
+      * Put system date into an 8,0 field.
+      * Then, get it into Synon format of CYYMMDD to use in updating Synon files.
+      *
+     C     *mdy          movel     udate         wkisodate
+     C                   movel     wkisodate     xxccyymmdd
+     C                   call      'HP8008'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxsyssyndt
+      *
+      *
+      * Get system date into the format required by JDE by calling JDE's routine.
+      * Save the date for populating lots of fields.
+      *
+     C                   time                    wktime
+     C                   move      wktime        wkdate
+     C                   move      wkdate        xxsidat
+      *
+     C                   call      'X0028'
+     C                   parm                    xxsidat
+     C                   parm      *blank        xxedat
+     C                   parm      '*SYSVAL'     xxffmt
+     C                   parm      '*JUL   '     xxtfmt
+     C                   parm      '*NONE  '     xxsep
+     C                   parm      *blank        xxertst
+     C                   parm      *blank        xxctryalph
+      *
+     C                   move      xxsidat       glupmj
+     C                   move      xxsidat       gldsyj
+      *
+     C                   time                    glticu
+     C                   time                    glupmt
+      *
+     C                   move      sdpgm         glpid
+     C                   movel     sdjob         gljobn
+      *
+      * Retrieve the Julian date for the Deposit Date using JDE's routine.
+      *
+     C                   exsr      $julian
+      *
+      * Convert Deposit Date from CYYMMDD format to MMDDYY format.
+      *
+     C     *cymd         test(d)                 xxdepdt                92
+     C                   if        *in92 = *off                                 If OK date
+     C     *cymd         move      xxdepdt       wkisodate
+     C     *mdy          move      wkisodate     xxmmddyy
+     C                   else
+     C                   z-add     0             xxmmddyy
+     C                   endif                                                  If OK date
+      *
+      * Calculate the Period and Fiscal Year for the date
+      *
+     C                   exsr      $period
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oprint132  E            HDG            1 01
+     O                                            8 'ARDEPJDE'
+     O                                           63 'ACCOUNTS RECEIVABLE'
+     O                                           70 'SYSTEM'
+     O                       UDATE         Y    131
+     O          E            HDG            1
+     O                       sdusr               10
+     O                                           65 'DEPOSIT POST LIST'
+     O                       RTIME              131 '0 :  :  '
+     O          E            HDG            1
+     O                                          127 'PAGE'
+     O                       PAGE          Z    131
+      *
+     O          E            HDG            1
+     O                                           10 'SELECTION:'
+     O                                           92 'JDE BATCH # .. :'
+     O                       wktype              95
+     O                       xxbatch       Z    104
+      *
+     O          E            HDG            1
+     O                                           92 'JDE DOCUMENT # :'
+     O                       GLDCT               95
+     O                       xxdoc         Z    104
+      *
+     O          E            HDG            1
+     O                                           18 'BANK ...... :'
+     O                       xxbank              25
+     O                       wkbanknm            56
+      *
+     O          E            HDG            2
+     O                                           18 'DEPOSIT DATE:'
+     O                       xxmmddyy      Y     27
+     O                                           42 'DEPOSIT TIME:'
+     O                       xxdeptm             50 '0 :  '
+      *
+     O          E            HDG            1
+     O                                           19 'COST CENTER  OBJECT'
+     O                                           40 'SUB CODE DESCRIPTION'
+      *
+     O          E            HDG            2
+     O                                           57 'CUSTOMER INVOICE'
+     O                                           76 'SEQ ADJ CHECK #'
+     O                                           99 'ORDER # REFERENCE #'
+     O                                          116 'SUBLEDGER'
+     O                                          132 'AMOUNT'
+      *
+      *-------------------------------------------------------------------------------------
+      * Account description
+      *-------------------------------------------------------------------------------------
+     O          E            actdes         2
+     O                       xxmcu               12
+     O                       xxobj               19
+     O                       xxsub               28
+     O                       wkdesc              59
+      *
+      *-------------------------------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------------------------------
+      *
+     O          E            l1dtl          1
+     O                       J5ANC7        Z     49
+     O                       J5CEST              52
+     O                       J5CONB        Z     60
+     O                       J5DXNB        Z     64
+     O                       J5UHCD              68
+     O                       J5CPTX              79
+     O                       J5C4NB        Z     87
+     O                       J5UJCD             103
+     O                       PRGLVL        Z    117
+     O                       J5BSVA        J    132
+      *
+      *-------------------------------------------------------------------------------------
+      * Account total line
+      *-------------------------------------------------------------------------------------
+     O          E            TOTACT      1  2
+     O                                           72 '******'
+     O                       xxmcu               86
+     O                       xxobj               93
+     O                       xxsub              102
+     O                       ACTTOT        J    130
+     O                                          132 '*'
+      *
+      *-------------------------------------------------------------------------------------
+      * No data message
+      *-------------------------------------------------------------------------------------
+     O          E            NOREC       2
+     O                                           25 'NO RECORDS SELECTED'
+      *

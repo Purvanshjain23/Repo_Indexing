@@ -1,0 +1,484 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP230 - PROCESS HPS EXPENSE CODES FOR
+      *              G/L INTERFACE
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     01/02/98
+      *
+      * FUNCTION: THIS PROGRAM PERFORMS THE FOLLOWING FUNCTIONS:
+      *
+      *           1) READS EACH RECORD IN THE HPS EXPENSE CODE FILE
+      *
+      *           2) CALLS AN EXISTING SYNON PROGRAM TO RETRIEVE
+      *              THE G/L ACCOUNT INFO ASSOCIATED WITH THIS
+      *              CODE (IF ANY) FROM THE CROSS REFERENCE FILES
+      *
+      *           3) Records for account "6150" on farms with a Feed
+      *              Delivery Zone of "999  " are excluded.
+      *
+      *           4) IF THE EXPENSE CODE HAS ACCOUNT INFO SET UP
+      *              IN THE CROSS REFERENCE FILES, THEN TWO ADDITIONAL
+      *              CHECKS ARE MADE:
+      *                  1) DOES THE ALLOCATION METHOD FOR THE EXPENSE
+      *                     CLASS ASSOCIATED WITH THE EXPENSE CODE
+      *                     REQUIRE 'HOG GROUP'
+      *                  2) IS THE EXPENSE CODE ASSOCIATED WITH A
+      *                     REPORT CODE THAT IS NOT USER CONTROLLED?
+      *
+      *              IF EITHER ANSWER IS 'YES', THIS EXPENSE CODE
+      *              WILL NOT BE INTERFACED AND AN ERROR MESSAGE
+      *              WILL BE PRINTED.
+      *
+      *           5) CALLS A CUSTOMIZED G/L PROGRAM TO RUN OVER THE
+      *              G/L DATABASE TO EXTRACT DOLLARS FOR THE
+      *              YEAR/PERIOD/ACCOUNT INFO AND WRITE RECORDS
+      *              TO THE HPS RECEIVING FILE.
+      *
+      *           THIS PROGRAM IS SUBMITTED BY HP428CL WHICH IS CALLED
+      *           FROM HP428 THROUGH QCMDEXC.
+      *
+      *           QPRINT IS USED FOR THE OUTPUT FILE SINCE THE
+      *           COMMAND 'CLPRINTA' PRINTS TO QPRINT.
+      *           QPRINT IS OVERRIDDEN IN THE SUBMISSION CLP
+      *           TO 'SHARE = YES' TO ALLOW BOTH THIS RPG PROGRAM AND
+      *           CLP UT80046A TO WRITE TO THE SAME PRINT FILE.
+      *
+      *           SINCE THE 'CLPRINTA' COMMAND LOGIC IN UT80046A IS NOT
+      *           BEING USED TO PRINT HEADINGS, COUNT LINES OR PAGE
+      *           BREAK, THESE FUNCTIONS ARE CONTROLLED FROM THIS RPG
+      *           PROGRAM BY COUNTING THE LINES.
+      *
+      *           THIS PROGRAM PAGE-BREAKS WHEN THE LINE COUNT
+      *           REACHES 62 LINES BECAUSE THIS REPORT IS DESIGNED
+      *           TO RUN ON PAPER THAT IS 68 LINES LONG. THEREFORE,
+      *           IF THE USERS GENERATE THIS REPORT ON VARIOUS
+      *           LASER PRINTERS WITH DIFFERENT PAGE LENGTHS, THE
+      *           PAGE BREAKS MAY BE GOOFY.
+      *
+      ***************************************************************************************
+      * MODIFICATIONS:
+      ***************************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 04/19/05  LeAnne Fedor
+      *           Added hardcoded "exclusion" logic. We now exclude from processing all
+      *           JDE records for account "6150" for farms coded with a Feed Delivery
+      *           Zone of "999  ".
+      *
+      * 03/01/16  Barb Gutierrez
+      *           Added company number to print on report to accomodate multi companies
+      *           (e5290)
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSP006    IF   E           K DISK
+      *  ALLOCATION METHOD
+      *
+      *
+     FHSP040    IF   E           K DISK
+      *  ALLOCATION METHOD
+      *
+      *
+     FHSP050    IF   E           K DISK
+      *  EXPENSE CLASSES
+      *
+      *
+     FHSP052    IF   E           K DISK
+      *  EXPENSE CODE
+      *
+      *
+     FQPRINT    O    F  132        PRINTER OFLIND(*INOF)
+      *
+      /EJECT
+      ****************************************************************
+      * TABLE AND ARRAY SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  STANDARD MESSAGE ARRAYS
+      *---------------------------------------------------------------
+      *
+      ****************************************************************
+      * INPUT SPECS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *
+      *---------------------------------------------------------------
+      * STANDARD ERROR MESSAGE HANDLING DATA STRUCTURES
+      *---------------------------------------------------------------
+      *
+      * FOR ERROR MESSAGE HANDLING, A PACKED INDEX (E) IS REQUIRED.
+      * FOR PROGRAM READABILITY, DEFINE A CORRESPONDING ERROR COUNT
+      * FIELD CALLED 'ERROR'
+      *
+     D                 DS                  INZ
+     D  ERROR                  1      2P 0
+     D  E                      1      2P 0
+      *
+      * THIS DATA STRUCTURE SUPPLIES THE NAME OF THE MESSAGE FILE TO
+      * THE MESSAGE HANDLING CL PROGRAM.  THE FIELD NAME MSGFIL MUST BE
+      * CONSTANT. THE VALUE IN QUOTES IS THE NAME OF THE SPECIFIC
+      * MESSAGE FILE CONTAINING THE USER DEFINED MESSAGES.
+      *
+     D                 DS                  INZ
+     D  MSGFIL                 1     10    INZ('HSMSGF    ')
+      *
+      * THE FOLLOWING 3 DATA STRUCTURES ARE USED TO SPEED MESSAGE
+      * HANDLING SINCE IT IS FASTER TO CLEAR DATA STRUCTURES THAN
+      * ARRAYS.  EACH IS ASSOCIATED WITH A STANDARD MESSAGE ARRAY.
+      *
+     D MGI             DS           140    INZ
+     D  MGID                   1    140
+     D                                     DIM(20)                              MSG ID ARRAY
+      *
+     D MGD             DS          1000    INZ
+     D  MGDT                   1   1000
+     D                                     DIM(20)                              MSG PARMS
+      *
+     D MGWK            DS            50    INZ
+     D  MGW                    1     50
+     D                                     DIM(50)                              MSG WORK PARMS
+      *
+      *
+      *---------------------------------------------------------------
+      *  LOCAL DATA AREA
+      *---------------------------------------------------------------
+      *
+     D                UDS
+     D  LDBPDT                 1     08  0
+     D  LDEPDT                 9     16  0
+     D  LDPER                 17     18  0
+     D  LDCCYY                19     22  0
+     D  LDCOCD                23     25
+     D  LDBMDY                60     66  0
+     D  LDEMDY                70     76  0
+     D  LDERFL                80     80
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+      *
+      * PROCESS EACH RECORD IN THE HPS EXPENSE CODE FILE.
+      *
+     C     *LOVAL        SETLL     HSP052
+      *
+     C     *IN90         DOUEQ     *ON                                          MAIN DO
+     C                   READ      HSP052                                 90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+      *
+      *
+      * RETRIEVE G/L ACCOUNT INFO FROM CROSS REFERENCE FILE
+      *
+     C                   MOVEL(P)  LDCOCD        XXCOCD
+     C                   MOVEL(P)  EXEXCD        XXGLCD
+      *
+     C                   CALL      'PKNEXFR'
+     C                   PARM      *BLANK        XXRTN
+     C                   PARM                    XXCOCD
+     C                   PARM                    XXGLCD
+     C                   PARM      *BLANK        XXGLDS
+      *
+      * Extract the six characters in positions 14 - 19 from
+      * the returned g/l description and place in the 'object
+      * account' field.
+      *
+     C                   eval      xxobj = %subst(xxglds:14:6)
+      *
+      * IF THE OBJECT ACCOUNT IS NOT BLANK, CONTINUE
+      * PROCESING.
+      *
+     C     XXOBJ         IFNE      *BLANK                                       IF AN ACCOUNT
+      *
+     C                   MOVEL     YES           PROCFL
+      *
+      *
+      * CHECK THE ALLOCATION METHOD CODE ASSOCIATED WITH THE
+      * EXPENSE CLASS
+      *
+     C                   EXSR      $AMCD
+      *
+      * CHECK THE USER-CONTROL FLAG ASSOCIATED WITH THE
+      * REPORT CODE THAT IS TIED TO THIS EXPENSE CODE
+      *
+     C                   EXSR      $UCFL
+      *
+      * IF THERE ARE NO ERRORS, CALL THE CUSTOMIZED
+      * G/L PROGRAM TO EXTRACT DOLLARS FOR THIS ACCOUNT
+      * FROM THE G/L DATABASE AND WRITE RECORDS TO THE
+      * HPS RECEIVING FILE. (IF THERE ARE ERRORS, PRINT
+      * ERROR MESSAGES.)
+      *
+     C                   SELECT
+     C     PROCFL        WHENEQ    NO
+     C                   EXSR      $PRMSG
+     C                   OTHER
+     C                   CALL      'HPJDEE'
+     C                   PARM                    LDCOCD
+     C                   PARM                    XXCCYY
+     C                   PARM                    XXPER
+     C                   PARM                    EXEXCD
+     C                   PARM                    XXOBJ
+     C                   ENDSL
+      *
+     C                   ENDIF                                                  IF AN ACCOUNT
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  MAIN DO
+      *
+     C                   SETON                                        LR
+      /EJECT
+      *----------------------------------------------------------------
+      * $AMCD - CHECK THE ALLOCATION METHOD
+      *----------------------------------------------------------------
+      * THE G/L EXPENSE INTERFACE DOES NOT SUPPORT ALLOCATION
+      * METHODS THAT REQUIRE A HOG GROUP.  THE ALLOCATION
+      * METHOD IS ASSOCIATED WITH THE EXPENSE CLASS. SO,
+      *
+      *  1) RETRIEVE THE EXPENSE CLASS FOR THIS EXPENSE CODE, THEN
+      *  2) RETRIEVE THE 'HOG GROUP REQUIRED' VALUE FOR
+      *     THE ALLOCATION METHOD
+      *
+      *
+     C     $AMCD         BEGSR
+      *
+     C     EXECCD        CHAIN     HSP050                             92
+      *
+     C                   SELECT
+     C     *IN92         WHENEQ    *ON
+     C                   MOVEL     NO            PROCFL
+     C                   OTHER
+      *
+     C     ECAMCD        CHAIN     HSP040                             92
+     C     *IN92         IFEQ      *ON                                          IF NOT FOUND
+     C                   MOVEL     NO            PROCFL
+     C                   ELSE
+     C     AMGRFL        IFEQ      YES                                          IF GROUP REQ
+     C                   MOVEL     NO            PROCFL
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00870'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     EXEXCD        MGW(1)
+     C                   MOVEA     EXECCD        MGW(6)
+     C                   MOVEA     AMAMCD        MGW(11)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+     C                   ENDIF                                                  IF GROUP REQ
+     C                   ENDIF                                                  IF NOT FOUND
+      *
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *-----------------------------------------------------------------
+      * $UCFL - CHECK THE USER-CONTROL VALUE ASSOCIATED WITH THE EXPENSE
+      *-----------------------------------------------------------------
+      * IN THE HPS SYSTEM, EACH EXPENSE CODE IS ASSOCIATED WITH A REPORT
+      * CODE.  REPORT CODES ARE EITHER A) USER-CONTROLLED OR B) NOT USER
+      * CONTROLLED.  IF A REPORT CODE IS NOT USER CONTROLLED, THEN IT
+      * CANNOT BE INTERFACED FROM THE G/L SYSTEM.
+      *
+      *
+     C     $UCFL         BEGSR
+      *
+     C     EXRPCD        CHAIN     HSP006                             92
+     C     *IN92         IFEQ      *ON                                          IF NOT FOUND
+     C                   MOVEL     NO            PROCFL
+     C                   ELSE
+     C     RPUCFL        IFEQ      NO                                           IF NOT USER
+     C                   MOVEL     NO            PROCFL
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00871'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     EXEXCD        MGW(1)
+     C                   MOVEA     EXRPCD        MGW(6)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+     C                   ENDIF                                                  IF NOT USER
+     C                   ENDIF                                                  IF NOT FOUND
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------------
+      * $PRMSG - PRINT ERROR MESSAGES
+      *-------------------------------------------------------------------
+      *
+     C     $PRMSG        BEGSR
+      *
+     C     ERROR         IFNE      0
+      *
+     C     FIRST         IFEQ      YES
+     C                   EXSR      $HRHDR
+     C                   MOVEL     NO            FIRST
+     C                   ENDIF
+      *
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $WRMSG - SUBROUTINE TO WRITE ERROR MESSAGES TO REPORT
+      *---------------------------------------------------------------
+      *
+     C     $WRMSG        BEGSR
+      *
+      * IF OVERFLOW, PRINT REPORT HEADINGS
+      *
+     C     WKCURL        IFGT      WKOVFL
+     C                   EXSR      $HRHDR
+     C                   ENDIF
+      *
+      * PROGRAM UT80046A DOES NOT PRINT HEADINGS OR CHECK FOR PAGE
+      * BREAKS.  BEFORE CALLING UT80046A, DETERMINE IF ALL THE ERROR
+      * MESSAGES CAN BE PRINTED ON THE CURRENT PAGE.
+      * CALCULATE REMAINING PRINT LINES ON PAGE USING THE OVERFLOW LINE
+      * AND THE CURRENT LINE.
+      *
+     C     WKOVFL        SUB       WKCURL        WKDIFL
+      *
+      * IF YOU HAVE MORE MESSAGES THAN WILL FIT ON THE PAGE, THEN
+      * PAGE BREAK AND PRINT HEADINGS.
+      *
+     C     ERROR         IFGT      WKDIFL
+     C                   EXSR      $HRHDR
+     C                   ENDIF
+      *
+      * INCREMENT THE CURRENT LINE BY THE NUMBER OF ERROR MESSAGES
+      * YOU WILL BE PRINTING IN UT80046A PLUS ONE FOR THE SPACE AFTER.
+      * THIS SETS THE CURRENT LINE NUMBER PROPERLY FOR WHEN YOU
+      * RETURN FROM UT80046A.
+      *
+     C     WKCURL        ADD       ERROR         WKCURL
+     C                   ADD       1             WKCURL
+      *
+     C                   CALL      'UT80046A'                           43
+     C                   PARM                    MGID
+     C                   PARM                    MGDT
+     C                   PARM                    ERROR
+     C                   PARM      MSGFIL        MSGFL
+      *
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CLMSG - SUBROUTINE TO CLEAR MESSAGES
+      *----------------------------------------------------------------
+      *
+     C     $CLMSG        BEGSR
+      *
+     C                   CALL      'UT80046A'                           43
+     C                   PARM      *BLANK        MGI
+     C                   PARM      *BLANK        MGD
+     C                   PARM      *ZERO         ERROR
+     C                   PARM      MSGFIL        MSGFL
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $HRHDR - PRINT REPORT HEADINGS
+      *---------------------------------------------------------------
+      *
+      * RESET THE CURRENT LINE TO ZERO
+      * PRINT THE HEADING LINE
+      * INCREMENT THE CURRENT LINE
+      *
+     C     $HRHDR        BEGSR
+      *
+     C                   Z-ADD     0             WKCURL
+     C                   EXCEPT    HRHDR
+     C                   ADD       7             WKCURL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      *  INZSR - INITIALIZATION SUBROUTINE
+      *----------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      *
+      * FIELDS USED AS PARMS
+      *
+     C                   MOVE      *BLANK        XXGLDS           50
+     C                   MOVE      *BLANK        XXGLCD            8
+     C                   MOVE      *BLANK        XXRTN             7
+     C                   Z-ADD     0             XXCOCD            3 0
+     C                   MOVE      *BLANK        XXOBJ             6
+      *
+     C                   Z-ADD     LDCCYY        XXCCYY            4 0
+     C                   Z-ADD     LDPER         XXPER             2 0
+      *
+      * CONTROL FIELDS
+      *
+     C                   MOVEL     YES           PROCFL            1
+     C                   MOVEL     YES           FIRST             1
+      *
+      *
+     C                   MOVEL     *ALL'-'       DASH            198
+     C                   TIME                    RTIME             6 0
+      *
+      * DEFINE WORK FIELDS USED IN CONTROLLING LINE COUNTS FOR
+      * PRINTING SINCE DETAIL LINES ARE PRINTED FROM THIS RPG PROGRAM
+      * AND ERROR MESSAGES ARE PRINTED FROM CLP UT80046A.
+      *
+     C                   Z-ADD     0             WKDIFL            3 0          LINES LEFT
+     C                   Z-ADD     62            WKOVFL            3 0          OVERFLOW LIN
+     C                   Z-ADD     0             WKCURL            3 0          CURRENT LINE
+      *
+      * MESSAGE PARMS
+     C                   MOVE      *BLANK        MSGFL            10            MESSAGE FILE
+     C                   Z-ADD     20            MAXMSG            2 0
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------
+      * REPORT HEADING LINES
+      *-------------------------------------------------------------
+      *
+     OQPRINT    E            HRHDR          1 01
+     O                       SDPGM               10
+     O                                           80 'HOG PRODUCTION SYSTEM'
+     O                                          122 'DATE'
+     O                       UDATE         Y    132
+      *
+     O          E            HRHDR          1
+     O                       SDUSR               10
+     O                                           80 'G/L INTERFACE TO HPS'
+     O                                          122 'TIME'
+     O                       RTIME              132 '  :  :  '
+      *
+     O          E            HRHDR          2
+     O                       LDCOCD              55
+     O                                           74 'EXPENSE CODE ERROR'
+     O                                         +  1 'LISTING'
+     O                                          122 'PAGE'
+     O                       PAGE          Z    132
+      *
+      /EJECT

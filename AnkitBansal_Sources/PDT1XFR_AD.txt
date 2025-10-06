@@ -1,0 +1,412 @@
+// ?------------------------------------------------------------------------------------------------
+// ?Synon action diagram for PDT1XFR
+// ?Date: 14.08.2025 Time: 03:29:58
+// ?------------------------------------------------------------------------------------------------
+
+//?Execute user function
+
+//?This Sequence Contains Function Documentation
+DO;
+
+//?****************************************************************
+//?*  Read OP Order Header
+//?*      Retrieve Year/Period/Week from Calendar
+//?*      Read Order Detail
+//?*         Execute Auto Accruals
+//?*      Read Order Detail
+//?*         Update Status, Event, G/L Update Flag in Shipping Dtl
+//?*         Update Contracts if used.
+//?*         Return Total Amount/Weight Billed
+//?*      Write A/R Header record
+//?*      Update A/R Summary record
+//?*      Flag Order Events record 06(Invoiced) as being complete
+//?****************************************************************
+//?* DLY029 05/23/07 RMC DB Chgs -- dont pass broker from OH
+//?* in Auto Accrual Calcs
+//?* S00342 07/11/08 RMC Reverse sign on CM accruals so they match the  OH
+//?* P00579 06/29/10 RMC HPB Only - upd supporting txt with invoice (EMTS)
+//?RMC 12/15/2020 chg keys on OMBFCPM0 FROM CO/SUFFX/INV TO CO/INV/SUF
+ENDDO;
+
+EXECUTE FUNCTION(UPD Invoice Post       RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1337380;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Invoice_Number);
+PARAMETER(*BLANK);
+PARAMETER(PAR.Process_Cust_Types_Usr);
+{
+ //?USER: Initialize routine
+
+ //?***** Change Log and Comments
+ DO;
+
+ //?** E00351 LJB 04/22/2009
+ //?** A/R Header and Detail will not be created for IP customers
+ //?** for Daily's inter company transactions between MSLA and SLC
+ ENDDO;
+
+ //?USER: Process Data record
+
+ //?If processing all invoices, should pass 0 in as invoice number
+ // PAR.USR Process status = CND.yes
+ PAR.USR_Process_status = 'Y';
+
+ //?Set process flag to no if processing 1 invoice, and this isn't it.
+ CASE;
+
+ // IF PAR.Invoice Number NE WRK.ZERO
+ IF PAR.Invoice_Number <> WRK.ZERO;
+
+ // AND DB1.Invoice Number NE PAR.Invoice Number
+ AND DB1.Invoice_Number <> PAR.Invoice_Number;
+
+ // PAR.USR Process status = CND.no
+ PAR.USR_Process_status = 'N';
+
+ ENDIF;
+
+ //?Check the ship to customer type = parm process customer type
+ // PGM.*Record selected = CND.*YES
+ PGM.*Record_selected = 'Y';
+
+ // Call program Sel Customer Type     XF.
+ CALL PROGRAM(Sel Customer Type     XF) ('PPUOXFR');
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Ship_To_Customer);
+ PARAMETER(LCL.Type_Code);
+ PARAMETER(PAR.Process_Cust_Types_Usr);
+ PARAMETER(PGM.*Record_selected);
+
+ CASE;
+
+ // IF PGM.*Record selected is *NO
+ IF PGM.*Record_selected = 'N';
+
+ // PAR.USR Process status = CND.no
+ PAR.USR_Process_status = 'N';
+
+ ENDIF;
+
+ CASE;
+
+ // IF PAR.USR Process status is yes
+ IF PAR.USR_Process_status = 'Y';
+
+ //?09/18/07 PKD DLY029 Moved the process before printing of invoices.
+ //?             Sales Tax and Discounts are needed for the Invoice.
+ //?Process Order Detail record with Shipping Detail
+ DO;
+
+ // PAR.Quantity Billed = CON.*ZERO
+ PAR.Quantity_Billed = *ZERO;
+
+ // PAR.Weight Billed = CON.*ZERO
+ PAR.Weight_Billed = *ZERO;
+
+ //?This function updates Shipping Detail Status="C", Last Status
+ //?                      Event code to "07", G/L Update Status="N"
+ //?                      & returns Order Total Qty & Weight Billed
+ //?                      & also affect inventory, sales $, sales # fields
+ // Call program UPD Invoice Post Dtl   XF.
+ CALL PROGRAM(UPD Invoice Post Dtl   XF) ('PDT4XFR');
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(PAR.Affect_Inventory_Status);
+ PARAMETER(PAR.Affect_Sales_Doll_Status);
+ PARAMETER(PAR.Affect_Sales_Pnds_Status);
+ PARAMETER(PAR.Quantity_Billed);
+ PARAMETER(PAR.Weight_Billed);
+ PARAMETER(DB1.Date_of_Original_Entry);
+ PARAMETER(DB1.Billing_Activity_Type);
+
+ ENDDO;
+
+ EXECUTE FUNCTION(RTV OD Whs/ShpCo/AccCo RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC1801010;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Shipping_Company);
+ PARAMETER(LCL.Accounting_Company);
+ {
+  //?USER: Process Data record
+
+  CASE;
+
+  // IF DB1.Detail Line Status is Not cancelled
+  IF DB1.Detail_Line_Status = 'L'/'A'/'C'/'R'/'E'/'H'/'I';
+
+  EXECUTE FUNCTION(RTV OD Whs/ShpCo/AccCo RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1801011;
+  PARAMETER(DB1.Warehouse_Code);
+  PARAMETER(PAR.Shipping_Company);
+  PARAMETER(PAR.Accounting_Company);
+  {
+   //?USER: Processing if Data record not found
+
+   MOVE *ALL (To: PAR From: CON);
+
+   // PGM.*Return code = CND.*Record does not exist
+   PGM.*Return_code = 'Y2U0005';
+
+   //?USER: Process Data record
+
+   MOVE *ALL (To: PAR From: DB1);
+
+  }
+
+  // PAR.Warehouse Code = DB1.Warehouse Code
+  PAR.Warehouse_Code = DB1.Warehouse_Code;
+
+  QUIT;
+
+  ENDIF;
+
+ }
+
+ //?Create A/R Header Record
+ DO;
+
+ //?*** Load A/R Header "Adjustment Type Code" field
+ CASE;
+
+ // IF DB1.Billing Activity Type is Invoice
+ IF DB1.Billing_Activity_Type = '1';
+
+ // WRK.Adjustment Type Code = CND.INV Invoice
+ WRK.Adjustment_Type_Code = 'INV';
+
+ //?*** Load A/R Header "Adjustment Type Code" field
+ // IF DB1.Billing Activity Type is Credit Memo
+ IF DB1.Billing_Activity_Type = '2';
+
+ // WRK.Adjustment Type Code = CND.CRM Credit Memo
+ WRK.Adjustment_Type_Code = 'CRM';
+
+ //?*** Load A/R Header "Adjustment Type Code" field
+ // IF DB1.Billing Activity Type is Debit Memo
+ IF DB1.Billing_Activity_Type = '3';
+
+ // WRK.Adjustment Type Code = CND.DBM Debit Memo
+ WRK.Adjustment_Type_Code = 'DBM';
+
+ ENDIF;
+
+ EXECUTE FUNCTION(RTV Salesman Code      RT) TYPE(RTVOBJ) FILE(PDJEREP)          AC1284971;
+ PARAMETER(DB1.Sales_Route_Code);
+ PARAMETER(WRK.Salesperson_Code);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // Call program CLC Terms Values       XF.
+ CALL PROGRAM(CLC Terms Values       XF) ('CAC9XFR');
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Terms_Code);
+ PARAMETER(WRK.Discount_Due_Date);
+ PARAMETER(WRK.Due_Date);
+ PARAMETER(DB1.Actual_Shipped_Date);
+ PARAMETER(DB1.Order_Value_Total);
+ PARAMETER(WRK.Discount_Amount);
+
+ // WRK.USR Status (Y/N) = CND.yes
+ WRK.USR_Status_Y_N = 'Y';
+
+ //?12/07/06 PKD PK0040 Create A/R Header with Accounting Company
+ //?             instead of DB1.Company Number.  DB1.Company Number is
+ //?             the Accounting Company Number.
+ //?09/18/07 PKD DLY029 Adjust Transaction Amount Accruals that
+ //?             impact the invoice.
+ EXECUTE FUNCTION(Rtv Inv Adjust Amt    RT) TYPE(RTVOBJ) FILE(OMHRCPP)           AC1847382;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Adjustment_Amount);
+ {
+  //?USER: Initialize routine
+
+  // PAR.Adjustment Amount = CON.*ZERO
+  PAR.Adjustment_Amount = *ZERO;
+
+  //?USER: Process Data record
+
+  CASE;
+
+  // IF DB1.SDA Print on Invoice is Yes
+  IF DB1.SDA_Print_on_Invoice = 'Y';
+
+  // PAR.Adjustment Amount = PAR.Adjustment Amount + DB1.Extended Amount
+  PAR.Adjustment_Amount = PAR.Adjustment_Amount + DB1.Extended_Amount;
+
+  ENDIF;
+
+ }
+
+ //?S00342 RMC Reverse sign on CM accruals so it matches the order amt
+ CASE;
+
+ // IF DB1.Billing Activity Type is Credit Memo
+ IF DB1.Billing_Activity_Type = '2';
+
+ // LCL.Adjustment Amount = CON.*ZERO - LCL.Adjustment Amount
+ LCL.Adjustment_Amount = 0 - LCL.Adjustment_Amount;
+
+ ENDIF;
+
+ // LCL.Order Value Total = DB1.Order Value Total + LCL.Adjustment Amount
+ LCL.Order_Value_Total = DB1.Order_Value_Total + LCL.Adjustment_Amount;
+
+ //?08/12/2011 PKD C1696 Only create AR Header if the Order Value is
+ //?               not equal to zero.
+ CASE;
+
+ // IF LCL.Order Value Total is not equal to zeros
+ IF LCL.Order_Value_Total <> *ZERO;
+
+ // Call program CRT A/R Header         XF.
+ CALL PROGRAM(CRT A/R Header         XF) ('PDUKXFR');
+ PARAMETER(LCL.Accounting_Company);
+ PARAMETER(DB1.Invoice_Number);
+ PARAMETER(DB1.Invoice_Suffix);
+ PARAMETER(WRK.Adjustment_Type_Code);
+ PARAMETER(LCL.Order_Value_Total);
+ PARAMETER(*ZERO);
+ PARAMETER(*ZERO);
+ PARAMETER(LCL.Order_Value_Total);
+ PARAMETER('O');
+ PARAMETER('O');
+ PARAMETER(*BLANK);
+ PARAMETER(*ZERO);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Ship_To_Customer);
+ PARAMETER(WRK.Salesperson_Code);
+ PARAMETER(DB1.Sales_Route_Code);
+ PARAMETER(DB1.Invoice_Date);
+ PARAMETER(WRK.Due_Date);
+ PARAMETER(*ZERO);
+ PARAMETER(*ZERO);
+ PARAMETER(*ZERO);
+ PARAMETER(*ZERO);
+ PARAMETER(DB1.AR_Customer_Number);
+ PARAMETER(*BLANK);
+ PARAMETER(*ZERO);
+ PARAMETER(DB1.EDI_Status_1);
+ PARAMETER(DB1.EDI_Status_2);
+ PARAMETER(DB1.EDI_Status_3);
+
+ ENDIF;
+
+ ENDDO;
+
+ //?Change/Create A/R Summary Record
+ DO;
+
+ // Call program EDT A/R Summary        XF.
+ CALL PROGRAM(EDT A/R Summary        XF) ('PDU4XFR');
+ PARAMETER(LCL.Accounting_Company);
+ PARAMETER(DB1.AR_Customer_Number);
+ PARAMETER(DB1.Order_Date);
+ PARAMETER(DB1.Actual_Shipped_Date);
+ PARAMETER(DB1.Order_Value_Total);
+ PARAMETER(DB1.Order_Weight_Total);
+ PARAMETER(DB1.A_R_order_Value_Total);
+ PARAMETER(DB1.Billing_Activity_Type);
+ PARAMETER(PAR.Affect_Sales_Doll_Status);
+
+ ENDDO;
+
+ //?Change Order Events 06 Shipped record as being completed
+ DO;
+
+ EXECUTE FUNCTION(CHG Activity to Compl  RT) TYPE(RTVOBJ) FILE(OPEYCPP)          AC1340552;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER('06');
+ {
+  //?USER: Process Data record
+
+  EXECUTE FUNCTION(CHG Activity to Compl  CH) TYPE(CHGOBJ) FILE(OPEYCPP)          AC1340547;
+  PARAMETER(DB1.Company_Number);
+  PARAMETER(DB1.Order_Number);
+  PARAMETER(DB1.Event_Number);
+  PARAMETER(DB1.Event_Code);
+  PARAMETER(DB1.Invoice_Memo_Company);
+  PARAMETER(DB1.Invoice_Memo_Number);
+  PARAMETER(DB1.Invoice_Memo_Suffix);
+  PARAMETER(DB1.Event_Date);
+  PARAMETER('Y');
+  PARAMETER(DB1.Activity_Hold);
+  PARAMETER(DB1.Post_Cash_Complete);
+  PARAMETER(DB1.Cross_Event_Ref_Comp);
+  PARAMETER(DB1.Cross_Event_Ref_Order);
+  PARAMETER(DB1.Cross_Event_Ref_Event);
+  PARAMETER(DB1.Ship_To_Customer);
+  PARAMETER(DB1.EDI_Status_1);
+  PARAMETER(DB1.EDI_Status_2);
+  PARAMETER(DB1.EDI_Status_3);
+  {
+   //?USER: Processing before Data update
+
+   // DB1.Job Time = JOB.*Job time
+   DB1.Job_Time = JOB.*Job_time;
+
+   // DB1.User Id = JOB.*USER
+   DB1.User_Id = JOB.*USER;
+
+   // DB1.Job Name = JOB.*JOB
+   DB1.Job_Name = JOB.*JOB;
+
+   // DB1.Job Date = JOB.*Job date
+   DB1.Job_Date = JOB.*Job_date;
+
+  }
+
+ }
+
+ ENDDO;
+
+ //?HPB Only - upd batch rin with invoice nbr in supporting txt 2 P000579
+ DO;
+
+ // Call program Rtv Plant Co/Org      XF.
+ CALL PROGRAM(Rtv Plant Co/Org      XF) ('PMOVXFR');
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(LCL.Plant_Company_Sts);
+ PARAMETER(LCL.Company_Organization);
+
+ CASE;
+
+ // IF LCL.Company Organization is High Plains Biodiesel
+ IF LCL.Company_Organization = 'H';
+
+ // Call program Exc Upd EMTS Spprt InvXF.
+ CALL PROGRAM(Exc Upd EMTS Spprt InvXF) ('PNSEXFR');
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Invoice_Number);
+
+ ENDIF;
+
+ ENDDO;
+
+ ENDIF;
+
+ //?If processing only 1 invoice, quit
+ CASE;
+
+ // IF PAR.Invoice Number NE WRK.ZERO
+ IF PAR.Invoice_Number <> WRK.ZERO;
+
+ // AND PAR.USR Process status is yes
+ AND PAR.USR_Process_status = 'Y';
+
+ QUIT;
+
+ ENDIF;
+
+}
+
+

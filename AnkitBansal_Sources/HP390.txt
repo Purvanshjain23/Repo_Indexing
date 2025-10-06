@@ -1,0 +1,2173 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP390
+      * TITLE:       BUILD WORKFILE FOR DISPOSED GROUP REPORTS
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     10/14/94
+      *
+      *  FUNCTION:   THIS BATCH PROGRAM IS CALLED FROM MULTIPLE PLACES.
+      *              IT BUILDS A WORKFILE (HSP390) THAT IS
+      *              USED IN THE DISPOSED HOG GROUP REPORTS:
+      *
+      *                 HP678  DISPOSED GROUP SUMMARY
+      *                 HP691  DISPOSED GROUP PERFORMANCE
+      *
+      *              THE USER'S SUBMISSION CRITERIA ARE PASSED IN THE
+      *              LDA.
+      /EJECT
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 05/03/01  LeAnne Fedor
+      *           Changed logic using 'shipped' pounds to use 'received' pounds for TRANO,
+      *           COS and WGAIN records.
+      *
+      * 05/22/01  LeAnne Fedor
+      *           Renamed workfile fields.
+      *
+      * 01/29/03  LeAnne Fedor
+      *           Removed all hardcoded special logic for SHAUL.
+      *
+      * 07/16/03  LeAnne Fedor
+      *           Changed Cull Sale logic to use 'net' instead of 'gross' amount.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 06/21/10  LeAnne Ramsey    (E828)
+      *           Replaced HSJ018G with HSJ034N to give us a join file keyed by Hog Group
+      *           Production Phase instead of Farm Site Production Phase.
+      *
+      * 10/16/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 03/26/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSP006    IF   E           K DISK
+      *    REPORT CODES
+      *
+     FHSJ034n   IF   E           K DISK
+      *    Hog Group + Farm site
+      *    (records selected by open query)
+      *
+     FHSL038E   IF   E           K DISK
+      *   FEED TICKET DETAIL
+      *
+     FHSP044    IF   E           K DISK
+      *   DEDUCTION/ADD-ON CODES
+      *
+     FHSP045    IF   E           K DISK
+      *   PREMIUM/DISCOUNT CODES
+      *
+     FHSL048B   IF   E           K DISK
+      *   EXPENSE TICKET
+      *
+     FHSL058D   IF   E           K DISK
+      *    MOVEMENT EVENT
+      *
+     FHSL064I   IF   E           K DISK
+      *    CHECK DETAIL
+      *
+     FHSP065    IF   E           K DISK
+      *    CHECK ADJUSTMENTS
+      *
+      *
+     Fhsl065c   if   e           k disk    rename(cjrec:cjrecc) prefix(p1)
+      *    Check adjustments
+      *
+      *
+     FHSP066    IF   E           K DISK
+      *    SALE TYPE CODES
+      *
+     FHSL068D   IF   E           K DISK
+     F                                     RENAME(KDREC:KDRECD)
+      *  KILLED/DEAD HOGS
+      *
+     FHSL069A   IF   E           K DISK
+     F                                     RENAME(IAREC:IARECA)
+      *  INVENTORY ADJUSTMENTS
+      *
+     FHSP071    IF   E           K DISK
+      *    RATION
+      *
+     FHSP073    IF   E           K DISK
+      *    CALORIES PER RATION
+      *
+     FHSJ075A   IF   E           K DISK
+      *  TRANSFER DETAIL + HEADER
+      *
+     FHSP079    IF   E           K DISK
+      *    SALE TYPE REPORT CODES
+      *
+     FHSP084    IF   E           K DISK
+      *    SALES MOVEMENT HEADER
+      *
+     FHSL085B   IF   E           K DISK
+      *    SALES MOVEMENT DETAIL
+      *
+     FHSP390    UF A E           K DISK
+      *    WORKFILE FOR HOG GROUP
+      *
+      /EJECT
+      ****************************************************************
+      * INPUT SPECS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+      *
+      *---------------------------------------------------------------
+      * STANDALONE FIELDS
+      *---------------------------------------------------------------
+      *
+      * Workfields for date manipulation
+      *
+     D wkcymdiso       s               D   datfmt(*iso)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * READ EACH HOG GROUP RECORD SELECTED BY THE OPEN QUERY.
+      *
+     C     *IN90         DOUEQ     *ON                                          MAIN DO
+     C                   READ      HSJ034N                                90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+      *
+      * INITIALIZE FIELDS FOR ACCUMULATING TOTALS BY GROUP
+      *
+     C                   EXSR      $CLEAR
+      *
+      * SETUP THE WORKFILE FIELDS THAT ARE CONSTANT FOR THIS GROUP
+      * AND SET FLAGS THAT CONTROL GROUP PROCESSING
+      *
+     C                   Z-ADD     HGHGSN        CGHGSN
+      *
+     C                   MOVEL     YES           FIRSTE
+      *
+      * FOR EACH DISPOSED HOG GROUP, READ/PROCESS ALL:
+      *  FEED TICKETS
+      *  EXPENSE TICKETS
+      *  MOVEMENTS:
+      *      INVENTORY ADJUSTMENTS
+      *      DAILY DEADS
+      *      SALES MOVEMENTS  (INCLUDING CHECKS AND ADJUSTMENTS)
+      *      TRANSFER MOVEMENTS
+      *      ADJUSTED TRANSFER IN MOVEMENTS
+      *
+     C                   EXSR      $FEED
+     C                   EXSR      $EXP
+     C                   EXSR      $ADJ
+     C                   EXSR      $DEAD
+     C                   EXSR      $SALE
+     C                   EXSR      $TRAN
+     C                   exsr      $adjtran
+      *
+      * AFTER PROCESSING EACH HOG GROUP, WRITE THE FOLLOWING RECORDS:
+      *     COST OF SALES
+      *     PIG DAYS
+      *     WEIGHT GAIN
+      *     PERFORMANCE RECORDS
+      *
+     C                   EXSR      $COST
+     C                   EXSR      $PDAY
+     C                   EXSR      $WGAIN
+     C                   EXSR      $PERF
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  MAIN DO
+      *
+      *---------------------------------------------------------------
+      * AFTER ALL PROCESSING IS COMPLETE, CLEAN UP THE GROUP WORKFILE
+      * BY DELETING ALL RECORDS THAT HAVE VALUES OF ZERO.  ZERO-VALUE
+      * RECORDS CAN OCCUR DUE TO THE MOVEMENT LOGIC FOR ADJUSTMENTS
+      * WHERE YOU ARE ADDING/SUBTRACTING VALUES TO A WORKFILE RECORD.
+      *---------------------------------------------------------------
+      *
+     C     *LOVAL        SETLL     HSP390
+      *
+     C     *IN74         DOUEQ     *ON                                          DO CLEAN
+     C                   READ      HSP390                                 74
+     C     *IN74         IFEQ      *OFF                                         IF NOT EOF
+     C     CGCGAM        ANDEQ     0
+     C     CGCGHD        ANDEQ     0
+     C     CGCGLB        ANDEQ     0
+     C     CGCRLB        ANDEQ     0
+     C     CGCGQT        ANDEQ     0
+     C     CGSHHD        ANDEQ     0
+     C     CGSHLB        ANDEQ     0
+     C     CGRCHD        ANDEQ     0
+     C     CGRCLB        ANDEQ     0
+     C     CGDOHD        ANDEQ     0
+     C     CGDOLB        ANDEQ     0
+     C     cgcdhd        ANDEQ     0
+     C     cgcdlb        ANDEQ     0
+     C     cgydhd        ANDEQ     0
+     C     cgydlb        ANDEQ     0
+     C                   DELETE    CGREC
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO CLEAN
+      *
+      * CALL UTILITY PROGRAM TO RECLAIM RESOURCES--CLOSE FILES
+      * AND CLEANUP AFTER THE GENERIC PROGRAMS THAT DO NOT SETON
+      * THE LAST RECORD INDICATOR.
+      *
+     C                   CALL      'UTRCRSC'
+     C                   SETON                                        LR
+      /EJECT
+      *---------------------------------------------------------------
+      * $CACD - RETRIEVE CATEGORY CODE ASSOCIATED WITH REPORT CODE
+      *---------------------------------------------------------------
+      *
+     C     $CACD         BEGSR
+      *
+     C     WKRPCD        CHAIN     HSP006                             92
+     C     *IN92         IFEQ      *OFF
+     C                   MOVEL     RPCACD        CGCACD
+     C                   ELSE
+     C                   MOVE      *BLANK        CGCACD
+     C                   ENDIF
+      *
+     C                   MOVEL     WKRPCD        CGRPCD
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $FEED - PROCESS ALL FEED DETAIL RECORDS FOR A DISPOSED GROUP
+      *---------------------------------------------------------------
+      *
+      * THIS SUBROUTINE FIRST READS ALL FEED TICKET DETAIL RECORDS FOR
+      * THE GROUP ACCUMULATING VALUES.  AFTER ALL DETAIL RECORDS HAVE
+      * BEEN PROCESSED FOR A GROUP, THE WORKFILE RECORDS ARE WRITTEN.
+      *
+     C     $FEED         BEGSR
+      *
+      * INITIALIZE WORK FIELDS FOR ACCUMULATING FEED VALUES
+      *
+     C                   Z-ADD     0             WKFDAM
+     C                   Z-ADD     0             WKFDLB
+     C                   Z-ADD     0             WKINAM
+     C                   Z-ADD     0             WKINLB
+     C                   Z-ADD     0             WKMFAM
+     C                   Z-ADD     0             WKMFLB
+     C                   Z-ADD     0             WKDLAM
+     C                   Z-ADD     0             WKDLLB
+     C                   Z-ADD     0             WKMDAM
+     C                   Z-ADD     0             WKMDLB
+      *
+     C                   Z-ADD     0             WKKCQT
+     C                   Z-ADD     0             WKLYLB
+      *
+     C     HGHGSN        SETLL     HSL038E
+     C                   SETOFF                                       96
+      *
+     C     *IN96         DOUEQ     *ON                                          DO FEED
+     C     HGHGSN        READE     HSL038E                                96
+     C     *IN96         IFEQ      *OFF                                         IF NOT EOF
+      *
+      * ACCUMULATE ALL COSTS INTO A TOTAL FEED COST FOR THIS GROUP
+      *
+     C                   ADD       FDINAM        WKFDAM
+     C                   ADD       FDMFAM        WKFDAM
+     C                   ADD       FDDLAM        WKFDAM
+     C                   ADD       FDMDAM        WKFDAM
+      *
+      * ALWAYS ACCUMULATE TOTAL FEED POUNDS FOR THIS GROUP
+      *
+     C                   ADD       FDFDLB        WKFDLB
+      *
+      * MAKE FURTHER ACCUMULATIONS BASED ON THE VARIOUS
+      * COST VALUES IN THE DETAIL FEED RECORD
+      *
+     C     FDINAM        IFNE      0                                            IF INGRED
+     C                   ADD       FDFDLB        WKINLB
+     C                   ADD       FDINAM        WKINAM
+     C                   ENDIF                                                  IF INGRED
+      *
+     C     FDMFAM        IFNE      0                                            IF MANUFACT
+     C                   ADD       FDFDLB        WKMFLB
+     C                   ADD       FDMFAM        WKMFAM
+     C                   ENDIF                                                  IF MANUFACT
+      *
+     C     FDDLAM        IFNE      0                                            IF DELIVERY
+     C                   ADD       FDFDLB        WKDLLB
+     C                   ADD       FDDLAM        WKDLAM
+     C                   ENDIF                                                  IF DELIVERY
+      *
+     C     FDMDAM        IFNE      0                                            IF MED
+     C                   ADD       FDFDLB        WKMDLB
+     C                   ADD       FDMDAM        WKMDAM
+     C                   ENDIF                                                  IF MED
+      *
+      * RETRIEVE THE LYSINE PERCENT FOR THE RATION
+      *
+     C     FDRNCD        CHAIN     HSP071                             92
+     C     *IN92         IFEQ      *OFF                                         IF LYSINE
+     C     RNLYPR        ANDNE     0
+     C     RNLYPR        DIV(H)    100           WKLYPR
+     C     WKLYPR        MULT      FDFDLB        WKLB
+     C                   ADD       WKLB          WKLYLB
+     C                   ENDIF                                                  IF LYSINE
+      *
+      * RETRIEVE THE RATION'S CALORIC CONTENT. USE THE
+      * REFERENCE TICKET DATE FOR RETRIEVING THE RECORD.
+      *
+     C     key01         CHAIN     HSP073                             92
+     C     *IN92         IFEQ      *ON                                          IF NOT EXACT
+     C     key01         SETLL     HSP073
+     C     FDRNCD        READPE    HSP073                                 76
+     C                   ENDIF                                                  IF NOT EXACT
+      *
+     C     *IN76         IFEQ      *OFF                                         IF ANY REC
+     C     FDFDLB        MULT      CPCLRT        WKQT
+     C                   ADD       WKQT          WKKCQT
+     C                   ENDIF                                                  IF ANY REC
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO FEED
+      *
+      *----------------------------------------------------------------
+      * ALL FEED DETAIL HAS BEEN PROCESSED FOR A HOG GROUP, WRITE
+      * THE FEED WORKFILE RECORDS FOR THE GROUP USING HARDCODED
+      * FEED REPORT CODES (THERE ARE 7 FEED CODES) AND RETRIEVING
+      * THE CATEGORY CODE (WHICH WILL PROBABLY ALWAYS BE FEED) FOR EACH
+      * REPORT CODE.
+      *
+      *  FEED RECORD 1
+      *
+     C     WKINLB        IFNE      0                                            IF INGRED
+     C     WKINAM        ORNE      0
+     C                   MOVEL     'FING '       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     WKINLB        CGCGLB
+     C                   Z-ADD     WKINAM        CGCGAM
+     C                   EXSR      $FEEDW
+     C                   ENDIF                                                  IF INGRED
+      *
+      *  FEED RECORD 2
+      *
+     C     WKMFLB        IFNE      0                                            IF MANUFACT
+     C     WKMFAM        ORNE      0
+     C                   MOVEL     'FMFG '       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     WKMFLB        CGCGLB
+     C                   Z-ADD     WKMFAM        CGCGAM
+     C                   EXSR      $FEEDW
+     C                   ENDIF                                                  IF MANUFACT
+      *
+      *  FEED RECORD 3
+      *
+     C     WKDLLB        IFNE      0                                            IF DELIVERY
+     C     WKDLAM        ORNE      0
+     C                   MOVEL     'FDEL '       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     WKDLLB        CGCGLB
+     C                   Z-ADD     WKDLAM        CGCGAM
+     C                   EXSR      $FEEDW
+     C                   ENDIF                                                  IF DELIVERY
+      *
+      *  FEED RECORD 4
+      *
+     C     WKMDLB        IFNE      0                                            IF MED
+     C     WKMDAM        ORNE      0
+     C                   MOVEL     'FMED '       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     WKMDLB        CGCGLB
+     C                   Z-ADD     WKMDAM        CGCGAM
+     C                   EXSR      $FEEDW
+     C                   ENDIF                                                  IF MED
+      *
+      *  FEED RECORD 5
+      *
+     C     WKKCQT        IFNE      0                                            IF CALORIES
+     C                   MOVEL     'FCAL '       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     WKKCQT        CGCGQT
+     C                   EXSR      $FEEDW
+     C                   ENDIF                                                  IF CALORIES
+      *
+      *  FEED RECORD 6
+      *
+     C     WKLYLB        IFNE      0                                            IF LYSINE
+     C                   MOVEL     'FPRO '       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     WKLYLB        CGCGLB
+     C                   EXSR      $FEEDW
+     C                   ENDIF                                                  IF LYSINE
+      *
+      *  FEED RECORD 7
+      *
+     C     WKFDLB        IFNE      0                                            IF TOTAL
+     C     WKFDAM        ORNE      0
+     C                   MOVEL     'FCONS'       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     WKFDLB        CGCGLB
+     C                   Z-ADD     WKFDAM        CGCGAM
+     C                   EXSR      $FEEDW
+     C                   ENDIF                                                  IF TOTAL
+      *
+      * ACCUMULATE THE FEED DOLLARS FOR THIS GROUP INTO THE
+      * FIELD HOLDING TOTAL COST FOR THIS GROUP.
+      *
+     C                   ADD       WKFDAM        COSAM
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $FEEDW - WRITE A WORKFILE RECORD FOR FEED
+      *---------------------------------------------------------------
+      *
+     C     $FEEDW        BEGSR
+      *
+     C                   WRITE     CGREC
+      *
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGCGQT
+     C                   Z-ADD     0             CGCGLB
+     C                   Z-ADD     0             CGCGHD
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $EXP - PROCESS ALL EXPENSE RECORDS FOR A DISPOSED GROUP
+      *---------------------------------------------------------------
+      *
+      * THIS SUBROUTINE PROCESSES ALL EXPENSE TICKETS FOR THE HOG GROUP
+      * ACCUMULATING VALUES BY REPORT CODE.  WHEN THE REPORT CODE IN
+      * THE EXPENSE TICKET FILE CHANGES, A RECORD IS WRITTEN TO THE
+      * WORKFILE AND THE ACCUMLATOR FIELDS ARE CLEARED.
+      *
+     C     $EXP          BEGSR
+      *
+     C     HGHGSN        SETLL     HSL048B
+     C                   SETOFF                                       93
+      *
+     C     *IN93         DOUEQ     *ON                                          DO EXPENSE
+     C     HGHGSN        READE     HSL048B                                93
+     C     *IN93         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C     FIRSTE        IFEQ      YES                                          IF FIRST EXP
+     C                   MOVEL     XTRPCD        SVRPCD
+     C                   MOVEL     NO            FIRSTE
+     C                   ENDIF                                                  IF FIRST EXP
+      *
+      * WHEN REPORT CODE CHANGES,
+      *    RETRIEVE CATEGORY CODE
+      *    WRITE A WORKFILE RECORD FOR THIS EXPENSE
+      *    CLEAR ACCUMULATORS
+      *
+     C     XTRPCD        IFNE      SVRPCD                                       IF BREAK
+     C                   MOVEL     SVRPCD        WKRPCD
+     C                   EXSR      $CACD
+     C                   EXSR      $EXPW
+     C                   MOVEL     XTRPCD        SVRPCD
+     C                   ENDIF                                                  IF BREAK
+      *
+      * ACCUMULATE VALUES FOR EACH RECORD READ
+      *
+     C                   ADD       XTXTAM        WKXTAM
+     C                   ADD       XTXTHD        WKXTHD
+     C                   ADD       XTXTLB        WKXTLB
+     C                   ADD       XTXTQT        WKXTQT
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO EXPENSE
+      *
+      * IF ANY VALUES WERE ACCUMULATED FOR THE LAST REPORT
+      * CODE, THEN WRITE A WORKFILE RECORD FOR THIS LAST EXPENSE.
+      *
+     C     WKXTAM        IFNE      0
+     C     WKXTLB        ORNE      0
+     C     WKXTHD        ORNE      0
+     C     WKXTQT        ORNE      0
+     C                   MOVEL     SVRPCD        WKRPCD
+     C                   EXSR      $CACD
+     C                   EXSR      $EXPW
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $EXPW - WRITE A WORKFILE RECORD FOR EXPENSES
+      *---------------------------------------------------------------
+      *
+     C     $EXPW         BEGSR
+      *
+     C                   Z-ADD     WKXTAM        CGCGAM
+     C                   Z-ADD     WKXTHD        CGCGHD
+     C                   Z-ADD     WKXTLB        CGCGLB
+     C                   Z-ADD     WKXTQT        CGCGQT
+     C                   WRITE     CGREC
+      *
+      * ACCUMULATE THE EXPENSE DOLLARS FOR THIS RECORD INTO
+      * THE FIELD HOLDING TOTAL COST FOR THIS GROUP.
+      *
+     C                   ADD       WKXTAM        COSAM
+     C                   Z-ADD     0             WKXTAM
+     C                   Z-ADD     0             WKXTHD
+     C                   Z-ADD     0             WKXTLB
+     C                   Z-ADD     0             WKXTQT
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $ADJ - PROCESS ALL INVENTORY ADJUSTMENTS FOR A GROUP
+      *---------------------------------------------------------------
+      *
+     C     $ADJ          BEGSR
+      *
+     C     HGHGSN        SETLL     HSL069A
+     C                   Z-ADD     0             WKHD
+      *
+     C     *IN94         DOUEQ     *ON                                          DO ADJUSTS
+     C     HGHGSN        READE     HSL069A                                94
+     C     *IN94         IFEQ      *OFF                                         IF NOT EOF
+     C                   ADD       IAIAHD        WKHD
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO ADJUSTS
+      *
+     C     WKHD          IFNE      0                                            IF ANYTHING
+     C                   MOVEL     'INADJ'       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     WKHD          CGCGHD
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGCGQT
+     C                   Z-ADD     0             CGCRLB
+     C                   Z-ADD     0             CGCGLB
+     C                   z-add     0             cgcdhd
+     C                   z-add     0             cgcdlb
+     C                   z-add     0             cgydhd
+     C                   z-add     0             cgydlb
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   WRITE     CGREC
+     C                   ENDIF                                                  IF ANYTHING
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $DEAD - PROCESS ALL DAILY KILLED/DEAD HOGS FOR A GROUP
+      *---------------------------------------------------------------
+      *
+     C     $DEAD         BEGSR
+      *
+     C     HGHGSN        SETLL     HSL068D
+     C                   Z-ADD     0             WKDHD
+     C                   Z-ADD     0             WKDLB
+      *
+     C     *IN94         DOUEQ     *ON                                          DO DEADS
+     C     HGHGSN        READE     HSL068D                                94
+     C     *IN94         IFEQ      *OFF                                         IF NOT EOF
+     C                   ADD       KDKDHD        WKDHD
+     C                   ADD       KDKDLB        WKDLB
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO DEADS
+      *
+     C     WKDHD         IFNE      0                                            IF ANYTHING
+     C     WKDLB         ORNE      0
+      *
+      * CREATE THE REPORT CODE RECORD THAT WILL HOLD THE
+      * 'DAILY DEAD AND DOA' VALUES.
+      *
+     C                   MOVEL     'DEAD '       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGCGQT
+     C                   Z-ADD     0             CGCRLB
+     C                   Z-ADD     WKDHD         CGCGHD
+     C                   Z-ADD     WKDLB         CGCGLB
+     C                   z-add     0             cgcdhd
+     C                   z-add     0             cgcdlb
+     C                   z-add     0             cgydhd
+     C                   z-add     0             cgydlb
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   WRITE     CGREC
+      *
+      * CREATE THE REPORT CODE RECORD THAT WILL HOLD ONLY
+      * THE 'DAILY DEAD' VALUES.
+      *
+     C                   MOVEL     'DDEAD'       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGCGQT
+     C                   Z-ADD     0             CGCRLB
+     C                   Z-ADD     WKDHD         CGCGHD
+     C                   Z-ADD     WKDLB         CGCGLB
+     C                   z-add     0             cgcdhd
+     C                   z-add     0             cgcdlb
+     C                   z-add     0             cgydhd
+     C                   z-add     0             cgydlb
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   WRITE     CGREC
+     C                   ENDIF                                                  IF ANYTHING
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $TRAN - PROCESS ALL TRANSFER MOVEMENTS FOR A GROUP
+      *---------------------------------------------------------------
+      *
+     C     $TRAN         BEGSR
+      *
+      * CLEAR THE ACCUMULATORS FOR DOA VALUES
+      *
+     C                   Z-ADD     0             WKDHD
+     C                   Z-ADD     0             WKDLB
+      *
+      * READ/PROCESS ALL TRANSFER MOVEMENTS FOR THIS GROUP FROM THE
+      * MOVEMENT EVENT FILE.
+      *
+     C     HGHGSN        SETLL     HSL058D
+      *
+     C     *IN97         DOUEQ     *ON                                          DO EVENTS
+     C     HGHGSN        READE     HSL058D                                97
+     C     *IN97         IFEQ      *OFF                                         IF TRANSFER
+     C     MEMTCD        ANDEQ     'T'
+      *
+      * RETRIEVE/PROCESS THE TRANSFER DETAIL RECORD FOR THIS
+      * MOVEMENT/LINE NUMBER
+      *
+     C     key05         CHAIN     HSJ075A                            92
+     C     *IN92         IFEQ      *OFF                                         IF DTL/HDR
+      *
+     C                   SELECT
+     C     MEODFL        WHENEQ    'O'
+     C                   EXSR      $TRANO
+      *
+     C     MEODFL        WHENEQ    'D'
+     C                   EXSR      $TRANI
+     C                   ENDSL
+     C                   ENDIF                                                  IF DET/HDR
+     C                   ENDIF                                                  IF TRANSFER
+     C                   ENDDO                                                  DO EVENTS
+      *
+      * AFTER YOU HAVE PROCESSED ALL TRANSFERS FOR A GROUP,
+      * UPDATE THE 'DEAD' REPORT CODE RECORD WITH THE ACCUMULATED
+      * DEAD-ON-ARRIVAL VALUES.  HERE, YOU ARE UPDATING THE RECORD
+      * FOR THE 'ORIGIN' GROUP--SINCE THE DOA'S COUNT AGAINST
+      * THE ORIGIN GROUP--NOT THE DESTINATION GROUP.
+      *
+     C     WKDLB         IFNE      0                                            IF DOA
+     C     WKDHD         ORNE      0
+     C                   Z-ADD     WKDLB         WKLB
+     C                   Z-ADD     WKDHD         WKHD
+     C                   MOVEL     'DEAD '       WKRPCD
+     C                   EXSR      $UP390
+     C                   ENDIF                                                  IF DOA
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $adjtran - Adjusted transfers-in
+      *----------------------------------------------------------------
+      *
+     C     $adjtran      begsr
+      *
+      * Retrieve the 'transfer-in' values for this group from the workfile
+      * record already written.
+      *
+     C                   eval      wkrpcd = 'TRANI'
+     C     key03         chain(n)  hsp390                             92
+     C                   if        *in92 = *off                                 If record hit
+      *
+      * Test the group's open date for a valid date.
+      *
+     C     *iso          test(d)                 hgopdt                 92
+     C                   if        *in92 = *off                                 If good date
+     C                   movel     hgopdt        wkcymdiso
+      *
+      * Calculate the 'cut-off' date as 7 days after the group's open date.
+      *
+     C                   adddur    7:*days       wkcymdiso
+     C                   move      wkcymdiso     zzcymd
+      *
+      *
+      * Retrieve the 'transfer out head and pounds' as of the cutoff date.
+      * Then, calculate the 'adjusted transfer in' head and pounds by subtracting
+      * the returned transfer out values from the transfer in values.
+      *
+     C                   call      'HPMOVE'      plist01
+     C     CGCGhd        sub       touhd         wkhd
+     C     CGCGlb        sub       toulb         wklb
+      *
+     C                   eval      wkrpcd = 'TRANA'
+     C                   exsr      $up390
+      *
+     C                   endif                                                  If good date
+     C                   endif                                                  If record hit
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $UP390 - MAINTAIN RECORDS IN WORKFILE HSP390 FOR TRANSFERS
+      *---------------------------------------------------------------
+      *
+     C     $UP390        BEGSR
+      *
+     C     key03         CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *ON                                          IF NEW
+     C                   EXSR      $CACD
+     C                   Z-ADD     0             CGCGQT
+     C                   Z-ADD     WKHD          CGCGHD
+     C                   Z-ADD     WKLB          CGCGLB
+     C                   Z-ADD     0             CGCRLB
+     C                   Z-ADD     0             CGCGAM
+     C                   z-add     0             cgcdhd
+     C                   z-add     0             cgcdlb
+     C                   z-add     0             cgydhd
+     C                   z-add     0             cgydlb
+     C                   Z-ADD     WKSHHD        CGSHHD
+     C                   Z-ADD     WKSHLB        CGSHLB
+     C                   Z-ADD     WKRCHD        CGRCHD
+     C                   Z-ADD     WKRCLB        CGRCLB
+     C                   Z-ADD     WKDOHD        CGDOHD
+     C                   Z-ADD     WKDOLB        CGDOLB
+     C                   WRITE     CGREC
+     C                   ELSE
+      *
+      * MODIFY AN EXISTING RECORD
+      *
+     C                   ADD       WKHD          CGCGHD
+     C                   ADD       WKLB          CGCGLB
+     C                   ADD       WKSHHD        CGSHHD
+     C                   ADD       WKSHLB        CGSHLB
+     C                   ADD       WKRCHD        CGRCHD
+     C                   ADD       WKRCLB        CGRCLB
+     C                   ADD       WKDOHD        CGDOHD
+     C                   ADD       WKDOLB        CGDOLB
+      *
+     C                   UPDATE    CGREC
+     C                   ENDIF                                                  IF NEW
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $TRANI - PROCESS TRANSFERS FOR DESTINATION GROUPS
+      *---------------------------------------------------------------
+      *
+     C     $TRANI        BEGSR
+      *
+      * ACCUMULATE QUALITY AND REJECT POUNDS TRANSFERRED IN FOR
+      * LATER WEIGHT GAIN CALCULATION.
+      *
+     C                   ADD       MDQLLB        WKILB
+     C                   ADD       MDRJLB        WKILB
+      *
+      *----------------------------------------------------
+      * TRANSFERRED IN
+      *----------------------------------------------------
+      *
+     C     MDQLLB        IFNE      0                                            IF RECEIVED
+     C     MDQLHD        ORNE      0
+     C     MDRJLB        ORNE      0
+     C     MDRJHD        ORNE      0
+      *
+     C                   Z-ADD     MDQLLB        WKLB
+     C                   ADD       MDRJLB        WKLB
+     C                   Z-ADD     MDQLHD        WKHD
+     C                   ADD       MDRJHD        WKHD
+      * SHIPPED
+     C                   Z-ADD     MDSHLB        WKSHLB
+     C                   Z-ADD     MDSHHD        WKSHHD
+      * RECEIVED
+     C                   Z-ADD     MDQLLB        WKRCLB
+     C                   ADD       MDRJLB        WKRCLB
+     C                   Z-ADD     MDQLHD        WKRCHD
+     C                   ADD       MDRJHD        WKRCHD
+      * DEAD-ON-ARRIVAL
+     C                   Z-ADD     MDDOLB        WKDOLB
+     C                   Z-ADD     MDDOHD        WKDOHD
+      *
+     C                   MOVEL     'TRANI'       WKRPCD
+     C                   EXSR      $UP390
+      *
+     C     MHORPP        IFEQ      MHDNPP                                       IF SAME
+     C                   MOVEL     'TRISP'       WKRPCD
+     C                   ELSE
+     C                   MOVEL     'TRIDP'       WKRPCD
+     C                   ENDIF                                                  IF SAME
+     C                   EXSR      $UP390
+     C                   ENDIF                                                  IF RECEIVED
+      *
+      * CLEAR THE WORKFIELDS HOLDING SHIPPED/RECEIVED/DOA
+      * VALUES. THEY ARE NOT WRITTEN TO ANY REMAINING
+      * TRANSFER REPORT CODES.
+      *
+     C                   Z-ADD     0             WKSHHD
+     C                   Z-ADD     0             WKRCHD
+     C                   Z-ADD     0             WKDOHD
+     C                   Z-ADD     0             WKSHLB
+     C                   Z-ADD     0             WKRCLB
+     C                   Z-ADD     0             WKDOLB
+      *
+      *----------------------------------------------------
+      * REJECT IN
+      *----------------------------------------------------
+      *
+     C     MDRJLB        IFNE      0                                            IF REJECT
+     C     MDRJHD        ORNE      0
+     C                   Z-ADD     MDRJLB        WKLB
+     C                   Z-ADD     MDRJHD        WKHD
+     C                   MOVEL     'REJI '       WKRPCD
+     C                   EXSR      $UP390
+      *
+     C     MHORPP        IFEQ      MHDNPP                                       IF SAME
+     C                   MOVEL     'RJISP'       WKRPCD
+     C                   ELSE
+     C                   MOVEL     'RJIDP'       WKRPCD
+     C                   ENDIF                                                  IF SAME
+     C                   EXSR      $UP390
+     C                   ENDIF                                                  IF REJECT
+      *
+      *----------------------------------------------------
+      * QUALITY IN
+      *----------------------------------------------------
+     C     MDQLLB        IFNE      0                                            IF QUALITY
+     C     MDQLHD        ORNE      0
+     C                   Z-ADD     MDQLLB        WKLB
+     C                   Z-ADD     MDQLHD        WKHD
+     C                   MOVEL     'QUALI'       WKRPCD
+     C                   EXSR      $UP390
+      *
+     C     MHORPP        IFEQ      MHDNPP                                       IF SAME
+     C                   MOVEL     'QLISP'       WKRPCD
+     C                   ELSE
+     C                   MOVEL     'QLIDP'       WKRPCD
+     C                   ENDIF                                                  IF SAME
+     C                   EXSR      $UP390
+     C                   ENDIF                                                  IF QUALITY
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $TRANO - PROCESS TRANSFERS FOR ORIGIN GROUPS
+      *---------------------------------------------------------------
+      *
+     C     $TRANO        BEGSR
+      *
+      * ACCUMULATE QUALITY/REJECT/DOA POUNDS FOR LATER WEIGHT GAIN CALCULATION.
+      *
+     C                   ADD       MDQLLB        WKOLB
+     C                   ADD       MDRJLB        WKOLB
+     C                   ADD       MDDOLB        WKOLB
+      *
+      * ACCUMULATE THE TOTAL QUALITY/REJECT HEAD AND POUNDS FOR THE
+      * COST OF THE GROUP.
+      *
+     C                   ADD       MDQLLB        COSLB
+     C                   ADD       MDRJLB        COSLB
+     C                   ADD       MDQLHD        COSHD
+     C                   ADD       MDRJHD        COSHD
+      *
+      *-----------------------------------------------------------
+      * ACCUMULATE DEAD-ON-ARRIVAL VALUES AT THE DESTINATION GROUP
+      *-----------------------------------------------------------
+      * (NOTE: THE REPORT CODE FOR MORTALITY FOR THE ORIGIN GROUP
+      * WILL BE UPDATED WITH THESE ACCUMULATED VALUES AFTER ALL THE
+      * TRANSFERS FOR A GROUP ARE PROCESSED.)
+      *
+     C     MDDOLB        IFNE      0                                            IF DOA
+     C     MDDOHD        ORNE      0
+     C                   ADD       MDDOLB        WKDLB
+     C                   ADD       MDDOHD        WKDHD
+     C                   ENDIF                                                  IF DOA
+      *
+      *----------------------------------------------------
+      * TRANSFER OUT
+      *----------------------------------------------------
+      * NOTE: THE USERS WANT 'TRANSFER OUT' TO OMIT DOA HEAD.
+      *
+     C     MDQLHD        IFNE      0
+     C     MDRJHD        ORNE      0
+     C                   Z-ADD     MDQLLB        WKLB
+     C                   ADD       MDRJLB        WKLB
+     C                   Z-ADD     MDQLHD        WKHD
+     C                   ADD       MDRJHD        WKHD
+      * SHIPPED
+     C                   Z-ADD     MDSHLB        WKSHLB
+     C                   Z-ADD     MDSHHD        WKSHHD
+      * RECEIVED
+     C                   Z-ADD     MDQLLB        WKRCLB
+     C                   ADD       MDRJLB        WKRCLB
+     C                   Z-ADD     MDQLHD        WKRCHD
+     C                   ADD       MDRJHD        WKRCHD
+      * DEAD-ON-ARRIVAL
+     C                   Z-ADD     MDDOLB        WKDOLB
+     C                   Z-ADD     MDDOHD        WKDOHD
+      *
+     C                   MOVEL     'TRANO'       WKRPCD
+     C                   EXSR      $UP390
+      *
+     C     MHORPP        IFEQ      MHDNPP                                       IF SAME
+     C                   MOVEL     'TROSP'       WKRPCD
+     C                   ELSE
+     C                   MOVEL     'TRODP'       WKRPCD
+     C                   ENDIF                                                  IF SAME
+     C                   EXSR      $UP390
+     C                   ENDIF                                                  IF SHIPPED
+      *
+      * CLEAR THE WORKFIELDS HOLDING SHIPPED/RECEIVED/DOA
+      * VALUES. THEY ARE NOT WRITTEN TO ANY REMAINING
+      * TRANSFER REPORT CODES.
+      *
+     C                   Z-ADD     0             WKSHHD
+     C                   Z-ADD     0             WKRCHD
+     C                   Z-ADD     0             WKDOHD
+     C                   Z-ADD     0             WKSHLB
+     C                   Z-ADD     0             WKRCLB
+     C                   Z-ADD     0             WKDOLB
+      *
+      *----------------------------------------------------
+      * REJECT OUT
+      *----------------------------------------------------
+      *
+     C     MDRJLB        IFNE      0                                            IF REJ OUT
+     C     MDRJHD        ORNE      0
+     C                   Z-ADD     MDRJLB        WKLB
+     C                   Z-ADD     MDRJHD        WKHD
+     C                   MOVEL     'REJO '       WKRPCD
+     C                   EXSR      $UP390
+      *
+     C     MHORPP        IFEQ      MHDNPP                                       IF SAME
+     C                   MOVEL     'RJOSP'       WKRPCD
+     C                   ELSE
+     C                   MOVEL     'RJODP'       WKRPCD
+     C                   ENDIF                                                  IF SAME
+     C                   EXSR      $UP390
+     C                   ENDIF                                                  IF REJ OUT
+      *
+      *----------------------------------------------------
+      * QUALITY
+      *----------------------------------------------------
+     C     MDQLLB        IFNE      0                                            IF QUAL OUT
+     C     MDQLHD        ORNE      0
+     C                   Z-ADD     MDQLLB        WKLB
+     C                   Z-ADD     MDQLHD        WKHD
+     C                   MOVEL     'QUALO'       WKRPCD
+     C                   EXSR      $UP390
+      *
+     C     MHORPP        IFEQ      MHDNPP                                       IF SAME
+     C                   MOVEL     'QLOSP'       WKRPCD
+     C                   ELSE
+     C                   MOVEL     'QLODP'       WKRPCD
+     C                   ENDIF                                                  IF SAME
+     C                   EXSR      $UP390
+     C                   ENDIF                                                  IF QUAL OUT
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * PROCESS ALL SALES MOVEMENTS FOR A GROUP
+      *---------------------------------------------------------------
+      *
+      * THIS SUBROUTINE PROCESSES CHECK DETAIL RECORDS FOR A MOVEMENT
+      * AND, ALSO, ALL CHECK ADJUSTMENT RECORDS ASSOCIATED WITH EACH
+      * CHECK DETAIL RECORD.
+      *
+     C     $SALE         BEGSR
+      *
+      * FIRST, PROCESS ALL SALE MOVEMENT DETAIL RECORDS TO ACCUMULATE
+      * TOTAL SHIPPED/LIVE/DOA VALUES FOR LATER PROCESSING.
+      *
+     C                   EXSR      $SALEM
+      *
+      *---------------------------------------------------------------
+      * NOW, PROCESS EACH CHECK DETAIL RECORD FOR THIS GROUP
+      *---------------------------------------------------------------
+      *
+     C     HGHGSN        SETLL     HSL064I
+      *
+     C     *IN97         DOUEQ     *ON                                          DO CHECK DET
+     C     HGHGSN        READE     HSL064I                                97
+     C     *IN97         IFEQ      *OFF                                         IF NOT EOF
+      *
+      * RETRIEVE SALES HEADER TO GET THE TYPE OF SALE
+      *
+     C     CDMVSN        CHAIN     HSP084                             92
+     C     *IN92         IFEQ      *OFF                                         IF SALES HDR
+      *
+      * USING THE 'TYPE OF SALE' FROM THE SALES HEADER AND
+      * THE 'TYPE OF PAYMENT' FROM THE CHECK DETAIL LINE,
+      * RETRIEVE THE 'REPORT CODE' FOR THIS CHECK DETAIL RECORD.
+      *
+     C     key02         CHAIN     HSP079                             92
+     C     *IN92         IFEQ      *OFF                                         IF RPT CODE
+     C                   MOVEL     SRRPCD        WKRPCD
+      *
+      * UPDATE THE WORKFILE RECORD FOR THIS GROUP/REPORT CODE
+      * WITH THE CHECK INFO
+      *
+     C     key03         CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *ON                                          IF NEW
+     C                   EXSR      $CACD
+     C                   Z-ADD     CDLVHD        CGCGHD
+     C                   Z-ADD     CDCRLB        CGCRLB
+     C                   Z-ADD     CDLVLB        CGCGLB
+     C                   z-add     cdcdhd        cgcdhd
+     C                   z-add     cdcdlb        cgcdlb
+     C                   z-add     cdydhd        cgydhd
+     C                   z-add     cdydlb        cgydlb
+     C                   z-add     cddohd        cgdohd
+     C                   z-add     cddolb        cgdolb
+     C                   Z-ADD     0             CGCGQT
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+      *
+      * Accumulate dollars conditionally, use:
+      * 1) Net Amount for Cull Sales
+      * 2) Base Amount for Paid Carcass
+      * 3) Gross Amount for Paid Live
+      *
+     C                   select
+     C                   when      shstcd = 'CULLS'
+     C                   exsr      $cullnet
+     C                   z-add     wkcullam      cgcgam
+      *
+     C                   when      cdtpcd = 'C'
+     C                   z-add     cdbaam        cgcgam
+     C                   other
+      *
+     C                   z-add     cdgram        cgcgam
+     C                   endsl
+      *
+     C                   WRITE     CGREC
+     C                   ELSE
+      *
+      * MODIFY AN EXISTING RECORD
+      *
+     C                   ADD       CDLVHD        CGCGHD
+     C                   ADD       CDLVLB        CGCGLB
+     C                   ADD       CDCRLB        CGCRLB
+     C                   add       cdcdhd        cgcdhd
+     C                   add       cdcdlb        cgcdlb
+     C                   add       cdydhd        cgydhd
+     C                   add       cdydlb        cgydlb
+     C                   add       cddohd        cgdohd
+     C                   add       cddolb        cgdolb
+      *
+      * Accumulate dollars conditionally, use:
+      * 1) Net Amount for Cull Sales
+      * 2) Base Amount for Paid Carcass
+      * 3) Gross Amount for Paid Live
+      *
+     C                   select
+     C                   when      shstcd = 'CULLS'
+     C                   exsr      $cullnet
+     C                   add       wkcullam      cgcgam
+      *
+     C                   when      cdtpcd = 'C'
+     C                   add       cdbaam        cgcgam
+     C                   other
+      *
+     C                   add       cdgram        cgcgam
+     C                   endsl
+      *
+     C                   UPDATE    CGREC
+     C                   ENDIF                                                  IF NEW
+      *
+      * RETRIEVE THE FLAG INDICATING WHETHER THIS IS A SALES
+      * REVENUE OR A REDUCTION OF SALES COST FROM THE SALES TYPE FILE.
+      * THEN, ACCUMULATE POUNDS AND DOLLARS ASSOCIATED WITH SALES
+      * FOR THE TOTAL COST FOR THE GROUP
+      *
+     C     SHSTCD        CHAIN     HSP066                             92
+     C     *IN92         IFEQ      *OFF                                         IF TYPE OK
+      *
+      * WHERE THIS SALES TYPE IS CONSIDERED A 'SALES REVENUE'
+      * (FEEDER PIG AND MARKET HOG SALES)
+      *
+     C                   SELECT
+     C     STSCFL        WHENEQ    'S'
+     C                   ADD       CDLVHD        COSHD
+     C                   ADD       CDLVLB        COSLB
+     C                   ADD       CDCRLB        COSCLB
+      *
+      * WHERE THIS SALES TYPE IS CONSIDERED A REDUCTION IN THE
+      * COST OF SALES (CULL SALES)
+      *
+     C     STSCFL        WHENEQ    'C'
+     C                   SUB       wkcullam      COSAM
+     C                   ENDSL
+     C                   ENDIF                                                  IF TYPE OK
+      *
+      * NOW, ACCUMULATE VALUES FOR CALCULATING PERFORMANCE
+      * MEASUREMENTS FOR THE GROUP--ONLY FOR CHECK DETAIL RECORDS
+      * THAT WERE PAID AS 'CARCASS' AND HAVE CARCASS POUNDS!
+      *
+     C     CDTPCD        IFEQ      'C'
+     C     CDCRLB        ANDNE     0
+     C                   EXSR      $CARC
+     C                   ENDIF
+      *
+      * Now, if this is NOT a Cull sale,
+      * retrieve and process all Check Adjustment records that may exist
+      * for the Check Detail record just processed.
+      *
+     C                   if        shstcd <> 'CULLS'
+     C                   EXSR      $chkadj
+     C                   endif
+      *
+     C                   ENDIF                                                  IF RPT CODE
+     C                   ENDIF                                                  IF SALES HDR
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO CHECK DET
+      *
+      * NOW, EXECUTE THE SUBROUTINE TO UPDATE EXISTING SALES
+      * REPORT CODES WITH VALUES ACCUMULATED FOR THE GROUP
+      *
+     C                   EXSR      $SALEU
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * Arrive at Net Amount for a Cull Sale Check Detail line
+      *---------------------------------------------------------------
+      *
+     C     $cullnet      begsr
+      *
+      * Initialize the workfield with the 'gross amount' value from the
+      * check detail line.
+      *
+     C                   z-add     cdgram        wkcullam
+      *
+      * Now, retrieve all the adjustments for this detail line so that
+      * you can get to the 'net' amount for the check detail line.
+      * (NOTE: Deductions/additions are carried in the Adjustment file
+      * with the appropriate +/- sign. So, just 'add' them to the 'gross'.)
+      *
+     C     key04         setll     hsl065c
+     C                   dou       *in92 = *on                                  Do ded/add
+     C     key04         reade     hsl065c                                92
+     C                   if        *in92 = *off and p1cjcjfl = 'D'
+     C                   add       p1cjcjam      wkcullam
+     C                   endif
+     C                   enddo                                                  Do ded/add
+      *
+      * Now, add this 'net' amount into the closed group workfile field.
+      *
+     C                   add       wkcullam      cgcgam
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $SALEU - UPDATE EXISTING SALE REPORT CODES FOR A GROUP
+      *---------------------------------------------------------------
+      *
+      * UPDATE EXISTING SALES REPORT CODES WITH VALUES ACCUMULATED FOR
+      * THE GROUP FROM THE PROCESSING OF THE SALE MOVEMENT DETAIL
+      * RECORDS.
+      *
+     C     $SALEU        BEGSR
+      *
+      * IF THERE WERE ANY DOA HEAD/POUNDS, UPDATE THE
+      * 'DEAD' REPORT CODE.
+      *
+     C     WKDHD         IFNE      0
+     C     WKDLB         ORNE      0
+     C                   Z-ADD     WKDHD         WKHD
+     C                   Z-ADD     WKDLB         WKLB
+     C                   MOVEL     'DEAD '       WKRPCD
+     C                   EXSR      $UP390
+     C                   ENDIF
+      *
+      * IF THERE WERE ANY FEEDER PIG SALE HEAD/POUNDS, UPDATE THE
+      * REPORT CODE FOR FEEDER PIG SALES.
+      *
+     C     WFSHHD        IFNE      0
+     C     WFSHLB        ORNE      0
+     C     WFRCHD        ORNE      0
+     C     WFRCLB        ORNE      0
+     C     WFDOHD        ORNE      0
+     C     WFDOLB        ORNE      0
+     C                   MOVEL     'FPS  '       WKRPCD
+     C                   Z-ADD     0             WKHD
+     C                   Z-ADD     0             WKLB
+     C                   Z-ADD     WFSHHD        WKSHHD
+     C                   Z-ADD     WFSHLB        WKSHLB
+     C                   Z-ADD     WFRCHD        WKRCHD
+     C                   Z-ADD     WFRCLB        WKRCLB
+     C                   Z-ADD     WFDOHD        WKDOHD
+     C                   Z-ADD     WFDOLB        WKDOLB
+     C                   EXSR      $UP390
+     C                   ENDIF
+      *
+      * IF THERE WERE ANY CULL SALE HEAD/POUNDS, UPDATE THE
+      * REPORT CODE FOR CULL SALES.
+      *
+     C     WCSHHD        IFNE      0
+     C     WCSHLB        ORNE      0
+     C     WCRCHD        ORNE      0
+     C     WCRCLB        ORNE      0
+     C     WCDOHD        ORNE      0
+     C     WCDOLB        ORNE      0
+     C                   MOVEL     'CULLS'       WKRPCD
+     C                   Z-ADD     0             WKHD
+     C                   Z-ADD     0             WKLB
+     C                   Z-ADD     WCSHHD        WKSHHD
+     C                   Z-ADD     WCSHLB        WKSHLB
+     C                   Z-ADD     WCRCHD        WKRCHD
+     C                   Z-ADD     WCRCLB        WKRCLB
+     C                   Z-ADD     WCDOHD        WKDOHD
+     C                   Z-ADD     WCDOLB        WKDOLB
+     C                   EXSR      $UP390
+     C                   ENDIF
+      *
+      * IF THERE WERE ANY MARKET HOG SALE HEAD/POUNDS, WRITE A NEW
+      * REPORT CODE FOR MARKET HOG SALES.  THE VALUES FOR THIS RECORD
+      * WILL BE THE SUMMATION OF THE VALUES FROM THE "BTCAR" AND
+      * "BTLIV" REPORT CODES WITH THE ACCUMULATED SHIPPED/RECEIVED
+      * VALUES FOR MARKET SALES.
+      *
+     C     WMSHHD        IFNE      0                                            IF MARKET
+     C     WMSHLB        ORNE      0
+     C     WMRCHD        ORNE      0
+     C     WMRCLB        ORNE      0
+      *
+      * CLEAR THE ACCUMULATORS THAT WILL HOLD THE VALUES FROM THE
+      * 'BTLIV' AND 'BTCAR' REPORT CODE RECORDS.
+      *
+     C                   Z-ADD     0             WKCGAM
+     C                   Z-ADD     0             WKCGHD
+     C                   Z-ADD     0             WKCGLB
+     C                   Z-ADD     0             WKCLB
+     C                   Z-ADD     0             WKCGQT
+     C                   z-add     0             wkcdhd
+     C                   z-add     0             wkcdlb
+     C                   z-add     0             wkydhd
+     C                   z-add     0             wkydlb
+     C                   z-add     0             wkmrkdohd
+     C                   z-add     0             wkmrkdolb
+      *
+     C                   MOVEL     'BTLIV'       WKRPCD
+     C     key03         CHAIN(N)  HSP390                             92
+     C     *IN92         IFEQ      *OFF                                         IF HIT
+     C                   ADD       CGCGAM        WKDGAM
+     C                   ADD       CGCGHD        WKDGHD
+     C                   ADD       CGCGLB        WKDGLB
+     C                   ADD       CGCRLB        WKCLB
+     C                   ADD       CGCGQT        WKDGQT
+     C                   add       cgcdhd        wkcdhd
+     C                   add       cgcdlb        wkcdlb
+     C                   add       cgydhd        wkydhd
+     C                   add       cgydlb        wkydlb
+     C                   add       cgdohd        wkmrkdohd
+     C                   add       cgdolb        wkmrkdolb
+     C                   ENDIF                                                  IF HIT
+      *
+     C                   MOVEL     'BTCAR'       WKRPCD
+     C     key03         CHAIN(N)  HSP390                             92
+     C     *IN92         IFEQ      *OFF                                         IF FOUND
+     C                   ADD       CGCGAM        WKDGAM
+     C                   ADD       CGCGHD        WKDGHD
+     C                   ADD       CGCGLB        WKDGLB
+     C                   ADD       CGCRLB        WKCLB
+     C                   ADD       CGCGQT        WKDGQT
+     C                   add       cgcdhd        wkcdhd
+     C                   add       cgcdlb        wkcdlb
+     C                   add       cgydhd        wkydhd
+     C                   add       cgydlb        wkydlb
+     C                   add       cgdohd        wkmrkdohd
+     C                   add       cgdolb        wkmrkdolb
+     C                   ENDIF                                                  IF FOUND
+      *
+     C                   MOVEL     'MRKTS'       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     WKDGQT        CGCGQT
+     C                   Z-ADD     WKDGHD        CGCGHD
+     C                   Z-ADD     WKDGLB        CGCGLB
+     C                   Z-ADD     WKCLB         CGCRLB
+     C                   Z-ADD     WKDGAM        CGCGAM
+     C                   z-add     wkcdhd        cgcdhd
+     C                   z-add     wkcdlb        cgcdlb
+     C                   z-add     wkydhd        cgydhd
+     C                   z-add     wkydlb        cgydlb
+     C                   z-add     wkmrkdohd     cgdohd
+     C                   z-add     wkmrkdolb     cgdolb
+      *
+     C                   Z-ADD     WMSHHD        CGSHHD
+     C                   Z-ADD     WMSHLB        CGSHLB
+     C                   Z-ADD     WMRCHD        CGRCHD
+     C                   Z-ADD     WMRCLB        CGRCLB
+     C                   WRITE     CGREC
+     C                   ENDIF                                                  IF MARKET
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $SALEM - PROCESS ALL SALE MOVEMENT DETAIL RECORDS FOR A GROUP
+      *---------------------------------------------------------------
+      *
+     C     $SALEM        BEGSR
+      *
+     C                   Z-ADD     0             WKDHD
+     C                   Z-ADD     0             WKDLB
+      *
+     C     HGHGSN        SETLL     HSL085B
+      *
+     C     *IN97         DOUEQ     *ON                                          DO SALES DTL
+     C     HGHGSN        READE     HSL085B                                97
+     C     *IN97         IFEQ      *OFF                                         IF NOT EOF
+      *
+      * RETRIEVE THE SALE TYPE FOR EACH MOVEMENT FROM THE
+      * SALES HEADER AND ACCUMULATE VALUES ACCORDINGLY.
+      *
+     C     SGMVSN        CHAIN     HSP084                             92
+     C     *IN92         IFEQ      *OFF                                         IF SALES HDR
+      *
+      * ALWAYS ACCUMULATE LIVE/DOA VALUES FOR LATER WEIGHT GAIN CALC.
+      *
+     C                   ADD       SGLVLB        WKSLB
+     C                   ADD       SGDOLB        WKSLB
+      *
+      * ACCUMULATE DOA HEAD AND POUNDS FOR LATER UPDATING OF
+      * THE MORTALITY FOR A GROUP.
+      *
+     C                   ADD       SGDOHD        WKDHD
+     C                   ADD       SGDOLB        WKDLB
+      *
+      * FEEDER PIG SALE
+     C                   SELECT
+     C     SHSTCD        WHENEQ    'FPS  '
+     C                   ADD       SGSHLB        WFSHLB
+     C                   ADD       SGLVLB        WFRCLB
+     C                   ADD       SGDOLB        WFDOLB
+     C                   ADD       SGSHHD        WFSHHD
+     C                   ADD       SGLVHD        WFRCHD
+     C                   ADD       SGDOHD        WFDOHD
+      *
+      * CULL SALE
+     C     SHSTCD        WHENEQ    'CULLS'
+     C                   ADD       SGSHLB        WCSHLB
+     C                   ADD       SGLVLB        WCRCLB
+     C                   ADD       SGDOLB        WCDOLB
+     C                   ADD       SGSHHD        WCSHHD
+     C                   ADD       SGLVHD        WCRCHD
+     C                   ADD       SGDOHD        WCDOHD
+      *
+      * MARKET HOG SALE
+      *
+     C     SHSTCD        WHENEQ    'MRKTS'
+     C                   ADD       SGSHLB        WMSHLB
+     C                   ADD       SGLVLB        WMRCLB
+     C                   ADD       SGSHHD        WMSHHD
+     C                   ADD       SGLVHD        WMRCHD
+     C                   ENDSL
+      *
+     C                   ENDIF                                                  IF SALES HDR
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO SALES DTL
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $CARC - ACCUMULATE PERFORMANCE VALUES FOR CARCASS PAYMENTS
+      *---------------------------------------------------------------
+      *
+      * THIS SUBROUTINE ACCUMULATE VALUES THAT WILL BE USED LATER IN
+      * CALCULATING GROUP PERFORMANCE.
+      *
+     C     $CARC         BEGSR
+      *
+      * BACKFAT INCHES
+      *
+     C     CDBFAM        IFNE      0
+     C     CDBFAM        MULT      CDCRLB        WKB1
+     C                   ADD       WKB1          WKB2
+     C                   ADD       CDCRLB        WKBCLB
+     C                   ADD       CDLVLB        WKBLLB
+     C                   ADD       CDLVHD        WKBHD
+     C                   add       cdcdhd        wkbcdhd
+     C                   add       cdcdlb        wkbcdlb
+     C                   add       cdydhd        wkbydhd
+     C                   add       cdydlb        wkbydlb
+     C                   ENDIF
+      *
+      * CARCASS YIELD
+     C                   ADD       CDCRLB        WKCRLB
+     C                   ADD       CDLVLB        WKLVLB
+     C                   ADD       CDLVHD        WKCYHD
+     C                   add       cdcdhd        wkccdhd
+     C                   add       cdcdlb        wkccdlb
+     C                   add       cdydhd        wkcydhd
+     C                   add       cdydlb        wkcydlb
+      *
+      * LEAN PERCENT
+      *
+     C     CDLNPR        IFNE      0
+     C     CDLNPR        MULT      CDCRLB        WKL1
+     C                   ADD       WKL1          WKL2
+     C                   ADD       CDCRLB        WKLCLB
+     C                   ADD       CDLVLB        WKLLLB
+     C                   ADD       CDLVHD        WKLHD
+     C                   add       cdcdhd        wklcdhd
+     C                   add       cdcdlb        wklcdlb
+     C                   add       cdydhd        wklydhd
+     C                   add       cdydlb        wklydlb
+     C                   ENDIF
+      *
+      * LOIN EYE DEPTH
+      *
+     C     CDLEAM        IFNE      0
+     C     CDLEAM        MULT      CDCRLB        WKE1
+     C                   ADD       WKE1          WKE2
+     C                   ADD       CDCRLB        WKECLB
+     C                   ADD       CDLVLB        WKELLB
+     C                   ADD       CDLVHD        WKEHD
+     C                   add       cdcdhd        wkecdhd
+     C                   add       cdcdlb        wkecdlb
+     C                   add       cdydhd        wkeydhd
+     C                   add       cdydlb        wkeydlb
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * PROCESS ALL CHECK ADJUSTMENT RECORDS
+      *---------------------------------------------------------------
+      *
+      * THIS SUBROUTINE PROCESSES ALL CHECK ADJUSTMENT RECORDS FOR EACH
+      * CHECK DETAIL RECORD.  CHECK ADJUSTMENTS WILL BE EITHER:
+      *     PREMIUMS/DISCOUNTS OR
+      *     DEDUCTION/ADDITIONS
+      *
+     C     $chkadj       BEGSR
+      *
+     C     key04         SETLL     HSP065
+     C                   SETOFF                                       75
+      *
+     C     *IN75         DOUEQ     *ON                                          DO CHK ADJ
+     C     key04         READE     HSP065                                 75
+     C     *IN75         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C                   MOVE      *BLANK        WKRPCD
+      *
+      * PREMIUMS/DISCOUNTS
+     C                   SELECT
+     C     CJCJFL        WHENEQ    'P'
+     C     CJCJCD        CHAIN     HSP045                             92
+     C     *IN92         IFEQ      *OFF
+     C                   MOVEL     PDRPCD        WKRPCD
+     C                   ENDIF
+      *
+      * ONLY PROCESS DEDUCTIONS THAT HAVE A 'REPORT FLAG' OF YES
+      *
+     C     CJCJFL        WHENEQ    'D'
+     C     CJCJCD        CHAIN     HSP044                             92
+     C     *IN92         IFEQ      *OFF
+     C     DARPFL        ANDEQ     YES
+     C                   MOVEL     DARPCD        WKRPCD
+     C                   ELSE
+     C                   MOVE      *BLANK        WKRPCD
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C     WKRPCD        IFNE      *BLANK                                       IF GO AHEAD
+      *
+     C     key03         CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *ON                                          IF NEW
+     C                   EXSR      $CACD
+     C                   Z-ADD     CDLVHD        CGCGHD
+     C                   Z-ADD     CJCJAM        CGCGAM
+     C                   Z-ADD     CDCRLB        CGCRLB
+     C                   Z-ADD     CDLVLB        CGCGLB
+     C                   z-add     cdcdhd        cgcdhd
+     C                   z-add     cdcdlb        cgcdlb
+     C                   z-add     cdydhd        cgydhd
+     C                   z-add     cdydlb        cgydlb
+     C                   Z-ADD     0             CGCGQT
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   WRITE     CGREC
+     C                   ELSE
+      *
+      * MODIFY AN EXISTING RECORD
+      *
+     C                   ADD       CDLVHD        CGCGHD
+     C                   ADD       CJCJAM        CGCGAM
+     C                   ADD       CDCRLB        CGCRLB
+     C                   ADD       CDLVLB        CGCGLB
+     C                   add       cdcdhd        cgcdhd
+     C                   add       cdcdlb        cgcdlb
+     C                   add       cdydhd        cgydhd
+     C                   add       cdydlb        cgydlb
+      *
+     C                   UPDATE    CGREC
+     C                   ENDIF                                                  IF NEW
+     C                   ENDIF                                                  IF GO AHEAD
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO CHK ADJ
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $COST - WRITE THE COST RECORD FOR THE GROUP
+      *---------------------------------------------------------------
+      *
+     C     $COST         BEGSR
+      *
+     C     COSAM         IFNE      0
+     C     COSHD         ORNE      0
+     C     COSLB         ORNE      0
+     C     COSCLB        ORNE      0
+     C                   MOVEL     'COS  '       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     COSAM         CGCGAM
+     C                   Z-ADD     COSHD         CGCGHD
+     C                   Z-ADD     COSLB         CGCGLB
+     C                   Z-ADD     COSCLB        CGCRLB
+     C                   Z-ADD     0             CGCGQT
+     C                   z-add     0             cgcdhd
+     C                   z-add     0             cgcdlb
+     C                   z-add     0             cgydhd
+     C                   z-add     0             cgydlb
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   WRITE     CGREC
+     C                   ENDIF
+      *
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGCGHD
+     C                   Z-ADD     0             CGCGLB
+     C                   Z-ADD     0             CGCRLB
+     C                   Z-ADD     0             CGCGQT
+     C                   z-add     0             cgcdhd
+     C                   z-add     0             cgcdlb
+     C                   z-add     0             cgydhd
+     C                   z-add     0             cgydlb
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $PDAY - CALCULATE PIG DAYS FOR THE GROUP
+      *---------------------------------------------------------------
+      *
+     C     $PDAY         BEGSR
+      *
+     C                   Z-ADD     0             WKPDAY
+     C                   CALL      'HPPDAY'
+     C                   PARM                    HGHGSN
+     C                   PARM                    HGOPDT
+     C                   PARM                    HGDSDT
+     C                   PARM                    WKPDAY
+      *
+     C                   MOVEL     'PDAYS'       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     WKPDAY        CGCGQT
+     C                   Z-ADD     0             CGCGHD
+     C                   Z-ADD     0             CGCGLB
+     C                   Z-ADD     0             CGCRLB
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   z-add     0             cgcdhd
+     C                   z-add     0             cgcdlb
+     C                   z-add     0             cgydhd
+     C                   z-add     0             cgydlb
+     C                   WRITE     CGREC
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $WGAIN - CALCULATE WEIGHT GAIN FOR THE GROUP
+      *---------------------------------------------------------------
+      *
+     C     $WGAIN        BEGSR
+      *
+      * CALCULATE GAIN:
+      *   QUALITY/REJECT/DOA POUNDS RECEIVED AT DESTINATION ON TRANSFERS OUT
+      * + LIVE/DOA POUNDS RECEIVED AT CUSTOMER ON SALES
+      * - TRANSFER IN POUNDS
+      *
+     C                   ADD       WKOLB         WKSLB
+     C     WKSLB         SUB       WKILB         CGCGLB
+      *
+     C                   MOVEL     'WGAIN'       WKRPCD
+     C                   EXSR      $CACD
+     C                   Z-ADD     0             CGCGQT
+     C                   Z-ADD     0             CGCGHD
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGCRLB
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   z-add     0             cgcdhd
+     C                   z-add     0             cgcdlb
+     C                   z-add     0             cgydhd
+     C                   z-add     0             cgydlb
+     C                   WRITE     CGREC
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $PERF - CALCULATE VARIOUS PERFORMANCE VALUES
+      *---------------------------------------------------------------
+      *
+      * ALL OF THE PERFORMANCE CALCULATIONS ARE MADE USING CARCASS
+      * POUNDS--NOT LIVE POUNDS
+      *
+     C     $PERF         BEGSR
+      *
+      * BACKFAT INCHES
+      *
+     C                   MOVEL     'BFIN '       WKRPCD
+     C                   EXSR      $CACD
+      *
+     C     WKBCLB        IFNE      0
+     C     WKB2          DIV       WKBCLB        CGCGQT
+     C                   ELSE
+     C                   Z-ADD     0             CGCGQT
+     C                   ENDIF
+      *
+     C                   Z-ADD     WKBHD         CGCGHD
+     C                   Z-ADD     WKBLLB        CGCGLB                         LIVE LBS
+     C                   Z-ADD     WKBCLB        CGCRLB                         CARCASS LBS
+     C                   z-add     wkbcdhd       cgcdhd
+     C                   z-add     wkbcdlb       cgcdlb
+     C                   z-add     wkbydhd       cgydhd
+     C                   z-add     wkbydlb       cgydlb
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   WRITE     CGREC
+      *
+      * CARCASS YIELD
+     C                   MOVEL     'CYIEL'       WKRPCD
+     C                   EXSR      $CACD
+      *
+     C     WKLVLB        IFNE      0
+     C     WKCRLB        DIV       WKLVLB        WKCY1
+     C                   ELSE
+     C                   Z-ADD     0             WKCY1
+     C                   ENDIF
+      *
+     C     WKCY1         MULT      100           CGCGQT
+     C                   Z-ADD     WKCYHD        CGCGHD
+     C                   Z-ADD     WKCRLB        CGCRLB                         CARCASS LBS
+     C                   Z-ADD     WKLVLB        CGCGLB                         LIVE LBS
+     C                   z-add     wkccdhd       cgcdhd
+     C                   z-add     wkccdlb       cgcdlb
+     C                   z-add     wkcydhd       cgydhd
+     C                   z-add     wkcydlb       cgydlb
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   WRITE     CGREC
+      *
+      * LEAN PERCENT
+     C                   MOVEL     'LEAN '       WKRPCD
+     C                   EXSR      $CACD
+      *
+     C     WKLCLB        IFNE      0
+     C     WKL2          DIV       WKLCLB        CGCGQT
+     C                   ELSE
+     C                   Z-ADD     0             CGCGQT
+     C                   ENDIF
+      *
+     C                   Z-ADD     WKLHD         CGCGHD
+     C                   Z-ADD     WKLLLB        CGCGLB                         LIVE LBS
+     C                   Z-ADD     WKLCLB        CGCRLB                         CARCASS LBS
+     C                   z-add     wklcdhd       cgcdhd
+     C                   z-add     wklcdlb       cgcdlb
+     C                   z-add     wklydhd       cgydhd
+     C                   z-add     wklydlb       cgydlb
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   WRITE     CGREC
+      *
+      * LOIN EYE DEPTH
+     C                   MOVEL     'LEYE '       WKRPCD
+     C                   EXSR      $CACD
+      *
+     C     WKECLB        IFNE      0
+     C     WKE2          DIV       WKECLB        CGCGQT
+     C                   ELSE
+     C                   Z-ADD     0             CGCGQT
+     C                   ENDIF
+      *
+     C                   Z-ADD     WKEHD         CGCGHD
+     C                   Z-ADD     WKELLB        CGCGLB                         LIVE LBS
+     C                   Z-ADD     WKECLB        CGCRLB                         CARCASS LBS
+     C                   z-add     wkecdhd       cgcdhd
+     C                   z-add     wkecdlb       cgcdlb
+     C                   z-add     wkeydhd       cgydhd
+     C                   z-add     wkeydlb       cgydlb
+     C                   Z-ADD     0             CGCGAM
+     C                   Z-ADD     0             CGSHHD
+     C                   Z-ADD     0             CGSHLB
+     C                   Z-ADD     0             CGRCHD
+     C                   Z-ADD     0             CGRCLB
+     C                   Z-ADD     0             CGDOHD
+     C                   Z-ADD     0             CGDOLB
+     C                   WRITE     CGREC
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $CLEAR - CLEAR WORKFIELDS USED IN GROUP CALCULATIONS
+      *---------------------------------------------------------------
+      *
+     C     $CLEAR        BEGSR
+      *
+      * CLEAR WORKFIELDS FOR TOTAL COST
+      *
+     C                   Z-ADD     0             COSAM
+     C                   Z-ADD     0             COSLB
+     C                   Z-ADD     0             COSCLB
+     C                   Z-ADD     0             COSHD
+      *
+      * CLEAR WORKFIELDS FOR BACKFAT CALCULATIONS
+      *
+     C                   Z-ADD     0             WKB1
+     C                   Z-ADD     0             WKB2
+     C                   Z-ADD     0             WKBLLB
+     C                   Z-ADD     0             WKBCLB
+     C                   Z-ADD     0             WKBHD
+     C                   z-add     0             wkbcdhd
+     C                   z-add     0             wkbcdlb
+     C                   z-add     0             wkbydhd
+     C                   z-add     0             wkbydlb
+      *
+      * CLEAR WORKFIELDS FOR LEAN PERCENT CALCULATIONS
+      *
+     C                   Z-ADD     0             WKL1
+     C                   Z-ADD     0             WKL2
+     C                   Z-ADD     0             WKLLLB
+     C                   Z-ADD     0             WKLCLB
+     C                   Z-ADD     0             WKLHD
+     C                   z-add     0             wklcdhd
+     C                   z-add     0             wklcdlb
+     C                   z-add     0             wklydhd
+     C                   z-add     0             wklydlb
+      *
+      * CLEAR WORKFIELDS FOR LOIN EYE CALCULATIONS
+      *
+     C                   Z-ADD     0             WKE1
+     C                   Z-ADD     0             WKE2
+     C                   Z-ADD     0             WKELLB
+     C                   Z-ADD     0             WKECLB
+     C                   Z-ADD     0             WKEHD
+     C                   z-add     0             wkecdhd
+     C                   z-add     0             wkecdlb
+     C                   z-add     0             wkeydhd
+     C                   z-add     0             wkeydlb
+      *
+      * CLEAR WORKFIELDS FOR CARCASS YIELD CALCULATIONS
+      *
+     C                   Z-ADD     0             WKCY1
+     C                   Z-ADD     0             WKCRLB
+     C                   Z-ADD     0             WKLVLB
+     C                   Z-ADD     0             WKCYHD
+     C                   z-add     0             wkccdhd
+     C                   z-add     0             wkccdlb
+     C                   z-add     0             wkcydhd
+     C                   z-add     0             wkcydlb
+      *
+      * CLEAR WORKFIELDS FOR WEIGHT GAIN
+      *
+     C                   Z-ADD     0             WKOLB
+     C                   Z-ADD     0             WKILB
+     C                   Z-ADD     0             WKSLB
+      *
+      * CLEAR GENERIC WORKFIELDS FOR ACCUMULATING HEAD/POUNDS
+      *
+     C                   Z-ADD     0             WKHD
+     C                   Z-ADD     0             WKLB
+      *
+      * CLEAR WORKFIELDS FOR SHIPPED/RECEIVED/DOA VALUES ON TRANSFERS
+      *
+     C                   Z-ADD     0             WKSHHD
+     C                   Z-ADD     0             WKRCHD
+     C                   Z-ADD     0             WKDOHD
+     C                   Z-ADD     0             WKSHLB
+     C                   Z-ADD     0             WKRCLB
+     C                   Z-ADD     0             WKDOLB
+      *
+      * CLEAR ACCUMULATORS FOR SHIPPED/RECEIVED/DOA VALUES ON CULL
+      * SALES
+     C                   Z-ADD     0             WCSHHD
+     C                   Z-ADD     0             WCRCHD
+     C                   Z-ADD     0             WCDOHD
+     C                   Z-ADD     0             WCSHLB
+     C                   Z-ADD     0             WCRCLB
+     C                   Z-ADD     0             WCDOLB
+      *
+      * CLEAR ACCUMULATORS FOR SHIPPED/RECEIVED/DOA VALUES ON FEEDER
+      * PIG SALES
+      *
+     C                   Z-ADD     0             WFSHHD
+     C                   Z-ADD     0             WFRCHD
+     C                   Z-ADD     0             WFDOHD
+     C                   Z-ADD     0             WFSHLB
+     C                   Z-ADD     0             WFRCLB
+     C                   Z-ADD     0             WFDOLB
+      *
+      * CLEAR ACCUMULATORS FOR SHIPPED/RECEIVED/DOA VALUES ON
+      * MARKET HOG SALES
+     C                   Z-ADD     0             WMSHHD
+     C                   Z-ADD     0             WMRCHD
+     C                   Z-ADD     0             WMSHLB
+     C                   Z-ADD     0             WMRCLB
+      *
+      * CLEAR ACCUMULATORS USED TO SUM VALUES ON CARCASS AND LIVE
+      * REPORT CODE RECORDS
+     C                   Z-ADD     0             WKCGAM
+     C                   Z-ADD     0             WKCGQT
+     C                   Z-ADD     0             WKCGHD
+     C                   Z-ADD     0             WKCGLB
+     C                   Z-ADD     0             WKCLB
+     C                   z-add     0             wkcdhd
+     C                   z-add     0             wkcdlb
+     C                   z-add     0             wkydhd
+     C                   z-add     0             wkydlb
+     C                   z-add     0             wkmrkdohd
+     C                   z-add     0             wkmrkdolb
+      *
+      * CLEAR ACCUMULATORS USED TO ACCUMULATE DOA VALUES ON TRANSFERS
+      * AND SALES
+     C                   Z-ADD     0             WKDHD
+     C                   Z-ADD     0             WKDLB
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * *INZSR - INITIALIZATION SUBROUTINE
+      *---------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      *
+     C     plist01       plist
+     C                   parm                    hghgsn
+     C                   parm                    zzcymd
+      * Head
+     C                   parm                    gpihd                          GROUP INV
+     C                   parm                    pinhd                          PIG IN
+     C                   parm                    tinhd                          TRSF IN
+     C                   parm                    tisphd                         SAME PHASE
+     C                   parm                    tidphd                         DIFF PHASE
+     C                   parm                    pouhd                          PIGS OUT
+     C                   parm                    touhd                          TRSF OUT
+     C                   parm                    tosphd                         SAME PHASE
+     C                   parm                    tosphd                         DIFF PHASE
+     C                   parm                    rinhd                          REJECT IN
+     C                   parm                    rouhd                          REJECT OUT
+     C                   parm                    qinhd                          QUALITY IN
+     C                   parm                    qouhd                          QUALITY OUT
+     C                   parm                    morhd                          MORTALITY
+     C                   parm                    inahd                          INV ADJ
+      * Pounds
+     C                   parm                    pinlb                          PIG IN
+     C                   parm                    tinlb                          TRSF IN
+     C                   parm                    tisplb                         SAME PHASE
+     C                   parm                    tidplb                         DIFF PHASE
+     C                   parm                    poulb                          PIG OUT
+     C                   parm                    toulb                          TRSF OUT
+     C                   parm                    tosplb                         SAME PHASE
+     C                   parm                    todplb                         DIFF PHASE
+     C                   parm                    rinlb                          REJECT IN
+     C                   parm                    roulb                          REJECT OUT
+     C                   parm                    qinlb                          QUALITY IN
+     C                   parm                    qoulb                          QUALITY OUT
+     C                   parm                    morlb                          MORTALITY
+      *
+      * KEY FOR HSP026-RATIONS
+      *
+     C     key01         KLIST
+     C                   KFLD                    FDRNCD
+     C                   KFLD                    FDRTDT
+      *
+      * KEY FOR HSP079-SALE TYPE REPORT CODE
+      *
+     C     key02         KLIST
+     C                   KFLD                    SHSTCD
+     C                   KFLD                    CDTPCD
+      *
+      * KEY FOR HSP390-GROUP WORKFILE FOR TRANSFERS
+      *
+     C     key03         KLIST
+     C                   KFLD                    HGHGSN
+     C                   KFLD                    WKRPCD
+      *
+      * KEY FOR HSP065-CHECK ADJUSTMENTS
+      *
+     C     key04         KLIST
+     C                   KFLD                    CDCHDT
+     C                   KFLD                    CDCVNO
+     C                   KFLD                    CDCHNO
+     C                   KFLD                    CDLNNO
+      *
+     C     key05         KLIST
+     C                   KFLD                    MEMVSN
+     C                   KFLD                    MELNNO
+      *
+      *
+      * DEFINE WORKFIELDS FOR FEED TICKET PROCESSING
+      *
+     C     *LIKE         DEFINE    CGCGAM        WKFDAM
+     C     *LIKE         DEFINE    CGCGAM        WKINAM
+     C     *LIKE         DEFINE    CGCGAM        WKMFAM
+     C     *LIKE         DEFINE    CGCGAM        WKDLAM
+     C     *LIKE         DEFINE    CGCGAM        WKMDAM
+      *
+     C     *LIKE         DEFINE    CGCGLB        WKFDLB
+     C     *LIKE         DEFINE    CGCGLB        WKINLB
+     C     *LIKE         DEFINE    CGCGLB        WKMFLB
+     C     *LIKE         DEFINE    CGCGLB        WKDLLB
+     C     *LIKE         DEFINE    CGCGLB        WKMDLB
+      *
+     C     *LIKE         DEFINE    CGCGLB        WKLYLB
+     C     *LIKE         DEFINE    CGCGQT        WKKCQT
+     C                   Z-ADD     0             WKLYPR            5 4
+     C                   Z-ADD     0             WKQT             15 2
+     C                   Z-ADD     0             WKHD             15 0
+     C                   Z-ADD     0             WKLB             15 4
+      *
+      * WORKFIELDS TO ACCUMULATE DOA VALUES ON TRANSFERS AND SALES
+      *
+     C     *LIKE         DEFINE    WKHD          WKDHD
+     C     *LIKE         DEFINE    WKLB          WKDLB
+      *
+      * WORKFIELDS TO ACCUMULATE VALUES FOR TRANSFERS
+      *
+     C     *LIKE         DEFINE    WKHD          WKSHHD
+     C     *LIKE         DEFINE    WKHD          WKRCHD
+     C     *LIKE         DEFINE    WKHD          WKDOHD
+     C     *LIKE         DEFINE    WKLB          WKSHLB
+     C     *LIKE         DEFINE    WKLB          WKRCLB
+     C     *LIKE         DEFINE    WKLB          WKDOLB
+      *
+      * WORKFIELDS TO ACCUMULATE VALUES FOR CULL SALES
+      *
+     C     *LIKE         DEFINE    WKHD          WCSHHD
+     C     *LIKE         DEFINE    WKHD          WCRCHD
+     C     *LIKE         DEFINE    WKHD          WCDOHD
+     C     *LIKE         DEFINE    WKLB          WCSHLB
+     C     *LIKE         DEFINE    WKLB          WCRCLB
+     C     *LIKE         DEFINE    WKLB          WCDOLB
+      *
+      * WORKFIELDS TO ACCUMULATE VALUES FOR FEEDER PIG SALES
+      *
+     C     *LIKE         DEFINE    WKHD          WFSHHD
+     C     *LIKE         DEFINE    WKHD          WFRCHD
+     C     *LIKE         DEFINE    WKHD          WFDOHD
+     C     *LIKE         DEFINE    WKLB          WFSHLB
+     C     *LIKE         DEFINE    WKLB          WFRCLB
+     C     *LIKE         DEFINE    WKLB          WFDOLB
+      *
+      * WORKFIELDS TO ACCUMULATE VALUES FOR MARKET HOG SALES
+      *
+     C     *LIKE         DEFINE    WKHD          WMSHHD
+     C     *LIKE         DEFINE    WKHD          WMRCHD
+     C     *LIKE         DEFINE    WKLB          WMSHLB
+     C     *LIKE         DEFINE    WKLB          WMRCLB
+      *
+      * DEFINE WORKFIELDS FOR EXPENSE TICKET PROCESSING
+      *
+     C     *LIKE         DEFINE    CGCGAM        WKXTAM
+     C     *LIKE         DEFINE    CGCGHD        WKXTHD
+     C     *LIKE         DEFINE    CGCGLB        WKXTLB
+     C     *LIKE         DEFINE    CGCGQT        WKXTQT
+     C     *LIKE         DEFINE    XTRPCD        SVRPCD
+     C                   MOVEL     YES           FIRSTE            1
+      *
+     C     *LIKE         DEFINE    CGCGAM        WKDGAM
+     C     *LIKE         DEFINE    CGCGHD        WKDGHD
+     C     *LIKE         DEFINE    CGCGLB        WKDGLB
+     C     *LIKE         DEFINE    CGCGQT        WKDGQT
+      *
+      * DEFINE WORKFIELDS FOR PIG DAY CALCULATIONS
+      *
+     C                   Z-ADD     0             WKPDAY           11 0
+      *
+      * DEFINE WORKFIELDS FOR BACKFAT CALCULATIONS
+      *
+     C                   Z-ADD     0             WKB1             15 4
+     C                   Z-ADD     0             WKB2             15 4
+     C     *LIKE         DEFINE    CGCGLB        WKBLLB                         LIVE LBS
+     C     *LIKE         DEFINE    CGCRLB        WKBCLB                         CARCASS LBS
+     C     *LIKE         DEFINE    CGCGHD        WKBHD
+     C     *like         define    CGCGhd        wkbcdhd
+     C     *like         define    CGCGlb        wkbcdlb
+     C     *like         define    CGCGhd        wkbydhd
+     C     *like         define    CGCGlb        wkbydlb
+      *
+      * DEFINE WORKFIELDS FOR LEAN PERCENT CALCULATIONS
+      *
+     C                   Z-ADD     0             WKL1             15 4
+     C                   Z-ADD     0             WKL2             15 4
+     C     *LIKE         DEFINE    CGCGLB        WKLLLB                         LIVE LBS
+     C     *LIKE         DEFINE    CGCRLB        WKLCLB                         CARCASS LBS
+     C     *LIKE         DEFINE    CGCGHD        WKLHD
+     C     *like         define    CGCGhd        wklcdhd
+     C     *like         define    CGCGlb        wklcdlb
+     C     *like         define    CGCGhd        wklydhd
+     C     *like         define    CGCGlb        wklydlb
+      *
+      * DEFINE WORKFIELDS FOR LOIN EYE CALCULATIONS
+      *
+     C                   Z-ADD     0             WKE1             15 4
+     C                   Z-ADD     0             WKE2             15 4
+     C     *LIKE         DEFINE    CGCGLB        WKELLB                         LIVE LBS
+     C     *LIKE         DEFINE    CGCRLB        WKECLB                         CARCASS LBS
+     C     *LIKE         DEFINE    CGCGHD        WKEHD
+     C     *like         define    CGCGhd        wkecdhd
+     C     *like         define    CGCGlb        wkecdlb
+     C     *like         define    CGCGhd        wkeydhd
+     C     *like         define    CGCGlb        wkeydlb
+      *
+      * DEFINE WORKFIELDS FOR CARCASS YIELD CALCULATIONS
+      *
+     C                   Z-ADD     0             WKCY1            15 4
+     C     *LIKE         DEFINE    CGCGLB        WKCRLB                         CARCASS LBS
+     C     *LIKE         DEFINE    CGCGLB        WKLVLB                         LIVE LBS
+     C     *LIKE         DEFINE    CGCGHD        WKCYHD
+     C     *like         define    CGCGhd        wkccdhd
+     C     *like         define    CGCGlb        wkccdlb
+     C     *like         define    CGCGhd        wkcydhd
+     C     *like         define    CGCGlb        wkcydlb
+      *
+      * DEFINE WORKFIELDS FOR WEIGHT GAIN
+      *
+     C     *LIKE         DEFINE    CGCGLB        WKOLB                          LBS OUT
+     C     *LIKE         DEFINE    CGCGLB        WKILB                          LBS IN
+     C     *LIKE         DEFINE    CGCGLB        WKSLB                          LBS SOLD
+      *
+      * DEFINE WORKFIELDS FOR TOTAL COST
+      *
+     C     *LIKE         DEFINE    CGCGAM        COSAM
+     C     *LIKE         DEFINE    CGCGHD        COSHD
+     C     *LIKE         DEFINE    CGCGLB        COSLB
+     C     *LIKE         DEFINE    CGCRLB        COSCLB                         CARCASS LBS
+      *
+      * WORKFIELDS TO HOLD INTERIM SUMMED VALUES
+      *
+     C     *LIKE         DEFINE    CGCGAM        wkcullam
+      *
+     C     *LIKE         DEFINE    CGCGHD        WKCGHD
+     C     *LIKE         DEFINE    CGCGLB        WKCGLB
+     C     *LIKE         DEFINE    CGCRLB        WKCLB
+     C     *LIKE         DEFINE    CGCGQT        WKCGQT
+     C     *LIKE         DEFINE    CGCGAM        WKCGAM
+     C     *like         define    CGCGhd        wkcdhd
+     C     *like         define    CGCGlb        wkcdlb
+     C     *like         define    CGCGhd        wkydhd
+     C     *like         define    CGCGlb        wkydlb
+     C     *like         define    CGCGhd        wkmrkdohd
+     C     *like         define    CGCGlb        wkmrkdolb
+      *
+      *
+      * DEFINE GENERAL WORKFIELDS
+      *
+     C     *LIKE         DEFINE    RPRPCD        WKRPCD
+      *
+      * DEFINE OUTPUT PARAMETERS FOR THE CALL TO "HPMOVE" TO
+      * CALCULATE INVENTORY
+      *
+     C                   Z-ADD     0             @@NU50            5 0
+     C     *LIKE         DEFINE    @@NU50        GPIHD
+     C     *LIKE         DEFINE    @@NU50        PINHD
+     C     *LIKE         DEFINE    @@NU50        TINHD
+     C     *LIKE         DEFINE    @@NU50        TISPHD
+     C     *LIKE         DEFINE    @@NU50        TIDPHD
+     C     *LIKE         DEFINE    @@NU50        POUHD
+     C     *LIKE         DEFINE    @@NU50        TOUHD
+     C     *LIKE         DEFINE    @@NU50        TOSPHD
+     C     *LIKE         DEFINE    @@NU50        TODPHD
+     C     *LIKE         DEFINE    @@NU50        RINHD
+     C     *LIKE         DEFINE    @@NU50        ROUHD
+     C     *LIKE         DEFINE    @@NU50        QINHD
+     C     *LIKE         DEFINE    @@NU50        QOUHD
+     C     *LIKE         DEFINE    @@NU50        MORHD
+     C     *LIKE         DEFINE    @@NU50        INAHD
+      *
+     C                   Z-ADD     0             @@NU92            9 2
+     C     *LIKE         DEFINE    @@NU92        PINLB
+     C     *LIKE         DEFINE    @@NU92        TINLB
+     C     *LIKE         DEFINE    @@NU92        TISPLB
+     C     *LIKE         DEFINE    @@NU92        TIDPLB
+     C     *LIKE         DEFINE    @@NU92        POULB
+     C     *LIKE         DEFINE    @@NU92        TOULB
+     C     *LIKE         DEFINE    @@NU92        TOSPLB
+     C     *LIKE         DEFINE    @@NU92        TODPLB
+     C     *LIKE         DEFINE    @@NU92        RINLB
+     C     *LIKE         DEFINE    @@NU92        ROULB
+     C     *LIKE         DEFINE    @@NU92        QINLB
+     C     *LIKE         DEFINE    @@NU92        QOULB
+     C     *LIKE         DEFINE    @@NU92        MORLB
+     C                   Z-ADD     0             zzcymd            8 0
+      *
+     C                   ENDSR
+      /EJECT

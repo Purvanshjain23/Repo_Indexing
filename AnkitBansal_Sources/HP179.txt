@@ -1,0 +1,1629 @@
+      *****************  RPG PROGRAM HEADING  ***********************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP179
+      * TITLE:       Dispose Hog Groups
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     09/29/99
+      *
+      * FUNCTION: This program uses a subfile to display open groups on a
+      *           specified farm with an open date on or before the specified cut-off date.
+      *           The groups can then be 'disposed' from this function.
+      *
+      *           Processing in this function is a little different than the standards.
+      *
+      *           Subfile processing is different in this program because of the
+      *           function key that allows the user to go to W/W Transfers.  When the user
+      *           takes this function key and returns, we want to recalculate remaining
+      *           head for all subfile records except the ones that have a) between removed
+      *           from the list or b) already been disposed.  To accomplish this, always set
+      *           on the MDT for each subfile record except the ones that are 'protected'--
+      *           even when the user hasn't changed any data.
+      *
+      *           The 'dispose date' will be calculated by the program. It will typically be
+      *           the received date of the last sales movement or the last transfer in/out
+      *           of the group.  If the date of the last movement is in a closed period,
+      *           then we set the disposed date equal to the beginning date of the currently
+      *           open period
+      *
+      *           When a group is disposed, the program will write an automatic adjustment
+      *           if the remaining head does not exceed 25 (either 25+ or 25-).
+      *
+      *           Setting the page of the subfile to display is different. Subfile
+      *           records are protected/non-displayed when they are disposed or dropped
+      *           from the list.  I attempt to always return to the page the user left
+      *           from except when the page is full of non-displayed/protected records.
+      *           Then, I attempt to go to the first page that has displayed records.
+      *
+      *           This program is called from HP479-Specify Open Hog Groups to Dispose.
+      *
+      *           It does not have selectors or positioners.
+      *           It has standard subfile option editing.
+      *           It does not have F4-Prompt logic.
+      *           It loads the entire subfile at once--not a page at a time.
+      *           It uses the standard message handling program.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      * 01/03/99  LeAnne Fedor
+      *           Added additional edit that no 'scheduled' movements (transfers or
+      *           sales) can exist for a group that is being disposed.
+      *
+      * 08/02/00  LeAnne Fedor
+      *           Removed edits for: origin BGF farm, origin nursery farm, genetic code.
+      *           The values for these fields are no longer entry capable. They are
+      *           populated by the system during a batch update.
+      *
+      * 10/31/01  LeAnne Fedor
+      *           Made 'dispose date' output only. It is now calculated by the program.
+      *
+      * 08/12/03  LeAnne Fedor
+      *           Added edit. It is an error if 'delivery' feed tickets exist for the group
+      *           with a ticket date after the disposed date.
+      *
+      * 11/24/03  LeAnne Fedor
+      *           Added additional edit that all sales movements must be Fully Paid.
+      *
+      * 04/10/08  LeAnne Ramsey
+      *           Recompile only. Fixed typo on screen:
+      *              6=Print Revise with Costs becomes 6=Print Review with Costs
+      *
+      * 05/13/09  LeAnne Ramsey
+      *           Added logic to retrieve the overrides that a user may have entered
+      *           for a group for: Origin BGF and NUR Farm Sites. These are output only
+      *           fields; we only display them; we do not update HSP034 with them.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 05/20/11  LeAnne Ramsey (E1557)
+      *           Recompile only. Added Yard Dead to HSJ085E.
+      *
+      * 03/25/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhpd179    cf   e             workstn
+     F                                     sfile(hp179s1:hdrrn1)
+     F                                     infds(iofeed)
+      *
+     Fhsp002    if   e           k disk
+      *    Functions
+      *
+      *
+     Fhsl034d   uf   e           k disk
+     F                                     rename(hgrec:hgrecd)
+      *  Hog groups
+      *
+      *
+     Fhsl038e   if   e           k disk
+      *  Feed ticket detail
+      *
+      *
+     Fhsl034p   if   e           k disk
+      *  Hog groups
+      *
+      *
+     Fhsl058c   o    e           k disk
+      *  Movement event
+      *
+      *
+     Fhsl068d   if   e           k disk
+      *  Killed/dead hogs
+      *
+      *
+     Fhsl069a   if   e           k disk    rename(iarec:iareca)
+      *  Inventory adjustment
+      *
+      *
+     Fhsp069    o    e           k disk
+      *  Inventory adjustment
+      *
+      *
+     Fhsp074    if   e           k disk
+      *  Transfer Movement Header
+      *
+      *
+     Fhsl075c   if   e           k disk
+      *  Transfer Movement Detail
+      *
+      *
+     Fhsl075e   if   e           k disk    rename(mdrec:mdrece)
+      *  Transfer Movement Detail
+      *
+      *
+     Fhsj075g   if   e           k disk    rename(mdrec:mdrecg)
+      *  Transfer Movement Detail
+      *
+      *
+     Fhsj085d   if   e           k disk
+      *  Sales Detail + Sales Header
+      *   (selects scheduled records only)
+      *
+      *
+     Fhsj085e   if   e           k disk    rename(sgrec:sgrece)
+      *  Sales detail + sales header
+      *
+      *
+     Fhsp130    if   e           k disk
+      *    Group overrides
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D revise          c                   'REVISE'
+     D set1            c                   'SET1  '
+     D edit1           c                   'EDIT1 '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+     D update          c                   'UPDATE'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Compile time array for SBMJOB used in QCMDEXC
+      *---------------------------------------------------------------
+     D cmd             s              1    dim(80) ctdata perrcd(80)
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D mode            s              6
+     D pgm             s             10
+     D msgfl           s             10
+     D routne          s              6
+     D rtncd           s              2
+     D maxmsg          s              2  0  inz(20)
+     D norecs          s              1     inz('N')
+      *
+      *
+      * Control fields
+      *
+     D first           s              1     inz('N')
+     D schedfl         s              1     inz('N')
+     D notpaidfl       s              1     inz('N')
+     D version         s              1     inz(' ')
+      *
+      *
+      * Parm fields
+      *
+     D xxcymdopdt      s              8  0
+     D xxhgsn          s                   like(hghgsn)
+     D xxdsdt          s                   like(hgdsdt)
+     D xxadoi          s                   like(hgadoi)
+     D xxadoo          s                   like(hgadoo)
+      *
+     D xxjobq          s             10     inz('*JOBD     ')
+     D xxnite          s              1     inz('N')
+     D xxcopy          s              1  0  inz(1)
+      *
+      *
+     D gpihd           s              5  0
+     D inahd           s              5  0
+     D morhd           s              5  0
+     D morlb           s              9  2
+     D pinhd           s              5  0
+     D pinlb           s              9  2
+     D pouhd           s              5  0
+     D poulb           s              9  2
+     D qinhd           s              5  0
+     D qinlb           s              9  2
+     D qouhd           s              5  0
+     D qoulb           s              9  2
+     D rinhd           s              5  0
+     D rinlb           s              9  2
+     D rouhd           s              5  0
+     D roulb           s              9  2
+     D tidphd          s              5  0
+     D tidplb          s              9  2
+     D tinhd           s              5  0
+     D tinlb           s              9  2
+     D tisphd          s              5  0
+     D tisplb          s              9  2
+     D todphd          s              5  0
+     D todplb          s              9  2
+     D tosphd          s              5  0
+     D tosplb          s              9  2
+     D touhd           s              5  0
+     D toulb           s              9  2
+      *
+      *
+      *  Parms for use with QCMDEXC.  'LENGTH' is the length of the
+      *  command that will be issued with QCMDEXC.  QCMDEXC requires
+      *  the field containing length to be defined as 15 with 5 decimal
+      *  positions.  The field 'CMDSBM' will hold the values of the
+      *  submit job command when passed as a parm on the call to
+      *  QCMDEXC.
+      *
+     D length          s             15  5 inz(80)
+     D cmdsbm          s             80
+      *
+      *
+      * Workfields
+      *
+     D wkdsdt          s                   like(hgdsdt)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkcymdiso       s               D   datfmt(*iso)
+     D wkmdy           s               D   datfmt(*mdy)
+     D wkudate         s              8  0
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard subfile option conversion
+      *---------------------------------------------------------------
+     D                 ds                  inz
+     D d1opt                          2
+     D   wkopt1                       1    overlay(d1opt)
+     D   wkopt2                       1    overlay(d1opt:2)
+      *
+      *---------------------------------------------------------------
+      * Data structures
+      *---------------------------------------------------------------
+      *
+      * Definition for external data area for movement numbers
+     D                 ds
+     Ddamvsn                          7  0
+      *
+      *
+      * Local data area.
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldfsbo                 1      5
+     D  ldhgsn                 6     12  0
+     D  ldcost                20     20
+     D  ldbods                21     50
+     D  ldrpfl                51     51
+      *
+     D  ldoutu               401    410
+     D  ldhold               411    411
+     D  ldcopy               412    412  0
+     D  ldoutq               413    422
+      *
+      *
+      * Definition for external data area for accounting period
+      *
+     D                 DS
+     D DAAPER                        24
+     D  DACCYY                        4    overlay(DAAPER)
+     D  DAPER                         2    overlay(DAAPER:5)
+     D  DABPDT                        8  0 overlay(DAAPER:7)
+     D  DAEPDT                        8  0 overlay(DAAPER:15)
+     D  DAPGFL                        1    overlay(DAAPER:23)
+     D  DAPPFL                        1    overlay(DAAPER:24)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *************************************************************************************
+      * MAINLINE
+      *************************************************************************************
+      *
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off                                         Main do loop
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     edit1         $edit1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo                                                  Main do loop
+      /EJECT
+      *-------------------------------------------------------------------------------------
+      * Set environment for screen 1
+      *-------------------------------------------------------------------------------------
+      *
+     C     $set1         begsr
+      *
+      * Clear/fill the subfile
+      *
+     C                   exsr      $clr1
+     C                   exsr      $frsh1
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------------------
+      * Perform operator I/O for screen 1
+      *-------------------------------------------------------------------------------------
+      *
+     C     $scrn1        begsr
+      *
+      * Set indicators to limit functionality if the subfile is empty.
+      *
+     C                   if        norecs = yes
+     C                   seton                                        99
+     C                   endif
+      *
+      * Write the error messages from the error arrays to the
+      * error message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * Write screen 1 to crt
+      *
+     C                   write     hp179k1
+     C                   write     hp179ec
+     C                   exfmt     hp179c1
+      *
+      * Clear the messages from the message data structures and
+      * program message queue
+      *
+     C                   exsr      $clmsg
+      *
+      * Get user's entry and set next routine
+      *
+     C                   select
+     C                   when      *in03 = *on                                  F3-exit
+     C                   eval      routne = exit
+      *
+     C                   when      norecs = yes
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09002'
+     C                   endif
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in05 = *on                                  F5-refresh
+     C                   eval      routne = set1
+      *
+     C                   when      *in10 = *on                                  F10=W/W Transfers
+     C                   call      'HP439'
+     C                   exsr      $updsubf
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in14 = *on                                  F14=Deaths
+     C                   call      'HP157'
+     C                   parm                    c1fsbo
+     C                   parm                    c1fscd
+     C                   parm                    c1fsnm
+     C                   parm      *blank        rtncd
+     C                   exsr      $updsubf
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in15 = *on                                  F15=W/W Sales
+     C                   call      'HP446'
+     C                   parm      ' '           version
+     C                   exsr      $updsubf
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in17 = *on                                  F17-print options
+     C                   eval      routne = scrn1
+     C                   call      'HP451'
+     C                   parm                    sdpgm
+     C     ldcopy        parm      ldcopy        xxcopy
+     C                   parm                    ldhold
+     C                   parm                    ldoutq
+     C                   parm                    xxnite
+     C                   parm                    xxjobq
+      *
+     C                   when      *in20 = *on                                  F20-wrksplf
+     C                   eval      routne = scrn1
+     C                   call      'QEZOUTPT'                                       API
+     C                   z-add     idflow        hdpag1
+     C                   other
+      *
+      * User pressed ENTER
+      *
+     C                   eval      routne = edit1
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Edit screen 1 input fields
+      *----------------------------------------------------------------------------------
+      *
+     C     $edit1        begsr
+      *
+      * Edit the subfile options
+      *
+     C                   exsr      $edop1
+      *
+      * Edit/process subfile records
+      *
+     C                   if        error = 0                                    If no errors
+     C                   exsr      $proc1
+     C                   endif                                                  If no errors
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Read and edit changed subfile records for valid subfile options on Screen 1
+      *----------------------------------------------------------------------------------
+      *
+     C     $edop1        begsr
+      *
+     C                   eval      error = 0
+      *
+      * Read all changed subfile records, editing for valid options
+      *
+     C                   setoff                                       80
+     C                   dou       *in80 = *on                                  Do readc
+     C                   readc     hp179s1                                80
+     C                   if        *in80 = *off                                 If rec read
+      *
+      * Set off error indicator for subfile option field
+      *
+     C                   setoff                                       30
+      *
+      * Convert option user entered to standard format. For example,
+      * a ' 1', '01', and '1 ' must be standardized to ' 1'.
+      *
+     C                   if        wkopt2 = *blank                              If 2 = blank
+     C                   eval      wkopt2 = wkopt1
+     C                   eval      wkopt1 = *blank
+     C                   endif                                                  If 2 = blank
+      *
+     C                   if        wkopt1 = *zero                               If 1 is zero
+     C                   eval      wkopt1 = *blank
+     C                   endif                                                  If 1 is zero
+      *
+      * Test for valid subfile option entry on all changed records
+      *
+     C                   if        d1opt <> ' 2' and                            If bad opt
+     C                             d1opt <> ' 4' and
+     C                             d1opt <> ' 5' and
+     C                             d1opt <> ' 6' and
+     C                             d1opt <> ' 7' and
+     C                             d1opt <> ' 8' and
+     C                             d1opt <> '10' and
+     C                             d1opt <> '11' and
+     C                             d1opt <> '12' and
+     C                             d1opt <> '13' and
+     C                             d1opt <> *blank
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09006'
+     C                   exsr      $err1
+     C                   endif
+     C                   endif                                                  If bad opt
+      *
+     C                   seton                                        85
+      *
+      * If the record is a) already disposed or b) dropped from the
+      * list, I do not expect to be reading it here. But, just to be
+      * safe, reset the non-display/protect indicator.
+      *
+     C                   if        hdprotect = yes
+     C                   setoff                                       85
+     C                   seton                                        90
+     C                   else
+     C                   setoff                                       90
+     C                   endif
+      *
+     C                   update    hp179s1
+     C                   setoff                                       8530
+      *
+     C                   endif                                                  If rec read
+     C                   enddo                                                  Do readc
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Process subfile records on screen 1
+      *----------------------------------------------------------------------------------
+      *
+     C     $proc1        begsr
+      *
+     C                   move      *blank        rtncd
+     C                   move      yes           first
+     C                   z-add     0             hdpag1
+      *
+      * Read/process all changed subfile records
+      *
+     C                   setoff                                       80
+     C                   dou       *in80 = *on                                  Do process
+     C                   readc     hp179s1                                80
+     C                   if        *in80 = *off                                 If rec read
+     C                   seton                                        85
+      *
+      * If the user returned from a called program by using 'exit'
+      * or 'previous', continue reading the subfile but do not process
+      * the subfile otpions. Do continue processing the subfile options
+      * when the return code from the called program is blank or  '00'.
+      *
+     C                   if        rtncd = *blank or rtncd = '00'               If keep going
+     C                   exsr      $process
+     C                   else
+      *
+      * You are no longer processing the subfile options; you're just reading
+      * the subfile record. We do this so that we can attempt to establish
+      * the appropriate subfile page to return the user to when the screen is
+      * redisplayed. Basically, if there are errors, do nothing; the error
+      * routine will set the page.  Otherwise, set the page equal to
+      * the first subfile record you read that has a value in the option field.
+      *
+     C                   if        d1opt <> *blank and first = yes and error = 0
+     C                   move      no            first
+     C                   z-add     hdrrn1        hdpag1
+     C                   endif
+      *
+     C                   endif                                                  If keep going
+      *
+      * For every subfile record that is read, check the hidden protect field.
+      * If the record has just been a) disposed or b) dropped from the
+      * list, set the non-display/protect indicator.
+      *
+     C                   if        hdprotect = yes
+     C                   setoff                                       85
+     C                   seton                                        90
+     C                   else
+     C                   setoff                                       90
+     C                   endif
+      *
+     C                   update    hp179s1
+     C                   exsr      $setof
+     C                   endif                                                  If rec read
+     C                   enddo                                                  Do process
+      *
+      * If no scenario existed that set the page of the subfile to display,
+      * default the subfile to display on page 1.
+      *
+     C                   if        hdpag1 = 0
+     C                   z-add     1             hdpag1
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Process subfile options
+      *----------------------------------------------------------------------------------
+      *
+     C     $process      begsr
+      *
+     C                   select
+     C                   when      d1opt = *blank
+      *
+      * Revise hog group
+     C                   when      d1opt = ' 2'
+     C                   exsr      $opt02
+      *
+      * Remove group from dispose list
+      *
+     C                   when      d1opt = ' 4'
+     C                   eval      hdprotect = yes
+      *
+      * View group
+     C                   when      d1opt = ' 5'
+     C                   call      'HP740'
+     C                   parm                    c1fsbo
+     C                   parm                    c1bods
+     C                   parm                    d1hgcd
+     C                   parm      *blank        rtncd
+      *
+      * Print Review with or without Costs
+      *
+     C                   when      d1opt = ' 6' or d1opt = '10'
+     C                   exsr      $list1
+      *
+      * View movements
+     C                   when      d1opt = ' 7'
+     C                   call      'HP701'
+     C                   parm                    c1fsbo
+     C                   parm                    c1fscd
+     C                   parm                    d1hgcd
+     C                   parm                    hdhgsn
+     C                   parm      *blank        rtncd
+      *
+      * Dispose group
+     C                   when      d1opt = ' 8'
+     C                   exsr      $opt08
+     C                   if        *in30 = *off
+     C                   exsr      $upd1
+     C                   eval      hdprotect = yes
+     C                   endif
+      *
+      * Maintain adjustments
+     C                   when      d1opt = '11'
+     C                   exsr      $opt11
+      *
+      * View adjustments
+     C                   when      d1opt = '12'
+     C                   call      'HP758'
+     C                   parm                    c1fsbo
+     C                   parm                    c1fscd
+     C                   parm                    d1hgcd
+     C                   parm                    hdhgsn
+     C                   parm      *blank        rtncd
+      *
+      * Print movements
+     C                   when      d1opt = '13'
+     C                   exsr      $list2
+     C                   endsl
+      *
+     C                   if        error = 0 and hdprotect <> yes
+     C                             and (d1opt <> *blank or
+     C                                 (d1opt = *blank and hdpag1 = 0))
+     C                   z-add     hdrrn1        hdpag1
+     C                   endif
+      *
+      * The only time you will not clear the subfile option field is when
+      * the option is 8=dispose and there was an error.
+      *
+     C                   if        *in30 = *off
+     C                   move      *blank        d1opt
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Revise hog group
+      *----------------------------------------------------------------------------------
+      *
+     C     $opt02        begsr
+      *
+      * Call the 'revise hog group' program to allow the user to change
+      * group data.
+     C                   call      'HP140'
+     C                   parm      revise        mode
+     C                   parm                    c1fsbo
+     C                   parm                    c1bods
+     C                   parm                    d1hgcd
+     C                   parm                    hdhgsn
+     C                   parm                    hdgscd
+     C                   parm      *blank        rtncd
+      *
+      * Retrieve any new hog group values for subfile record
+      *
+     C     hdhgsn        chain(n)  hsl034d                            92
+     C                   if        *in92 = *off                                 If hit
+     C                   eval      d1blcd = hgblcd
+     C                   eval      d1rmcd = hgrmcd
+     C                   eval      d1hgcd = hghgcd
+     C                   eval      d1sxcd = hgsxcd
+     C                   eval      d1gncd = hggncd
+     C                   eval      d1bscd = hgbscd
+     C                   z-add     hgobfs        d1obfs
+     C                   z-add     hgonfs        d1onfs
+     C                   z-add     hgadoi        d1adoi
+      *
+     C                   z-add     hghgsn        hdhgsn
+     C                   z-add     hgcrdt        hdcrdt
+     C                   z-add     hgopdt        hdopdt
+     C                   move      hggscd        hdgscd
+     C                   endif                                                  If hit
+      *
+      * Retrieve "origin" overrides that the user may have entered.
+      *
+     C     hghgsn        chain     hsp130                             92
+     C                   if        *in92 = *off
+     C                   z-add     goobfs        d1obfs
+     C                   z-add     goonfs        d1onfs
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Validate for disposing
+      *---------------------------------------------------------------
+      *
+     C     $opt08        begsr
+      *
+      * Dispose date
+     C                   exsr      $dsdt
+      *
+      * If create date is after open date, issue message.
+      *
+     C                   if        hdcrdt > hdopdt
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS09130'
+     C                   endif
+     C                   endif
+      *
+      * If create date is after dispose date, issue message.
+      *
+     C                   if        hdcrdt > hdcymddsdt and hdcymddsdt <> 0
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS09131'
+     C                   endif
+     C                   endif
+      *
+      * If remaining head is greater than 25, the user must make an adjustment entry.
+      *
+     C                   if        d1hd > 25 or d1hd < -25                      If can't auto adjust
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00763'
+     C                   clear                   mgw
+     C                   movea     d1hgcd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If can't auto adjust
+      *
+      * Sex
+     C                   if        d1sxcd = *blank
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS09128'
+     C                   endif
+     C                   endif
+      *
+      * Average days old in
+      *
+     C                   if        d1adoi = 0
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS09129'
+     C                   endif
+     C                   endif
+      *
+      * Group cannot be on any 'scheduled' sales movement.
+      *
+     C     hdhgsn        chain     hsj085d                            92
+     C                   if        *in92 = *off                                 If scheduled sale
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   movel     'HS00775'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     d1hgcd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If scheduled sale
+      *
+      * All sales movements for the group must be Fully Paid or Posted to
+      * Period End. (Note: This logical omits scheduled movements.)
+      *
+     C                   move      *blank        notpaidfl
+     C     hdhgsn        setll     hsj085e
+      *
+     C                   dou       *in91 = *on or notpaidfl = yes               Do sales
+     C     hdhgsn        reade     hsj085e                                91
+     C                   if        *in91 = *off and                             If not EOF
+     C                             shmscd <> 'FP' and
+     C                             shmscd <> 'PP'
+     C                   move      yes           notpaidfl
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   movel     'HS00780'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     d1hgcd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do sales
+      *
+      *
+      * Group cannot be an origin group on any 'scheduled' transfers.
+      *
+     C                   move      *blank        schedfl
+     C     hdhgsn        setll     hsl075c
+      *
+     C                   dou       *in91 = *on or schedfl = yes                 Do origin loop
+     C     hdhgsn        reade     hsl075c                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C     mdmvsn        chain     hsp074                             92
+     C                   if        *in92 = *off and mhmscd = 'SC'               If hit
+     C                   move      yes           schedfl
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   movel     'HS00776'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     d1hgcd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If hit
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do origin loop
+      *
+      *
+      * Group cannot be a destination group on any 'scheduled' transfers.
+      *
+     C                   move      *blank        schedfl
+     C     hdhgsn        setll     hsl075e
+      *
+     C                   dou       *in91 = *on or schedfl = yes                 Do destination
+     C     hdhgsn        reade     hsl075e                                91
+     C                   if        *in91 = *off                                 If more
+      *
+     C     mdmvsn        chain     hsp074                             92
+     C                   if        *in92 = *off and mhmscd = 'SC'               If hit
+     C                   move      yes           schedfl
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   movel     'HS00777'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     d1hgcd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If hit
+      *
+     C                   endif                                                  If more
+     C                   enddo                                                  Do destination
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Validate dispose date
+      *---------------------------------------------------------------
+      *
+     C     $dsdt         begsr
+      *
+     C                   z-add     0             hdcymddsdt
+      *
+      * Retrieve/calculate the dispose date.
+      *
+     C                   exsr      $rtvdate
+      *
+      * If it is in the current period,
+      * check that the period close programs are not running.
+      *
+     C                   in        daaper
+      *
+     C                   if        hdcymddsdt = dabpdt
+     C                             and dappfl <> *blank
+     C                   seton                                        3031
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   movel     'HS09016'     mgid(e)
+     C                   endif
+     C                   endif
+      *
+      *
+      * There cannot be any 'dead' movements dated after the retrieved dispose
+      * date.
+      *
+     C     hdhgsn        setgt     hsl068d
+     C     hdhgsn        readpe    hsl068d                                92
+      *
+     C                   if        *in92 = *off and kdkddt > hdcymddsdt         If deads
+     C                   seton                                        3031
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   movel     'HS00893'     mgid(e)
+     C                   endif
+     C                   endif                                                  If deads
+      *
+      * There cannot be any 'adjustment' movements dated after the retrieved
+      * dispose date.
+      *
+     C     hdhgsn        chain     hsl069a                            92
+     C                   if        *in92 = *off and iaiadt > hdcymddsdt         If adjusts
+     C                   seton                                        3031
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   movel     'HS00894'     mgid(e)
+     C                   endif
+     C                   endif                                                  If adjusts
+      *
+      *
+      * There cannot be any 'delivery' feed tickets dated after the retrieved
+      * disposed date.
+      *
+     C     hdhgsn        setll     hsl038e
+      *
+     C                   dou       *in92 = *on                                  Do feed
+     C     hdhgsn        reade     hsl038e                                92
+     C                   if        *in92 = *off and fdtkdt > hdcymddsdt         If feed
+     C                             and fdtrcd = 'D'
+     C                   seton                                        303192
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   movel     'HS00895'     mgid(e)
+     C                   endif
+     C                   endif                                                  If feed
+     C                   enddo                                                  Do feed
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Maintain inventory adjustments
+      *---------------------------------------------------------------
+      *
+     C     $opt11        begsr
+      *
+      * Call the inventory adjustments program
+      *
+     C                   call      'HP158'
+     C                   parm                    c1fsbo
+     C                   parm                    c1fscd
+     C                   parm                    d1hgcd
+     C                   parm                    hdhgsn
+     C                   parm                    d1mdydsdt
+     C                   parm                    d1hd
+     C                   parm      *blank        rtncd
+      *
+      *
+      * Recalculate the 'remaining head' for the group as of the dispose
+      * date--which you have just set equal to the most recent event date.
+      *
+     C                   exsr      $head
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Clear subfile for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $clr1         begsr
+      *
+      *
+     C                   clear                   hp179s1
+     C                   seton                                        83        sflclr
+     C                   write     hp179c1
+     C                   setoff                                       818283
+      *                                                    81=sfldsp
+      *                                                    82=sflend
+      *                                                    83=sflclr
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Refresh/fill the subfile for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $frsh1        begsr
+      *
+      * Loading the subfile in this program is different. Always load
+      * all the records at once.
+      *
+     C     c1fscd        setll     hsl034p
+     C                   exsr      $load1
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Load subfile on screen 1
+      *---------------------------------------------------------------
+      *
+     C     $load1        begsr
+      *
+      * Load open hog groups on this farm that have an open date on or
+      * before the user's requested cut-off date.
+      *
+     C                   setoff                                       82
+     C                   dou       *in82 = *on                                  Do fill loop
+     C     c1fscd        reade     hsl034p                                82
+     C                   if        *in82 = *off and                             If not EOF
+     C                             hgopdt <= xxcymdopdt
+      *
+      * Always set on the MDT. If the user takes a function key to maintain
+      * deads, sales movements, or transfer movements, you must always update
+      * the remaining head for every unprotected subfile option when you
+      * return from the W/W.
+      *
+     C                   seton                                        85
+      *
+      * Set up subfile line fields
+      *
+     C                   eval      d1blcd = hgblcd
+     C                   eval      d1rmcd = hgrmcd
+     C                   eval      d1hgcd = hghgcd
+     C                   eval      d1sxcd = hgsxcd
+     C                   eval      d1gncd = hggncd
+     C                   eval      d1bscd = hgbscd
+     C                   z-add     hgobfs        d1obfs
+     C                   z-add     hgonfs        d1onfs
+     C                   z-add     hgadoi        d1adoi
+      *
+     C                   z-add     hghgsn        hdhgsn
+     C                   z-add     hgcrdt        hdcrdt
+     C                   z-add     hgopdt        hdopdt
+     C                   move      hggscd        hdgscd
+     C                   move      *blank        hdprotect
+      *
+      * Retrieve "origin" overrides that the user may have entered.
+      *
+     C     hghgsn        chain     hsp130                             92
+     C                   if        *in92 = *off
+     C                   z-add     goobfs        d1obfs
+     C                   z-add     goonfs        d1onfs
+     C                   endif
+      *
+      * Retrieve a date to use for the dispose date.
+      *
+     C                   z-add     0             hdcymddsdt
+     C                   exsr      $rtvdate
+      *
+      * Calculate remaining head as of dispose date
+      *
+     C                   exsr      $head
+      *
+     C                   add       1             hdrrn1
+      *
+     C                   write     hp179s1
+     C                   seton                                        81
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do fill loop
+      *
+      *
+      * If no records were written to this subfile, it means that there are
+      * no open groups on this farm with an open date on or before the cut-off
+      * date.
+      *
+     C                   if        hdrrn1 = 0
+     C                   eval      norecs = yes
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09002'
+     C                   endif
+     C                   else
+     C                   eval      norecs = no
+     C                   endif
+      *
+      * Set the subfile to position to the first page
+      *
+     C                   z-add     1             hdpag1
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Update remaining head for all subfile records when the user has taken
+      *            F10=Work With Transfers or F15=Work with Sales or Option 14-Maintain Deaths
+      *---------------------------------------------------------------------------------------
+      *
+     C     $updsubf      begsr
+      *
+      * Set subfile to redisplay at the same screen the user was on when they
+      * took the function key.
+      *
+     C                   z-add     idflow        hdpag1
+      *
+      * Read/process all changed subfile records
+      *
+     C                   setoff                                       80
+     C                   dou       *in80 = *on                                  Do process
+     C                   readc     hp179s1                                80
+     C                   if        *in80 = *off                                 If rec read
+      *
+      * Set on MDT
+     C                   seton                                        85
+     C                   setoff                                       90
+      *
+      * If the record is a) already disposed or b) dropped from the
+      * list, I do not expect to be reading it here. But, just to be
+      * safe, do not update a protected subfile record.
+      *
+     C                   if        hdprotect = yes                              If protected
+     C                   seton                                        90
+     C                   setoff                                       85
+     C                   else
+      *
+      * Retrieve date to use for dispose date.
+      *
+     C                   z-add     0             hdcymddsdt
+     C                   exsr      $rtvdate
+      *
+      * Calculate remaining head as of dispose date.
+      *
+     C                   exsr      $head
+     C                   endif                                                  If protected
+      *
+     C                   update    hp179s1
+     C                   exsr      $setof
+     C                   endif                                                  If rec read
+     C                   enddo                                                  Do process
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Retrieve a dispose date
+      *---------------------------------------------------------------------------------------
+      *
+      * Dispose date will be the date of the last sale movement or the last transfer
+      * movement in/out of the group.  Except, when the date of the last movement is
+      * in a closed period, the dispose date will be set the the beginning date of the
+      * currently open period.
+      *
+     C     $rtvdate      begsr
+      *
+     C                   z-add     0             wkdsdt
+      *
+      * Find the date of the last transfer out of the group
+      *
+     C     hdhgsn        setll     hsj075g
+      *
+     C                   dou       *in91 = *on                                  Do trans out
+     C     hdhgsn        reade     hsj075g                                91
+     C                   if        *in91 = *off and mhrcdt > wkdsdt             If not EOF
+     C                   z-add     mhrcdt        wkdsdt
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do trans out
+      *
+      *
+      * Find the date of the last transfer into the group
+      *
+     C     hdhgsn        setll     hsl075e
+      *
+     C                   dou       *in91 = *on                                  Do trans in
+     C     hdhgsn        reade     hsl075e                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C     mdmvsn        chain     hsp074                             92
+     C                   if        *in92 = *off  and mhrcdt > wkdsdt            If hit
+     C                   z-add     mhrcdt        wkdsdt
+     C                   endif                                                  If hit
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do trans in
+      *
+      * Retrieve the date of the last sales movement out of the group
+      *
+     C     hdhgsn        setll     hsj085e
+      *
+     C                   dou       *in91 = *on                                  Do sales
+     C     hdhgsn        reade     hsj085e                                91
+     C                   if        *in91 = *off and shrcdt > wkdsdt             If not EOF
+     C                   z-add     shrcdt        wkdsdt
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do sales
+      *
+      * Retrieve current accounting period to get the beginning date of the
+      * currently open period. If the 'last' date is earlier than the beginning
+      * date of the period, use the beginning date as the dispose date.
+      *
+     C                   in        daaper
+     C                   if        wkdsdt < dabpdt
+     C                   z-add     dabpdt        wkdsdt
+     C                   endif
+      *
+      * Put retrieved date into subfile record and flip it to mmddyy format.
+      *
+     C                   z-add     wkdsdt        hdcymddsdt
+     C     *iso          move      wkdsdt        wkmdy
+     C                   move      wkmdy         d1mdydsdt
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Calculate remaining head as of dispose date
+      *---------------------------------------------------------------
+      *
+     C     $head         begsr
+      *
+     C                   call      'HPMOVE'
+     C                   parm                    hdhgsn                         GROUP #
+     C                   parm                    hdcymddsdt                     CUT-OFF DATE
+      * Head
+     C     d1hd          parm                    GPIHD                          GROUP INV
+     C                   parm                    PINHD                          PIG IN
+     C                   parm                    TINHD                          TRSF IN
+     C                   parm                    TISPHD                         SAME PHASE
+     C                   parm                    TIDPHD                         DIFF PHASE
+     C                   parm                    POUHD                          PIGS OUT
+     C                   parm                    TOUHD                          TRSF OUT
+     C                   parm                    TOSPHD                         SAME PHASE
+     C                   parm                    TODPHD                         DIFF PHASE
+     C                   parm                    RINHD                          REJECT IN
+     C                   parm                    ROUHD                          REJECT OUT
+     C                   parm                    QINHD                          QUALITY IN
+     C                   parm                    QOUHD                          QUALITY OUT
+     C                   parm                    MORHD                          MORTALITY
+     C                   parm                    INAHD                          INV ADJ
+      * Pounds
+     C                   parm                    PINLB                          PIG IN
+     C                   parm                    TINLB                          TRSF IN
+     C                   parm                    TISPLB                         SAME PHASE
+     C                   parm                    TIDPLB                         DIFF PHASE
+     C                   parm                    POULB                          PIG OUT
+     C                   parm                    TOULB                          TRSF OUT
+     C                   parm                    TOSPLB                         SAME PHASE
+     C                   parm                    TODPLB                         DIFF PHASE
+     C                   parm                    RINLB                          REJECT IN
+     C                   parm                    ROULB                          REJECT OUT
+     C                   parm                    QINLB                          QUALITY IN
+     C                   parm                    QOULB                          QUALITY OUT
+     C                   parm                    MORLB                          MORTALITY
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Set off the indicators on the subfile
+      *----------------------------------------------------------------
+      *
+     C     $setof        begsr
+      *
+     C                   setoff                                       303190
+      *
+     C                   endsr
+      /EJECT
+      *-----------------------------------------------------------------------------
+      * Set the subfile to redisplay at the first page that has errors on Screen 1
+      *-----------------------------------------------------------------------------
+      *
+     C     $err1         begsr
+      *
+     C                   if        error = 1
+     C                   eval      hdpag1 = hdrrn1
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print hog group review
+      *---------------------------------------------------------------
+      *
+     C     $list1        begsr
+      *
+      * Set up the LDA fields
+      *
+     C                   if        d1opt = ' 6'                                 If w/costs
+     C                   movel     yes           ldcost
+     C                   else
+     C                   movel     no            ldcost
+     C                   endif                                                  IF W/COSTS
+      *
+     C                   movel     'R'           ldrpfl
+     C                   z-add     hdhgsn        ldhgsn
+     C                   movel     c1fsbo        ldfsbo
+     C                   movel     c1bods        ldbods
+     C                   out       lda
+      *
+      * Move the 80-character compile time array 'CMD' to an 80-character field
+      * for passing as a parm with QCMDEXC.
+      *
+     C                   movea     xxjobq        cmd(51)
+     C                   movea     CMD           cmdsbm
+     C                   call      'QCMDEXC'
+     C                   parm                    cmdsbm
+     C                   parm                    length
+      *
+      * Issue standard request submission message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09003'     mgid(e)
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print listing of group movements
+      *---------------------------------------------------------------
+      *
+     C     $list2        begsr
+      *
+      * Set up LDA Fields
+      *
+     C                   movel     'M'           ldrpfl
+     C                   z-add     hdhgsn        ldhgsn
+     C                   movel     c1fsbo        ldfsbo
+     C                   movel     c1bods        ldbods
+     C                   out       lda
+      *
+      * Move the 80-character compile time array 'CMD' to an 80-character field
+      * for passing as a parm with QCMDEXC.
+      *
+     C                   movea     xxjobq        cmd(51)
+     C                   movea     CMD           cmdsbm
+     C                   call      'QCMDEXC'
+     C                   parm                    cmdsbm
+     C                   parm                    length
+      *
+      * Issue standard request submission message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09003'     mgid(e)
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------------------------
+      * Update group with dispose values
+      *------------------------------------------------------------------------------------
+      *
+     C     $upd1         begsr
+      *
+      * If remaining head is is not zero, write an adjustment. (Editing will have
+      * ensured by this point that remaining head is in the range of 25- to 25+).
+      *
+     C                   if        d1hd <> 0
+     C                   exsr      $adjustment
+     C                   endif
+      *
+      * Update the hog group record
+      *
+     C     hdhgsn        chain     hsl034d                            92
+     C                   if        *in92 = *off                                 If hog hit
+     C                   movel     'DS'          hggscd
+     C                   z-add     hdcymddsdt    hgdsdt
+      *
+      * Calculate 'average days old out'
+      *
+     C                   call      'HPPAGE'
+     C                   parm      hdhgsn        xxhgsn
+     C                   parm      hdcymddsdt    xxdsdt
+     C     hgadoo        parm      0             xxadoo
+     C                   parm      0             xxadoi
+      *
+     C                   update    hgrecd
+     C                   endif                                                  If hog hit
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------------------------
+      * Write an adjustment record
+      *------------------------------------------------------------------------------------
+      *
+     C     $adjustment   begsr
+      *
+      *  Assign a movement number by retrieving the last number
+      *  from the data area and incrementing it.
+      *
+     C     *lock         in        damvsn
+     C                   add       1             damvsn
+     C                   z-add     damvsn        iamvsn
+     C                   out       damvsn
+      *
+      * Populate record with screen fields and write an adjustment record.
+      *
+     C                   z-add     hdcymddsdt    iaiadt
+     C                   z-add     hdhgsn        iahgsn
+     C                   movel     c1fsbo        iafsbo
+     C                   z-add     c1fscd        iafscd
+     C                   z-add     0             iaepdt
+     C                   movel     'EN'          iamscd
+     C                   eval      iaiahd = d1hd * -1
+     C                   write     iarec
+      *
+      * Write a movement event record
+      *
+     C                   z-add     wkudate       meupdt
+     C                   time                    meuptm
+     C                   movel     sdusr         meuscd
+     C                   movel     sdpgm         mepgm
+     C                   z-add     iamvsn        memvsn
+     C                   movel     'A'           memtcd
+     C                   z-add     hdhgsn        mehgsn
+     C                   z-add     hdcymddsdt    memedt
+     C                   movel     'O'           meodfl
+     C                   z-add     0             mehsn
+     C                   z-add     0             mecvno
+     C                   z-add     0             melnno
+      *
+     C                   write     merec
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Write error messages
+      *----------------------------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Seton last record and end job
+      *----------------------------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        LR
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *
+     C     *entry        plist
+     C                   parm                    c1fsbo
+     C                   parm                    c1bods
+     C                   parm                    c1fscd
+     C                   parm                    c1fsnm
+     C                   parm                    c1mdyopdt
+     C                   parm                    xxcymdopdt
+      *
+      * Key lists
+      *    None
+      *
+      * Retrieve system date for date comparisons.
+      *
+     C     *mdy          move      udate         wkcymdiso
+     C                   move      wkcymdiso     wkudate
+      *
+      *
+      * Initialize LDA fields
+      *
+     C                   in        lda
+     C                   move      *blank        ldrpfl
+     C                   move      *blank        ldfsbo
+     C                   move      *blank        ldbods
+     C                   z-add     0             ldhgsn
+     C                   move      *blank        ldhold
+     C                   z-add     0             ldcopy
+     C                   movel     ldoutu        ldoutq
+      *
+      * Get this function's number of copies, hold yes/no values
+      *
+     C     sdpgm         chain     hsp002                             92
+     C                   if        *in92 = *off
+     C                   z-add     fncopy        ldcopy
+     C                   moveL     fnhold        ldhold
+     C                   endif
+      *
+     C                   if        ldcopy = 0
+     C                   z-add     1             ldcopy
+     C                   endif
+      *
+     C                   if        ldhold = *blank
+     C                   moveL     no            ldhold
+     C                   endif
+     C                   out       lda
+      *
+      * Define the data area that contains the movement number
+      *
+     C     *dtaara       define                  damvsn
+      *
+      *
+      * Define the data area that contains the current accounting period
+      *
+     C     *dtaara       define                  daaper
+     C                   in        *dtaara
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+     C                   endsr
+      /EJECT
+      *****************************************************************
+      * COMPILE TIME ARRAY 'CMD' USED IN QCMDEXC
+      *****************************************************************
+** CMD table 'CMD' submits listing when F7 selected
+SBMJOB CMD(CALL PGM(HP179CL)) JOB(ACTGLISTS) JOBQ(__________)

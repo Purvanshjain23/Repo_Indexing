@@ -1,0 +1,448 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      *****************  RPG PROGRAM HEADING  ************************
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Datamart--Sales
+      * PROGRAM:     SH217 - Datamart Sales: Freezer Inventory
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     08/12/13
+      *
+      * This is only for Pork..not Dailys.
+      *
+      * Adam Gross has requested that we NOW run this on Saturday only.
+      * So, this will be a "snapshot" of the Inventory on Saturday.
+      * He wants it run on Saturday so that he gets WeekEnding values on
+      * a WeekEnding date.  NOTE: I am not doing any "find the Saturday" logic
+      * using the System Date; so, if this gets run on a day of the week other
+      * than Saturday, that data will not be for a Saturday WeekEnding date.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * Date      Programmer
+      *
+      * 01/14/14  LeAnne Ramsey (E2980)
+      *           Per Purva, we are removing the Open Order field from the
+      *           file; this is NOT a Product Availability System.
+      *           We will now clear/rebuild the file on each run.
+      *           We have dropped to another level: Production Date.
+      *
+      * 01/24/14  LeAnne Ramsey (E2980)
+      *           Now, Adam Gross wants us to just run this on Saturdays and
+      *           to keep the data......so, he can get "trending" in Cognos.
+      *
+      * 02/24/17  Danny Nguyen (R9083)
+      *           New Seaboard Triumph Foods (STF) will need to be valued on its own and NOT
+      *           included in company 360/960 Valuation and NOT included in the Triumph Fees
+      *           & Payments Weekly Revenue processing.
+      *           Changed process to get Grouping code based on User Profile Company. This
+      *           change will allow Company 440 to also utilize this process.
+      *           Added Company Values (PDKMREL1) file to get Grouping code. Inventory Value File
+      *           (ppbtcpp) keys have changed to have Grouping code as the first key.
+      *           Changed PPBTCPL5 logical file to include Grouping as the first key.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fcaadrel3  if   e           k disk
+      *  Warehouse (LF selects only Active Warehouses)
+      *
+      *
+     Fcab0relk  if   e           k disk
+      *  Item balance (LF selects only Active records with on-hand weight)
+      *
+      *
+     Fcab1rel1  if   e           k disk
+      *    Item balance detail
+      *    (We use this file when a Warehouse has Lot Tracking = NO)
+      *
+      *
+     Fpdl5cpl1  if   e           k disk
+      *    Item lot location
+      *    (We use this file when a Warehouse has Lot Tracking = YES)
+      *
+      *
+R9083Fpdkmrel1  if   e           k disk
+R9083 *  Company Values
+      *
+      *
+     Fppbtcpl5  if   e           k disk
+      *  Inventory Value File (LF selects only Posted/Reposted records)
+      *
+      *
+     Fshp217    uf a e           k disk
+      *  Datamart: Freezer Inventory
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *---------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------
+      *
+      * Parms
+      *
+     D xxsatdt         s              8  0
+     D xxdt            s              8  0
+     D xxyr            s              4  0
+     D xxpe            s              2  0
+     D xxwk            s              2  0
+      *
+      * Workfields for date manipulation
+      *
+     D wkohqt          s                   like(fiohqt)
+     D wkohwt          s                   like(fiohwt)
+      *
+      * Workfields for date manipulation
+      *
+     D wknulldt        s                   like(fisydt)   inz(D'0001-01-01')
+     D wksydtiso       s               D   datfmt(*iso)
+     D wksydtmdcy      s               D   datfmt(*mdy)
+     D wk80sydt        s              8  0
+      *
+     D wkeldt          s                   like(b1eldt)
+     D wkiso           s               D   datfmt(*iso)
+     D wkmdcy          s               D   datfmt(*mdy)
+     D wk80dt          s              8  0
+      *
+R9083 * Control fields
+  |   *
+  |  D wkcvcd          s                   like(kmv8cd) inz('IVFGROUP')
+  |   *
+  |   * Standard fields
+  |   *
+R9083D wkinvgrp        s              1    inz(*blank)
+      *
+      ****************************************************************
+      * Data Structures
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * We will drive this logic by reading the Item Balance file.
+      * (Note: The LF selects only active records with on-hand weight.)
+      *
+     C     *loval        setll     cab0relk
+     C                   dou       *in90 = *on                                  Main do loop
+     C                   read      cab0relk                               90
+     C                   if        *in90 = *off                                 If not eof
+      *
+      * Is this warehouse a Freezer warehouse? If so,
+      * Retrieve On-Hand Quantity and write/update the Datamart record.
+      * The retrieval file depends on the Warehouse Lot Tracking flag:
+      *         Item Balance Detail (when lot tracking is NO)
+      *         Item Lot Location   (when lot tracking is YES)
+      *
+     C     b0ajcd        chain     caadrel3                           92
+     C                   if        *in92 = *off and adwpst = 'FZ'               If freezer
+      *
+     C                   select
+     C                   when      advhst = no
+     C                   exsr      $baldtl
+     C                   other
+     C                   exsr      $lotdtl
+     C                   endsl
+      *
+     C                   endif                                                  If freezer
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Main do loop
+      *
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * Get On-Hand Quantity from the Item Balance Detail file
+      *---------------------------------------------------------------
+      * Note: You are here when Lot Tracking for the Warehouse is NO
+      *       Only process Active records with an On-Hand Quantity.
+      * You will be doing a read/write because records are unique by:
+      *        Company
+      *        Warehouse
+      *        Item
+      *        Production Date
+      *
+     C     $baldtl       begsr
+      *
+     C     key01         setll     cab1rel1
+      *
+     C                   dou       *in91 = *on                                  Do dtl loop
+     C     key01         reade     cab1rel1                               91
+     C                   if        *in91 = *off and b1arqt <> 0
+     C                             and b1vsst = 'A'
+     C                   z-add     b1eldt        wkeldt
+     C                   z-add     b1arqt        wkohqt
+     C                   z-add     b1acwg        wkohwt
+     C                   exsr      $wrt217
+     C                   endif
+     C                   enddo                                                  Do dtl loop
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Get On-Hand Quantity from the Item Lot Location file
+      *---------------------------------------------------------------
+      * Note: You are here when Lot Tracking for the Warehouse is YES
+      *       Only process Active records with an On-Hand Quantity GT zero.
+      *       Only process records where the Hold Reason Code is blank.
+      *
+     C     $lotdtl       begsr
+      *
+     C     key01         setll     pdl5cpl1
+      *
+     C                   dou       *in91 = *on                                  Do lot loop
+     C     key01         reade     pdl5cpl1                               91
+     c                   if        *in91 = *off and l5j2qt > 0                  If not eof
+     c                             and l5vsst = 'A'
+      *
+      * When the Inventory Hold Reason Code is blank (aka: not on hold),
+      * process.
+     C                   if        l5yscd = *blank                              If not on hold
+     C                   z-add     l5eldt        wkeldt
+     C                   z-add     l5j2qt        wkohqt
+     C                   eval(h)   wkohwt = l5j2qt * l5g5wg
+      *
+      * Format Production Date
+     C                   exsr      $pddt
+      *
+      * If a Datamart record already exists for this System Date/Company/Warehouse/
+      * Item/Production Date, update the On-Hand Quantity and Weight; otherwise,
+      * write a Datamart record.
+      *
+     C     key02         chain     shp217                             92
+     C                   if        *in92 = *on
+     C                   exsr      $wrt217
+     C                   else
+     C                   add       wkohqt        fiohqt
+     C                   add       wkohwt        fiohwt
+     C                   update    firec
+     C                   endif
+     C                   endif                                                  If not on hold
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do lot loop
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------
+      * Retrieve the Weekly Inventory Value Prc/CW for the Item/Production Date
+      *---------------------------------------------------------------------------
+      * We retrieve this from the Inventory Value file. Data for the previous
+      * week is written to this file when Nathan Malone does an Inventory Stock
+      * Closing. He usually does this on Tuesday afternoon or Wednesday morning.
+      * We only keep 2 years of data in this file. So, for Datamart records that
+      * have a production date prior/earlier than the data in our Inventory Value
+      * file, I will just get the oldest record I can find for the Item.
+      *
+      * The LF selects only Posted/Reposted records and is keyed by:
+      *   Item
+      *   WeekEnding Date
+      *
+     C     $price        begsr
+      *
+      * Initialize Datmart fields
+      *
+     C                   z-add     0             fi80prwedt
+     C                   move      wknulldt      fiprwedt
+     C                   move      wknulldt      fiprwedtmd
+      *
+      * Find the Saturday WeekEnding Date associated with the Production Date.
+      *
+     C                   call      'TF811'
+     C                   parm      fi80pddt      xxdt
+     C                   parm      0             xxsatdt
+     C                   parm      0             xxyr
+     C                   parm      0             xxpe
+     C                   parm      0             xxwk
+      *
+     C     *iso          test(d)                 xxsatdt                92
+     C                   if        *in92 = *off                                 If OK Sat date
+      *
+R9083 ** Get Grouping code from Company Values file.
+  |  C     key04         chain     pdkmrel1                           92
+  |  C                   if        *in92 = *off
+  |  C                   movel     kmbxtx        wkinvgrp
+R9083C                   endif
+      *
+      * Retrieve the Inventory Values record for that Item/Saturday
+      ** R9083 - PPBTCPL5 will now retrieve the Inventory Value record for that
+      **         Grouping/Item/Saturday.
+      *
+     C     key03         chain     ppbtcpl5                           92
+     C                   if        *in92 = *off                                 If price
+     C                   z-add     btfzvl        fiinpr
+     C                   z-add     btajdx        fi80prwedt
+     C     *iso          move      btajdx        fiprwedt
+     C     *iso          move      btajdx        fiprwedtmd
+     C                   else
+      *
+      * So, you are here when you do not find an Inventory Value record.
+      * This may be because 1) the Item has just been produced and there
+      * is not yet a Posted Values record or 2) the produced date is so
+      * old that the Values record has already been purged. So, depending,
+      * we will get the oldest or the latest record.
+      *
+     C                   select
+     C                   when      fiage < 30
+      *
+R9083 ** Retrieve Inventory Value record for Grouping/Item.
+  |  C**   fiitcd        setgt     ppbtcpl5
+  |  C     key05         setgt     ppbtcpl5
+  |  C**   fiitcd        readpe    ppbtcpl5                               92
+R9083C     key05         readpe    ppbtcpl5                               92
+     C                   other
+      *
+R9083C**   fiitcd        setll     ppbtcpl5
+  |  C     key05         setll     ppbtcpl5
+  |  C**   fiitcd        reade     ppbtcpl5                               92
+R9083C     key05         reade     ppbtcpl5                               92
+     C                   endsl
+      *
+     C                   if        *in92 = *off                                 If last ditch
+     C                   z-add     btfxvl        fiinpr
+     C                   z-add     btajdx        fi80prwedt
+     C     *iso          move      btajdx        fiprwedt
+     C     *iso          move      btajdx        fiprwedtmd
+     C                   endif                                                  If last ditch
+     C                   endif                                                  If price
+     C                   endif                                                  If OK Sat date
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------
+      * Format Production Date
+      *--------------------------------------------------------------------
+      *
+     C     $pddt         begsr
+      *
+     C     *cymd         test(d)                 wkeldt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      wkeldt        fipddt
+     C     *iso          move      fipddt        fi80pddt
+     C                   move      fipddt        fipddtmd
+     C                   else
+     C                   move      wknulldt      fipddt
+     C                   move      wknulldt      fipddtmd
+     C                   z-add     0             fi80pddt
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------
+      * Write a Datamart record.
+      *--------------------------------------------------------------------
+      *
+     C     $wrt217       begsr
+      *
+      * Organization will be S=Seaboard....no Dailys stuff is processed.
+      *
+     C                   move      'S'           ficorg
+      * System Date
+     C                   movel     wksydtiso     fisydt
+     C                   movel     wksydtmdcy    fisydtmdcy
+     C                   z-add     wk80sydt      fi80sydt
+      *
+      * From Item Balance
+     C                   z-add     b0aic3        fishcono
+     C                   z-add     b0hgcd        fiitcd
+     C                   move      b0ajcd        fiwhcd
+      *
+      * Format Production Date
+     C                   exsr      $pddt
+      *
+      * Calc the Age (in Days) of the Item.
+      *
+     C     fisydt        subdur    fipddt        fiage:*d
+     C                   add       1             fiage
+      *
+      * Retrieve price
+     C                   exsr      $price
+      *
+      * Populate On-hand Quantity and Weight
+      *
+     C                   z-add     wkohqt        fiohqt
+     C                   z-add     wkohwt        fiohwt
+      *
+     C                   write     firec
+     C                   clear                   firec
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    b0aic3
+     C                   kfld                    b0hgcd
+     C                   kfld                    b0ajcd
+      *
+     C     key02         klist
+     C                   kfld                    wk80sydt
+     C                   kfld                    b0aic3
+     C                   kfld                    b0ajcd
+     C                   kfld                    b0hgcd
+     C                   kfld                    fi80pddt
+      *
+     C     key03         klist
+R9083C                   kfld                    wkinvgrp
+     C                   kfld                    fiitcd
+     C                   kfld                    xxsatdt
+      *
+R9083C     key04         klist
+  |  C                   kfld                    b1aic3
+  |  C                   kfld                    wkcvcd
+  |   *
+  |  C     key05         klist
+  |  C                   kfld                    wkinvgrp
+R9083C                   kfld                    fiitcd
+      *
+      * Retrieve System date and get it into the 3 formats that we will plop
+      * into each record that we write in this run.
+      *
+     C     *mdy          movel     udate         wksydtiso
+     C                   movel     wksydtiso     wk80sydt
+     C                   movel     wksydtiso     wksydtmdcy
+      *
+      *  Now, just in case we run this more than once on the same "system date",
+      *  delete all existing records for this date.
+      *
+     C     wk80sydt      setll     shp217
+     C                   dou       *in91 = *on                                  Do delete
+     C     wk80sydt      reade     shp217                                 91
+     C                   if        *in91 = *off
+     C                   delete    firec
+     C                   endif
+     C                   enddo                                                  Do delete
+      *
+     C                   endsr
+      /EJECT

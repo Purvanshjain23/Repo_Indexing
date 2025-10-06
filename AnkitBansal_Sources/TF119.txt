@@ -1,0 +1,974 @@
+     h option(*SRCSTMT:*NODEBUGIO)
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF119
+      * TITLE:       Margin: Revise Product Exception
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     09/08/06
+      *
+      *
+      * FUNCTION: Uses an edit record format to add/change/delete records.
+      *
+      *           This program is called from TF419-Work with Product Exceptions.
+      *
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/25/06  LeAnne Ramsey
+      *           Swapped Produced Pounds/Amount on the screen so that "Pounds" is above
+      *           "Amount".
+      *
+      * 02/14/07  LeAnne Ramsey
+      *           Recompile only. New field "STD Other Cost/LB" was added to
+      *           Weekly Product Revenue Detail file.
+      *
+      * 04/16/07  LeAnne Ramsey
+      *           We switched the following flag fields:
+      *             1) Exclude from Mix Flag    is now Mix Flag
+      *             2) Exclude from Volume Flag is now Volume Flag
+      *           Before this change Y=Yes meant EXCLUDE the product from processing
+      *           After this change  Y=Yes means INCLUDE the product in processing
+      *
+      * 05/14/07  LeAnne Ramsey
+      *           Recompile only. "Co-owner" fields were added to file TFP010.
+      *
+      * 08/13/07  LeAnne Ramsey
+      *           Recompile only.
+      *           We are now putting Work-in-Process items in file TFP010.
+      *           Prior to this, we only had Finished Goods items in TFP010.
+      *           In this program, we want to allow "exceptions" for both FG and
+      *           WP Items.
+      *
+      * 06/12/08  LeAnne Ramsey
+      *           We are now writing Product Exception records to this file from the Meat
+      *           Costing function (we create these records as System-Generated = Yes). We
+      *           have many new fields in the Product Exception records as a result. Changed
+      *           this program to handle all this.
+      *
+      * 07/01/08  LeAnne Ramsey
+      *           In the Product Exception file we increased decimal positions:
+      *              "pounds" fields to 4 decimals
+      *              "amount" fields to 6 decimals
+      *
+      * 09/11/08  LeAnne Ramsey
+      *           Recompile only. Export/Domestic Flag was added to TFP010-
+      *           Weekly Product Revenue Detail file.
+      *
+      * 05/02/12  LeAnne Ramsey (E2083)
+      *           The user-entered values for Mix/VOlume Flag entered on the
+      *           screen were being replaced/overriden with the subsequent
+      *           chain to TFP010.
+      *
+      * 11/14/17  Danny Nguyen  (R12011A-Weekly Product Revenue)
+      *           Recompile only. Added 25 STF fields to TFP010 file.
+      *
+      * 05/17/22  Danny Nguyen  (DO2484 - WI 479 STF Variance Reporting)
+      *           Recompile only. Added 2 STF fields to TFP010 file.
+      *           PRXYPC   - STF STD YIELD %
+      *           PRXPMPPC - STF PUMP %
+      *
+      * 10/10/22  R Centonze   W105621 - Increase price fields to handle > 999.99
+      *                        CHANGE @@ANPRPR TO SIZE 10.6  --> pranprpr tfp010
+      *
+      *
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Ftfd119    cf   e             workstn infds(iofeed)
+      *
+      *
+     Fombyrel1  if   e           k disk
+      *    Item Default
+      *
+      *
+     fomfarel1  if   e           k disk
+      *  Product class
+      *
+      *
+     Fppaorel1  if   e           k disk
+      *    TF Margin adjustment group detail
+      *
+      *
+     Ftfp010    if   e           k disk
+      *   Weekly product revenue detail
+      *
+      *
+     Ftfp099    if   e           k disk
+      *   Function control
+      *
+      *
+     Ftfp019    uf a e           k disk
+      *   Product exceptions
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D create          c                   'CREATE'
+     D revise          c                   'REVISE'
+     D delete          c                   'DELETE'
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D set1            c                   'SET1  '
+     D edit1           c                   'EDIT1 '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+     D update          c                   'UPDATE'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D mode            s              6
+     D pgm             s             10
+     D msgfl           s             10
+     D routne          s              6
+     D rtncd           s              2
+     D action          s                   like(mode)
+     D maxmsg          s              2  0  inz(20)
+      *
+      * Control/Save fields
+      *
+     D fyimsg          s              2  0
+     D svwedt          s                   like(pewedt)
+      *
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+      *
+      * Parms
+      *
+     D xxpfcd          s              1
+     D xxsn            s                   like(pepesn)
+     D xxpesn          s                   like(pepesn)
+     D xxprcd          s                   like(d1prcd)
+     D xxprds          s                   like(d1prds)
+     D xxalphprcd      s              7
+     D xxynfl          s                   like(d1mixfl)
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /eject
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off                                         Main do
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     edit1         $edit1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo                                                  Main do
+      /eject
+      *----------------------------------------------------------------
+      * Set environment for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $set1         begsr
+      *
+      * If incoming mode is REVISE or DELETE, then retrieve the database
+      * record.  Do not lock the record.  Typically, in DELETE mode, these
+      * values will not be displayed. However, if there is an error on the
+      * delete action, the panel will be displayed with messages.
+      *
+     C                   select
+     C                   when      mode = create                                WH create
+     C                   z-add     0             d1prcd
+     C                   move      *blank        d1prds
+     C                   move      *blank        d1excom
+     C                   move      *blank        d1mixfl
+     C                   move      *blank        d1volfl
+     C                   move      *blank        d1stdmixfl
+     C                   move      *blank        d1stdvolfl
+      *
+     C                   z-add     0             d1sexsllb
+     C                   z-add     0             d1sexnpram
+     C                   z-add     0             d1sexpulb
+     C                   z-add     0             d1sexpuam
+      *
+     C                   z-add     0             d1texsllb
+     C                   z-add     0             d1texnpram
+     C                   z-add     0             d1texpulb
+     C                   z-add     0             d1texpuam
+      *
+     C                   when      mode = revise or mode = delete               WH revise/delete
+     C     key03         chain(n)  tfp019                             92
+     C                   if        *in92 = *on                                  If no hit
+     C                   seton                                        62
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09008'
+     C                   endif
+     C                   else
+      *
+     C                   z-add     pewedt        svwedt
+     C                   z-add     peprcd        d1prcd
+     C                   move      peexcom       d1excom
+     C                   move      pemixfl       d1mixfl
+     C                   move      pevolfl       d1volfl
+      *
+     C                   z-add     pesexsllb     d1sexsllb
+     C                   z-add     pesexnpram    d1sexnpram
+     C                   z-add     pesexpulb     d1sexpulb
+     C                   z-add     pesexpuam     d1sexpuam
+      *
+     C                   z-add     petexsllb     d1texsllb
+     C                   z-add     petexnpram    d1texnpram
+     C                   z-add     petexpulb     d1texpulb
+     C                   z-add     petexpuam     d1texpuam
+      *
+      * Flip Week-Ending Date to MMDDYY format
+      *
+     C     *iso          test(d)                 pewedt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C                   move      pewedt        wkisodate
+     C     *mdy          move      wkisodate     d1wedtmdy
+     C                   else
+     C                   z-add     0             d1wedtmdy
+     C                   endif                                                  If OK date
+      *
+      * Retrieve Product Description
+      *
+     C                   exsr      $desc
+     C                   endif                                                  If no hit
+     C                   endsl
+      *
+      * If the user is deleting and there were no errors when retrieving the
+      * record, go on to the update routine without displaying the screen.
+      * Otherwise, display the screen.
+      *
+     C                   if        error = 0 and action = delete                If no error
+     C                   exsr      $accept
+     C                   else
+     C                   eval      routne = scrn1
+     C                   endif                                                  If no error
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Perform operator I/O for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $scrn1        begsr
+      *
+      * Write the error messages from the error arrays to the
+      * error message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * Set indicators to control input/output fields and available
+      * function keys.
+     C                   exsr      $ind
+      *
+      *
+      * Write screen 1 to CRT
+      *
+     C                   write     tf119k1
+     C                   write     tf119ec
+     C                   exfmt     tf119r1
+      *
+      * Clear messages
+     C                   exsr      $clmsg
+      *
+      *
+      * Reset action to be equal to the incoming mode.  This is required
+      * in case the user took F11-Delete and got an error on the
+      * deletion and now needs to be able to change the record and take
+      * an action other than delete
+      *
+     C                   eval      action = mode
+      *
+      * Get user's input and set routine
+      *
+     C                   select
+     C                   when      *in03 = *on                                  F3-exit
+     C                   eval      rtncd = '03'
+     C                   eval      routne = exit
+      *
+     C                   when      *in04 = *on                                  F4=prompt
+     C                   exsr      $f4s1
+      *
+     C                   when      *in05 = *on                                  F5-refresh
+     C                   eval      routne = set1
+      *
+     C                   when      *in09 = *on                                  F9-accept
+     C                   exsr      $edit1
+     C                   if        error = 0 or error = fyimsg
+     C                   exsr      $accept
+     C                   endif
+      *
+     C                   when      *in11 = *on or mode = delete                 F11-delete
+     C                   eval      action = delete
+     C                   exsr      $accept
+      *
+     C                   when      *in12 = *on                                  F12-previous
+     C                   eval      rtncd = '12'
+     C                   eval      routne = exit
+     C                   other
+      *
+      * User has pressed enter
+      *
+     C                   eval      routne = edit1
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Set indicators to control/protect screen fields
+      *----------------------------------------------------------------
+      *
+     C     $ind          begsr
+      *
+     c                   select
+     C                   when      mode = revise
+     C                   seton                                        60
+      *
+     C                   when      mode = create
+     C                   seton                                        61
+      *
+     C                   when      mode = delete
+     C                   seton                                        62
+     c                   endsl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Edit input fields for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $edit1        begsr
+      *
+     C                   z-add     0             fyimsg
+      *
+      * *IN62 will be on if the record the user is trying to access has
+      * been deleted by another user.  So, only perform the edits for the
+      * fields on the screen if the indicator is off
+      *
+     C                   if        *in62 = *off                                 If here
+      *
+      * In Create Mode, validate:
+      *   1) Product code
+      *
+     C                   if        mode = create
+     C                   exsr      $prcd
+     C                   endif
+      *
+      * Always validate:
+      *   1) flags
+      *   2) user must enter something
+      *
+     C                   exsr      $flags
+     C                   exsr      $something
+     C                   endif                                                  If here
+      *
+      * Validate that:
+      *   1) the "Week-ending Date" on the screen is still the "current"
+      *      week in the Function Control file
+      *   2) a "Final" close of the week has not been submitted
+      *
+     C     'MARGIN    '  chain     tfp099                             92
+     C                   if        *in92 = *off                                 If hit
+      *
+     C                   if        fncedt <> svwedt and
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS08099'
+     C                   endif
+      *
+     C                   if        fnsbfl = yes and
+     C                             fnpfcd = 'F' and
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS08100'
+     C                   endif
+     C                   endif                                                  If hit
+      *
+     C                   movel     scrn1         routne
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * Validate Product Code   (in CREATE mode only)
+      *------------------------------------------------------------------------------------
+      *
+      * Validations:
+      *  1) required
+      *  2) must exist in the Item master
+      *  3) must exist on a Weekly Revenue Detail record for this week
+      *
+     C     $prcd         begsr
+      *
+     C                   move      *blank        d1stdmixfl
+     C                   move      *blank        d1stdvolfl
+     C                   move      *blank        d1prds
+      *
+     C                   select
+     C                   when      d1prcd = 0
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+      *
+     C                   when      d1prcd < 0
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+     C                   other
+      *
+      * Product must exist in the Item Default file
+      *
+     C     d1prcd        chain     ombyrel1                           92
+     C                   if        *in92 = *on
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS08006'     mgid(e)
+     C                   clear                   mgw
+     C                   move      d1prcd        xxalphprcd
+     C                   movea     xxalphprcd    mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   else
+      *
+     C                   eval      d1prds  = byavna
+      *
+      * Retrieve the OMS "normal" flag values.
+      *
+     C                   exsr      $rtvflags
+      *
+      * There must be a record for this Product in the Weekly Product Revenue
+      * Detail file for this week.
+      *
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *on
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS08097'
+     C                   endif
+     C                   endif
+      *
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * Retrieve the Flags from the OMS file
+      *------------------------------------------------------------------------------------
+      *
+     C     $rtvflags     begsr
+      *
+     C     key02         chain     ppaorel1                           92
+     C                   if        *in92 = *off                                 If hit
+     C                   move      aoswsx        d1stdmixfl
+     C                   move      aosxsx        d1stdvolfl
+      *
+     C                   if        d1mixfl = *blank
+     C                   move      d1stdmixfl    d1mixfl
+     C                   endif
+      *
+     C                   if        d1volfl = *blank
+     C                   move      d1stdvolfl    d1volfl
+     C                   endif
+      *
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * Validate the flags
+      *------------------------------------------------------------------------------------
+      *
+     C     $flags        begsr
+      *
+      * Mix Flag
+     C                   select
+     C                   when      d1mixfl <> yes and
+     C                             d1mixfl <> no
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09106'
+     C                   endif
+      *
+     C                   when      d1mixfl <> d1stdmixfl
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   add       1             fyimsg
+     C                   eval      mgid(e) = 'HS08088'
+     C                   endif
+     C                   endsl
+      *
+      * Volume Flag
+     C                   select
+     C                   when      d1volfl <> yes and
+     C                             d1volfl <> no
+     C                   seton                                        32
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09106'
+     C                   endif
+      *
+     C                   when      d1volfl <> d1stdvolfl
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   add       1             fyimsg
+     C                   eval      mgid(e) = 'HS08089'
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * User must enter something
+      *------------------------------------------------------------------------------------
+      *
+     C     $something    begsr
+      *
+     C                   if        d1mixfl = d1stdmixfl and
+     C                             d1volfl = d1stdvolfl and
+     C                             d1sexsllb = 0 and
+     C                             d1texsllb = 0 and
+     C                             d1sexnpram = 0 and
+     C                             d1texnpram = 0 and
+     C                             d1sexpuam = 0 and
+     C                             d1texpuam = 0 and
+     C                             d1sexpulb = 0 and
+     C                             d1texpulb = 0
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS08094'
+     C                   endif
+      *
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * F4 prompt on screen 1
+      *---------------------------------------------------------------
+      *
+     C     $f4s1         begsr
+      *
+      * Product Code
+     C                   select
+     C                   when      fld = 'D1PRCD' and *in61 = *on
+     C                   seton                                        50
+     C                   call      'TF504'
+     C                   parm      0             xxprcd
+     C                   parm      *blank        xxprds
+     C                   if        xxprcd <> 0
+     C                   z-add     xxprcd        d1prcd
+     C                   eval      d1prds = xxprds
+     C                   endif
+      *
+      * Mix Flag
+     C                   when      fld = 'D1MIXFL'
+     C                   seton                                        51
+     C                   call      'HP522'
+     C                   parm      *blank        xxynfl
+     C                   if        xxynfl <> *blank
+     C                   move      xxynfl        d1mixfl
+     C                   endif
+      *
+      * Volume Flag
+     C                   when      fld = 'D1VOLFL'
+     C                   seton                                        52
+     C                   call      'HP522'
+     C                   parm      *blank        xxynfl
+     C                   if        xxynfl <> *blank
+     C                   move      xxynfl        d1volfl
+     C                   endif
+     C                   other
+      *
+      * F4 not valid for this field...issue message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error                                        013
+     C                   movel     'HS09011'     mgid(e)
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Write/update/delete record in database file
+      *----------------------------------------------------------------
+      *
+     C     $accept       begsr
+      *
+      *
+      * We do not have to perform deletion integrity checks because we do not even
+      * let the user into this program if they cannot delete.
+      *
+     C                   if        action = delete
+     C                   endif
+      *
+      * If user action is revising or deleting, determine that the
+      * record he is accessing still exists prior to attempting to
+      * update.  Lock the record for update.
+      *
+     C                   if        (error = 0 or error = fyimsg) and             If OK
+     C                             (action = delete or action = revise)
+     C     key03         chain     tfp019                             92
+     C                   if        *in92 = *on                                  If not found
+     C                   seton                                        62
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09008'
+     C                   endif
+     C                   endif                                                  If not found
+     C                   endif                                                  If OK
+      *
+      *
+      * If there are no errors, delete, revise or create the record.
+      *
+     C                   if        error = 0 or error = fyimsg                  If no error
+      *
+     c                   select
+     C                   when      action = delete
+     C                   delete    perec
+     C                   other
+      *
+      * Move DSPF fields to database file fields
+      *
+     C                   z-add     fncyr         peyr
+     C                   z-add     fncwk         pewk
+     C                   z-add     fncedt        pewedt
+      *
+     C                   z-add     d1prcd        peprcd
+     C                   move      d1excom       peexcom
+     C                   move      d1mixfl       pemixfl
+     C                   move      d1volfl       pevolfl
+      *
+     C                   z-add     d1sexsllb     pesexsllb
+     C                   z-add     d1sexnpram    pesexnpram
+     C                   z-add     d1sexpulb     pesexpulb
+     C                   z-add     d1sexpuam     pesexpuam
+      *
+     C                   z-add     d1texsllb     petexsllb
+     C                   z-add     d1texnpram    petexnpram
+     C                   z-add     d1texpulb     petexpulb
+     C                   z-add     d1texpuam     petexpuam
+      *
+      * Populate some fields using the Weekly Revenue Detail record
+      *
+     C     key04         chain     tfp010                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   move      prtfcgcd      petfcgcd
+     C                   move      prtfclcd      petfclcd
+     C                   z-add     pristycd      peistycd
+     C                   z-add     prisgrcd      peisgrcd
+     C                   z-add     prisclcd      peisclcd
+     C                   move      prcgcd        pecgcd
+     C                   move      pritycd       peitycd
+     C                   move      prcgcd        pesgcd
+     C                   endif                                                  If hit
+      *
+      * Populate the Meat Cost Sub-Group code.  All items will have the same
+      * Sub-Group code as the MC Group Code other than the SRLN items.  We use
+      * the Sub-Group code to designate if the SRLN is BNIN or BNLS.
+      * If the IS Structure Class is 850 it is considered BNIN, otherwise
+      * it is BNLS.
+     C                   if        pecgcd = 'SRLN'
+     C                   if        peisclcd = 850
+     C                   eval      pesgcd = 'BNIN'
+     C                   else
+     C                   eval      pesgcd = 'BNLS'
+     C                   endif
+     C                   endif
+      *
+      * Retrieve Description for Item Structure Class Code.
+      *
+     C     peisclcd      chain     omfarel1                           92
+     C                   if        *in92 = *off
+     C                   eval      peisclds = fadetx
+     C                   endif
+      *
+     C                   if        action = create
+     C                   exsr      $wrt019
+     C                   else
+     C                   update    perec
+     C                   endif                                                  If create
+      *
+     C                   endsl
+     C                   endif                                                  If no error
+      *
+      * Always redisplay when:
+      *     1) there are errors
+      *     2) you are creating records
+      *
+     C                   select
+     C                   when      error > 0 and error <> fyimsg
+     C                   movel     scrn1         routne
+      *
+     C                   when      mode = create
+     C                   exsr      $clmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09040'
+     C                   eval      routne = set1
+     C                   other
+      *
+     C                   eval      rtncd = '00'
+     C                   movel     exit          routne
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------
+      * Write record
+      *-------------------------------------------------------------------------------------
+      *
+     C     $wrt019       begsr
+      *
+      * Retrieve the System-Generated Number
+      *
+     C                   call      'TF810'
+     C                   parm      ' '           xxpfcd
+     C     pepesn        parm      0             xxsn
+      *
+      * Set up the "program" that "created" this record
+      *
+     C                   eval      pepgm = sdpgm
+      *
+      * Set System-Generated Flag to NO
+      *
+     C                   move      no            pesysfl
+      *
+     C     key02         chain     ppaorel1                           92
+     C                   if        *in92 = *off
+     C                   move      aoi1t1        pemixgrp
+     C                   else
+     C                   move      *blank        pemixgrp
+     C                   endif
+      *
+     C                   write     perec
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------
+      * Write error messages
+      *-------------------------------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Set on last record indicator and end job
+      *----------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        lr
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve description, etc.
+      *---------------------------------------------------------------
+      *
+     C     $desc         begsr
+      *
+      * Product Description
+      *
+     C     d1prcd        chain     ombyrel1                           92
+     C                   if        *in92 = *on
+     C                   eval      d1prds = 'Unknown'
+     C                   else
+      *
+     C                   eval      d1prds  = byavna
+     C                   exsr      $rtvflags
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm Lists
+      *
+     C     *entry        plist
+     C     d1mode        parm                    mode
+     C                   parm                    xxpesn
+     C     d1prcd        parm                    xxprcd
+     C                   parm                    rtncd
+      *
+     C                   movel     mode          action
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    d1prcd
+     C                   kfld                    svwedt
+      *
+     C     key02         klist
+     C                   kfld                    bytcst
+     C                   kfld                    byrgnb
+     C                   kfld                    byrhnb
+     C                   kfld                    byrinb
+      *
+     C     key03         klist
+     C                   kfld                    xxpesn
+     C                   kfld                    xxprcd
+      *
+     C     key04         klist
+     C                   kfld                    peprcd
+     C                   kfld                    pewedt
+      *
+      * In Create mode,
+      *   1) retrieve the "Current End Date" for "Margin" from the Function Control
+      *      file---it will be your "week-ending" date.
+      *
+     C                   if        mode = create                                If create
+     C     'MARGIN    '  chain     tfp099                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   z-add     fncedt        svwedt
+     C                   z-add     fncemdy       d1wedtmdy
+     C                   endif                                                  If hit
+     C                   endif                                                  If create
+      *
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+     C                   endsr
+      /eject

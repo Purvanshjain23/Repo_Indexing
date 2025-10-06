@@ -1,0 +1,1200 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      Triumph Foods / JD Edwards
+      * PROGRAM:     TFJDE271
+      * TITLE:       Upload Cash Distribution to JDE
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     02/20/06
+      *
+      *  FUNCTION:   This program uploads Cash Distribution data to JDE.
+      *
+      *              The program is called from Work With Cash Distribution Headers
+      *              when the "Post" option is submitted.
+      *
+      *              For this function:
+      *                Seaboard is Company 362 --> now 320 7/28/21
+      *                Triumph  is Company 960
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/30/06  LeAnne Ramsey
+      *           Added a "week" parm on the call to the generic "calendar" program.
+      *
+      * 01/21/08  LeAnne Ramsey
+      *           Added a parm of A=Accounting on the call to generic program TF815
+      *           so that we will get back the Accounting Year/Period instead of the
+      *           Production (HPS) Year/Period. (The program will return zero for the
+      *           Accounting week---which we don't use.)
+      *
+      * 04/24/08  LeAnne Ramsey
+      *           Recompile only. Added 2 fields to Cash Distribution Detail:
+      *             1) system generated flag (yes/no)
+      *             2) adjustment comment
+      *
+      * 09/30/09  Alice Brownfield    ---   E00493
+      *           Change to bring in new "AR Adj PayOut amount" to add to
+      *           TF's Total payment amount.
+      * 01/23/17  Brad Baden          ---   E8287
+      *           Add input parameters for companies 320 and 960 to
+      *           determine if the company has gone live with M3.
+      *
+      *  RMC E8287  3/23/17 Fix M3 parallel not working for JDE write to f0911
+      *  RMC E8287  5/03/17 Dont create batch header for 362/960 if they are live with M3
+      *  RMC S11799 10/03/17 XXCO gets blanked out if the JDE entry isnf foumd, so move
+      *                      xxnumco into glco if that happens so it will be there for the
+      *                      M3GL checks       Scan: S11799
+     H*  4/20/2021  Rose Centonze               Scan:  SDN440
+     H*                   Modify to use the new E1 tables:
+     H*                   F0011  -->  E10011l1  when write here, write to e1b9cpp
+     H*                   F0901  -->  E10901
+     H*                   F0911  -->  E10911  --> new fields
+     H*   in tfjde801, tfjde800 -->   X0010  -->  GET0010  - new logic  -goes to BSSV
+      *         1 set edi trans no to gldoc
+      *         2 GLKCO - document company - leave blank
+      *         3 GLPKCO  GLOKCO  GLPSFX  - leave blank , not 000
+      *         4 glrcnd - reconciled-leave Blank
+      *         5 glag - should have the amount, not GLAA
+      *         6 icndo, icodcn- increment when get document
+      *         7 GL ENTRIES WILL HAVE EDI USER‚360- OMSJDESF or 960- OMSJDETF > xxedus  ***
+      *               Per company value
+      *
+      *  7/28/21          CHANGE all refs of company 362 to 320
+      *
+      /EJECT
+      ****************************************************************
+      * File specifications
+      ****************************************************************
+      *
+     Ftfp012    if   e           k disk
+      *  Cash distribution header
+      *
+      *
+     Ftfp013    if   e           k disk
+      *  Cash distribution detail
+      *
+      *
+     F*f0011     uf a e           k disk
+     Fe10011l1  uf a e           k disk                                          sdn440
+      *   JDE Batch control record
+      *
+      *
+     F*f0901     if   e             disk
+     Fe10901    if   e             disk                                          sdn440
+      *   JDE Account master
+      *
+      *
+     F*f0911     uf a e             disk
+     Fe10911    uf a e             disk                                          sdn440
+      *   JDE Account ledger
+      *
+      *
+     Fprint132  o    f  198        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * Definition specifications
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      *---------------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------------
+      *
+      *
+      * Standard fields
+      *
+     D dash            s            132    inz(*all'-')
+     d rtime           s              6  0
+      *
+      *
+      * Control fields
+      *
+     d return          s              7
+     d first           s              1    inz('Y')
+     d procfl          s              1    inz('N')
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+      *
+      * Workfields
+      *
+     d wkam            s                   like(cdtsxcdam)
+     d wksign          s              1  0
+     d wktsxcdam       s                   like(cdtsxcdam)
+     d wktafcdam       s                   like(cdtafcdam)
+     d wktbccdam       s                   like(cdtbccdam)
+     d wktoxcdam       s                   like(cdtoxcdam)
+      *
+     d wkuser          s                   like(gluser)
+      *
+     d wkbatcnt        s              5  0
+     d wksbatcnt       s              5  0                                      sf doc count  sdn440
+     d wktbatcnt       s              5  0                                      TF doc count  sdn440
+     d wkdoccnt        s              5  0
+     d wksdoccnt       s              5  0                                      SF line count sdn440
+     d wktdoccnt       s              5  0                                      TF line count SDN440
+     d wkaid           s              8
+     d wkani           s             29
+     D wkmcu           s                   like(gmmcu)
+     D wksub           s                   like(gmsub)
+     D wkobj           s                   like(gmobj)
+     d wkbatval        s             15  0
+     d wkbatvald       s             15  2                                       sdn440 with decs
+      *
+     d wknumco         s              3  0 inz(960)
+     d wkbatnbr        s                   like(glicu)
+     d wkglcode        s                   like(xxglcode)
+      *
+     d wksco5a         s              5
+     d wksbatnbr       s                   like(glicu)
+     d wksdocnbr       s                   like(gldoc)
+      *
+     d wktco5a         s              5
+     d wktbatnbr       s                   like(glicu)
+     d wktdocnbr       s                   like(gldoc)
+      *
+      * M3 Journal Entry Program Parms
+     d m3p0rtn         s              7
+     d m3aco           s              3  0
+     d m3gbmcu         s             12
+     d m3gbobj         s              6
+     d m3gbsub         s              8
+     d m3gbsbl         s              8
+     d m3gbamt         s             15  2
+     d m3gbqty         s             15  0
+     d m3date          s              8  0
+     d m3deschdr       s             40
+     d m3descdtl       s             40
+      *
+     d wktime          s             12  0
+     d wkdate          s              6  0
+     d wkcymd          s              8  0                                      LDA Date for M3
+      *
+     d wkm3gl          s              1
+     d wkjdegl         s              1
+      *
+      * Parm fields
+      *
+      * ENTRY
+     D xxm3lv320       s              1                                         M3 Live for 320  Y/N
+     D xxm3lv960       s              1                                         M3 Live for 960  Y/N
+      *
+     D xxacctco        s              3  0
+     D xxnumco         s              3  0
+      *
+     D xxedus          s                   like(gledus)
+     d xxsubtype       s              1
+     d xxbalsheet      s              1
+      *
+     d xxapfl          s              1
+     D xxdt            s              8  0
+     D xxyr            s              4  0
+     D xxpe            s              2  0
+     D xxwk            s              2  0
+      *
+      *
+      * For call to JDE date routine
+      *
+     d xxsidat         s              6
+     d*xxedat          s              8                                          sdn440
+     d xxedat          s              6  0                                       sdn440
+     d xxffmt          s              7
+     d xxtfmt          s              7
+     d xxsep           s              7
+     d xxertst         s              1
+     d xxctry          s              2
+     D xxccyymmdd      s              8  0                                      sdn440
+     D xxsyssyndt      s              7  0                                      sdn440
+      *
+      * For call to JDE account routine
+      *
+     d xxbatnbr        s                   like(glicu)
+     d xxdocnbr        s                   like(gldoc)
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxerrm          s              4
+      *
+     d xxglcode        s              8
+     d xxani           s                   like(glani)
+     d xxicu           s                   like(glicu)
+      *
+      * For call to M3 posting program
+      *
+     d xxp0rtn         s              7
+     d xxaco           s              3  0
+     d xxgbmcu         s             12
+     d xxgbobj         s              6
+     d xxgbsub         s              8
+     d xxgbsbl         s              8
+     d xxgbamt         s             15  2
+     d xxgbqty         s             15  0
+     d xxdate          s              8  0
+     d xxdeschdr       s             40    inz('TFS Cash Distribution')
+     d xxdescdtl       s             40    inz('TFS Cash Distribution')
+      *
+      *
+      * Print fields
+      *
+     d h1mdy           s              6  0
+      *
+     d h2conm          s              8
+     d h2batnbr        s                   like(glicu)
+     d h2docnbr        s                   like(gldoc)
+      *
+     d l1acct          s             28
+     d l1desc          s             30
+     d l1dbam          s                   like(wkam)
+     d l1cram          s                   like(wkam)
+      *
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+      *
+     d i0901ds         ds           500
+     d xxco                                like(gmco)
+     d xxaid                               like(gmaid)
+     d xxmcu                               like(gmmcu)
+     d xxobj                               like(gmobj)
+     d xxsub                               like(gmsub)
+     d xxans                               like(gmans)
+     d xxdl01                              like(gmdl01)
+     d xxlda                               like(gmlda)
+     d xxbpc                               like(gmbpc)
+     d xxpec                               like(gmpec)
+     d xxbill                              like(gmbill)
+     d xxcrcd                              like(gmcrcd)
+     d xxum                                like(gmum)
+     d xxr001                              like(gmr001)
+     d xxr002                              like(gmr002)
+     d xxr003                              like(gmr003)
+     d xxr004                              like(gmr004)
+     d xxr005                              like(gmr005)
+     d xxr006                              like(gmr006)
+     d xxr007                              like(gmr007)
+     d xxr008                              like(gmr008)
+     d xxr009                              like(gmr009)
+     d xxr010                              like(gmr010)
+     d xxr011                              like(gmr011)
+     d xxr012                              like(gmr012)
+     d xxr013                              like(gmr013)
+     d xxr014                              like(gmr014)
+     d xxr015                              like(gmr015)
+     d xxr016                              like(gmr016)
+     d xxr017                              like(gmr017)
+     d xxr018                              like(gmr018)
+     d xxr019                              like(gmr019)
+     d xxr020                              like(gmr020)
+     d xxr021                              like(gmr021)
+     d xxr022                              like(gmr022)
+     d xxr023                              like(gmr023)
+     d xxobja                              like(gmobja)
+     d xxsuba                              like(gmsuba)
+     d xxwcmp                              like(gmwcmp)
+     d xxcct                               like(gmcct)
+     d xxerc                               like(gmerc)
+     d xxhtc                               like(gmhtc)
+     d xxqlda                              like(gmqlda)
+     d xxccc                               like(gmccc)
+     d xxfmod                              like(gmfmod)
+     d xxuser                              like(gmuser)
+     d xxpid                               like(gmpid)
+     d xxjobn                              like(gmjobn)
+     d xxupmj                              like(gmupmj)
+     d xxupmt                              like(gmupmt)
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Break CCYY into CC and YY fields
+      *---------------------------------------------------------------
+      *
+     D wkyear          ds
+     D   wkccyy                       4  0
+     D   wkcc                         2  0 overlay(wkccyy:1)
+     D   wkyy                         2  0 overlay(wkccyy:3)
+      *
+      *----------------------------------------------------------------
+      * LDA - local data area
+      *----------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldbtsn                 1      7  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *-------------------------------------------------------------------------------------
+      * MAINLINE
+      *-------------------------------------------------------------------------------------
+      *
+      * Since we have to print all the Triumph entries first and then print all
+      * the Seaboard entries, we will run through the processing twice--first
+      * for Triumph and then for Seaboard.
+      *
+      * SO, if you actually have any Cash Distribution dollars to upload (dollars were
+      * retrieved in the Initialization Subroutine), then process; otherwise, print the
+      * "no data" message.
+      *
+     C                   exsr      $h1hdr
+      *
+     C                   if        procfl = yes
+     C                   exsr      $triumph
+     C                   exsr      $seaboard
+     C                   else
+     C                   except    nodata
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *----------------------------------------------------------------
+      * Write JDE Account Ledger records for Triumph
+      *----------------------------------------------------------------
+      *
+     C     $triumph      begsr
+      *
+      * Print the Triumph heading
+      *
+     C                   eval      h2conm = 'Triumph'
+     C                   z-add     wktbatnbr     h2batnbr
+     C                   z-add     wktdocnbr     h2docnbr
+     C                   except    h2hdr
+     C                   except    blank
+      *
+      * Set up some defaults
+      *
+     C                   eval      wkuser = 'TFGLPOST  '
+     C                   eval      glexa = 'TF Cash Distribution'
+     C                   z-add     1             wksign
+      *
+      * TF Total Payment Amount (Debit for Triumph)
+      *
+     C                   if        chttpam <> 0
+     C                   move      'ARUSBANK'    wkglcode
+     C                   z-add     chttpam       wkam
+     C                   exsr      $account
+     C                   endif
+      *
+      * TF Absorbed Freight Cash Distributed Amount (Debit for Triumph)
+      *
+     C                   if        wktafcdam <> 0
+     C                   move      'OMFRTBAL'    wkglcode
+     C                   z-add     wktafcdam     wkam
+     C                   exsr      $account
+     C                   endif
+      *
+      * TF Broker Commission Cash Distributed Amount (Debit for Triumph)
+      *
+     C                   if        wktbccdam <> 0
+     C                   move      'OMCOMBAL'    wkglcode
+     C                   z-add     wktbccdam     wkam
+     C                   exsr      $account
+     C                   endif
+      *
+      * TF Other Sales Expense Cash Distributed Amount (Debit for Triumph)
+      *
+     C                   if        wktoxcdam <> 0
+     C                   move      'OMACRBAL'    wkglcode
+     C                   z-add     wktoxcdam     wkam
+     C                   exsr      $account
+     C                   endif
+      *
+      * Now, we will write a single Triumph offset record (credit) which is the sum of:
+      *    TF Total Payment Amount + TF Sales Expense Cash Distributed Amount
+      * And, we will write a Triumph Batch Control record for the same amount but
+      *    as a debit (+)
+      *
+     C                   if        (chttpam + wktsxcdam) <> 0
+      * Triumph offset
+     C                   z-sub     1             wksign
+     C                   eval      wkam = chttpam + wktsxcdam
+     C                   eval      glexa = 'TF Cash Distribution--Offset'
+     C                   move      'OFFAR960'    wkglcode
+     C                   exsr      $account
+      *
+      * Triumph Batch Control record
+      *  Put the "amount" into the JDE non-decimal format; leave the value as a
+      *  debit (+)
+     C                   z-add     wktbatnbr     wkbatnbr
+     C**   100           mult      wkam          wkbatval
+     C                   z-add     wkam          wkbatvald                      sdn440
+     C                   z-add     wktbatcnt     wkbatcnt                        sdn440
+     C                   eval      xxedus = xxedustf                            sdn440
+     C                   exsr      $wrtbat
+     C                   endif                                                  If amount
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Write JDE Account Ledger records for Seaboard
+      *----------------------------------------------------------------
+      *
+     C     $seaboard     begsr
+      *
+      * Print 3 blank lines so that we have some white space between the
+      * Triumph section and the Seaboard section.
+      *
+     C                   except    blank
+     C                   except    blank
+     C                   except    blank
+      *
+      * Print the Seaboard heading
+      *
+     C                   eval      h2conm = 'Seaboard'
+     C                   z-add     wksbatnbr     h2batnbr
+     C                   z-add     wksdocnbr     h2docnbr
+     C                   except    h2hdr
+     C                   except    blank
+      *
+      * Set up some defaults
+      *
+     C                   eval      glexa = 'TF Cash Distribution'
+     C                   eval      wkuser = sdusr
+     C                   z-sub     1             wksign
+      *
+      * TF Total Payment Amount (credit to Seaboard)
+      *
+     C                   if        chttpam <> 0
+     C                   move      'ARPAY320'    wkglcode
+     C                   z-add     chttpam       wkam
+     C                   exsr      $account
+     C                   endif
+      *
+      * TF Absorbed Freight Cash Distributed Amount (credit to Seaboard)
+      *
+     C                   if        wktafcdam <> 0
+     C                   move      'OMFRT320'    wkglcode
+     C                   z-add     wktafcdam     wkam
+     C                   exsr      $account
+     C                   endif
+      *
+      * TF Broker Commission Cash Distributed Amount (credit to Seaboard)
+      *
+     C                   if        wktbccdam <> 0
+     C                   move      'OMCOM320'    wkglcode
+     C                   z-add     wktbccdam     wkam
+     C                   exsr      $account
+     C                   endif
+      *
+      * TF Other Sales Expense Cash Distributed Amount (credit to Seaboard)
+      *
+     C                   if        wktoxcdam <> 0
+     C                   move      'OMACR320'    wkglcode
+     C                   z-add     wktoxcdam     wkam
+     C                   exsr      $account
+     C                   endif
+      *
+      * need to write a record for the AR Adj Payout ant (Debit to Seaboard)
+      *
+      *
+      * Now, we will write a single SBF offset record (debit) which is the sum of:
+      *    TF Total Payment Amount + TF Sales Expense Cash Distributed Amount
+      * And, we will write a Seaboard Batch Control record for the same amount as
+      *    a credit
+      *
+     C                   if        (chttpam + wktsxcdam) <> 0
+      * Seaboard Offset
+     C                   z-add     1             wksign
+     C                   eval      wkam = chttpam + wktsxcdam
+     C                   eval      glexa = 'TF Cash Distribution--Offset'
+     C                   move      'OFFAR320'    wkglcode
+     C                   exsr      $account
+      *
+      * Seaboard Batch Control
+      *  Put the "amount" into the JDE non-decimal format flipping the sign to
+      *  be a credit (-)
+     C                   z-add     wksbatnbr     wkbatnbr
+     C**   -100          mult      wkam          wkbatval
+     C                   z-sub     wkam          wkbatvald                      sdn440
+     C                   z-add     wksbatcnt     wkbatcnt                        sdn440
+     C                   eval      xxedus = xxedussf                             sdn440
+     C                   exsr      $wrtbat
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Retrieve Account info
+      *----------------------------------------------------------------
+      *
+     C     $account      begsr
+      *
+      * Clear workfields.
+      *
+     C                   move      *blank        wkaid                          Account ID
+     C                   move      *blank        wkmcu                          Cost Center
+     C                   move      *blank        wkobj                          Object
+     C                   move      *blank        wksub                          Sub Code
+      *
+     C                   eval      gluser = wkuser
+     C                   eval      gltorg = wkuser
+      *
+      * Retrieve Account I.D. for this "code" from the GL Master Codes file.
+      * (In this program, ALL retrievals will be made using Company 960.)
+      *
+     C                   call      'PKTIXFR'
+     C                   parm                    return
+     C                   parm      wknumco       xxnumco
+     C                   parm      wkglcode      xxglcode
+     C     wkaid         parm      *blank        xxaid
+     C                   parm      *blank        xxsubtype
+     C                   parm      *blank        xxbalsheet
+     C                   parm      *zero         xxacctco
+      *
+      * Retrieve cost center/object/sub associated with Account ID just retrieved.
+      * (1 = Short Act I.D., 9 = Individual cost center/object/sub.)
+      *
+     C**                 call      'X0901'                                           sdn440
+     C                   call      'E1I0901'
+     C                   parm                    xxsym
+     C                   parm      '9'           xxomod
+     C                   parm      '1'           xximod
+     C                   parm      wkaid         xxani
+     C     wkmcu         parm      *blank        xxmcu
+     C     wkobj         parm      *blank        xxobj
+     C     wksub         parm      *blank        xxsub
+     C                   parm      *blank        xxerrm
+     C                   parm                    i0901ds
+      *
+      * Company number needs to be the company that is associated with this cost center/
+      * object/sub code.
+      *
+      *  S11799 :  add code to ensure company being there.
+      *
+     C                   move      xxco          glco
+     c     glco          ifeq      '     '
+     c                   move      xxmcu         wrkcomp           3
+     c                   move      '00000'       glco
+     c                   move      wrkcomp       glco
+     c                   end
+      *
+      * Retrieve the structured Account Number.
+      *
+     C                   move      *blank        wkani
+      *
+     C***                call      'X0901'                                           sdn440
+     C                   call      'E1I0901'
+     C                   parm                    xxsym
+     C                   parm      '2'           xxomod
+     C                   parm      '9'           xximod
+     C     wkani         parm                    xxani
+     C                   parm      wkmcu         xxmcu
+     C                   parm      wkobj         xxobj
+     C                   parm      wksub         xxsub
+     C                   parm                    xxerrm
+     C                   parm                    i0901ds
+      *
+     C                   if        xxerrm = *blank
+     C                   movel     wkani         glani                          Account nbr
+     C                   else
+     C                   move      *blank        glani
+     C                   endif
+      *
+      * Write a JDE Account Ledger record and print a detail line on the listing.
+      *
+     C                   exsr      $wrt911
+     C                   exsr      $l1dtl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a JDE Account Ledger record
+      *---------------------------------------------------------------
+      *
+     C     $wrt911       begsr
+      *
+     C                   select
+     C                   when      h2conm = 'Seaboard'
+     C                   z-add     wksbatnbr     glicu
+     c                   move      wksco5a       glkco
+     C                   move      *BLANKS       glkco                             sdn440
+     C                   z-add     wksdocnbr     gldoc
+     C                   move      xxedussf      gledus                            sdn440
+      *
+     C                   when      h2conm = 'Triumph'
+     C                   z-add     wktbatnbr     glicu
+     C**                 move      wktco5a       glkco                             sdn440
+     C                   move      *BLANKS       glkco                             sdn440
+     C                   z-add     wktdocnbr     gldoc
+     C                   move      xxedustf      gledus                            sdn440
+     C                   endsl
+      *
+     C                   move      xxdl01        l1desc
+      *
+      * Get the amount into the JDE non-decimal format by multiplying by 100.
+      * The sign (debit+/credit-) will be set using the "sign" workfield which
+      * has been set with either 1- or 1+.
+      *
+     C**   100           mult      wkam          glaa                               sdn440
+     C**                 mult      wksign        glaa                               sdn440
+     C                   z-add     wkam          glag                               sdn440
+     C                   mult      wksign        glag                               sdn440
+      *
+     C                   select
+     C                   when      wksign = 1
+     C                   z-add     wkam          l1dbam
+     C                   other
+     C                   z-add     wkam          l1cram
+     C                   endsl
+      *
+     C                   move      wkmcu         glmcu
+     C                   move      wkobj         globj
+     C                   move      wksub         glsub
+     C                   move      wkaid         glaid
+      *
+     C***                add       1             wkdoccnt                       sdn440
+     c                   if        glco   = '00960'                             sdn440 TF line cnt
+     C                   add       1             wktdoccnt
+     C                   z-add     wktdoccnt     wkdoccnt                       sdn440
+     c                   else
+     C                   add       1             wksdoccnt                      sdn440 SF line cnt
+     C                   z-add     wksdoccnt     wkdoccnt                       sdn440
+     c                   end
+     C                   z-add     wkdoccnt      gljeln
+      *
+      ** Add M3 logic here
+     C                   eval      wkm3gl = 'N'
+     C                   select
+     C                   when      glco = '00320' and
+     C                             (xxm3lv320 = 'Y' or xxm3lv320 = 'P')
+     C                   eval      wkm3gl = 'Y'
+      *
+     C                   when      glco = '00960' and
+     C                             (xxm3lv960 = 'Y' or xxm3lv960 = 'P')
+     C                   eval      wkm3gl = 'Y'
+     C                   endsl
+      ** Add JDE logic here
+     C                   eval      wkjdegl = 'N'
+     C                   select
+     C                   when      glco = '00320' and
+     C                             (xxm3lv320 = 'N' or xxm3lv320 = 'P')
+     C                   eval      wkjdegl = 'Y'
+      *
+     C                   when      glco = '00960' and
+     C                             (xxm3lv960 = 'N' or xxm3lv960 = 'P')
+     C                   eval      wkjdegl = 'Y'
+     C                   endsl
+      *
+      ** Write entry to M3 if company is live for M3, otherwise write to JDE
+     C                   if        wkm3gl = 'Y'
+     c* set sign
+     C     wkam          mult      wksign        xxgbamt
+     c*
+     C                   eval      m3p0rtn   = *blanks                          Return code
+     C                   eval      m3aco     = %dec(glco:3:0)                   JDE Company
+     C                   eval      m3gbmcu   = glmcu                            Cost Center
+     C                   eval      m3gbobj   = globj                            Object
+     C                   eval      m3gbsub   = glsub                            Sub
+     C                   eval      m3gbsbl   = *blanks                          Subledger
+     C****               eval      m3gbamt   = wkam                             $ amount
+     C                   eval      m3gbamt   = xxgbamt                          $ amount
+     C                   eval      m3gbqty   = glu                              Units
+     C                   eval      m3date    = chddt                            Date
+     C                   eval      m3deschdr = xxdeschdr                        Header description
+     C                   eval      m3descdtl = l1desc                           Detail description
+
+     C                   call      'PWAXUPR'
+     C                   parm      m3p0rtn       xxp0rtn
+     C                   parm      m3aco         xxaco
+     C                   parm      m3gbmcu       xxgbmcu
+     C                   parm      m3gbobj       xxgbobj
+     C                   parm      m3gbsub       xxgbsub
+     C                   parm      m3gbsbl       xxgbsbl
+     C                   parm                    m3gbamt
+     C                   parm      m3gbqty       xxgbqty
+     C                   parm      m3date        xxdate
+     C                   parm                    m3deschdr
+     C                   parm                    m3descdtl
+      *
+      ********************************************************************************************
+      ** If Company is 320, then write reversing entries to companies 360 and 320 in M3
+      *  ********** DONT NEED TO DO THIS !!!!!!!!!!!!!!!  **COMMENT FOR NOW  - RMC 1/27/17
+     C*                  if        m3aco = 320
+      *
+      ** Company 320 reversing entry
+     C*                  eval      m3p0rtn   = *blanks                          Return code
+     C*                  eval      m3gbobj   = '1910  '                         Object
+     C*                  eval      m3gbmcu   = '         320'                   Cost Center
+     C*                  eval      m3gbamt   = 0 - xxgbamt                      $ amount
+     C*                  eval      m3gbqty   = 0 - glu                          Units
+     C*                  eval      m3deschdr = xxdeschdr                        Header description
+     C*                  eval      m3descdtl = l1desc                           Detail description
+     C*
+     C*                  call      'PWAXUPR'
+     C*                  parm      m3p0rtn       xxp0rtn
+     C*                  parm      m3aco         xxaco
+     C*                  parm      m3gbmcu       xxgbmcu
+     C*                  parm      m3gbobj       xxgbobj
+     C*                  parm      m3gbsub       xxgbsub
+     C*                  parm      m3gbsbl       xxgbsbl
+     C*                  parm                    m3gbamt
+     C*                  parm      m3gbqty       xxgbqty
+     C*                  parm      m3date        xxdate
+     C*                  parm                    m3deschdr
+     C*                  parm                    m3descdtl
+      *
+      ** Company 360 reversing entry
+     C*                  eval      m3p0rtn   = *blanks                          Return code
+     C*                  eval      xxaco     = 360                              360
+     C*                  eval      m3gbobj   = '1910  '                         Object
+     C*                  eval      m3gbmcu   = '         360'                   Cost Center
+     C*                  eval      m3gbamt   = 0 - xxgbamt                      $ amount
+     C*                  eval      m3gbqty   = 0 - glu                          Units
+     C*                  eval      m3deschdr = xxdeschdr                        Header description
+     C*                  eval      m3descdtl = l1desc                           Detail description
+      *
+     C*                  call      'PWAXUPR'
+     C*                  parm      m3p0rtn       xxp0rtn
+     C*                  parm                    xxaco                             360
+     C*                  parm      m3gbmcu       xxgbmcu
+     C*                  parm      m3gbobj       xxgbobj
+     C*                  parm      m3gbsub       xxgbsub
+     C*                  parm      m3gbsbl       xxgbsbl
+     C*                  parm                    m3gbamt
+     C*                  parm      m3gbqty       xxgbqty
+     C*                  parm      m3date        xxdate
+     C*                  parm                    m3deschdr
+     C*                  parm                    m3descdtl
+     C*                  endif
+      *
+     C*****                   else
+     C                   endif
+      *
+      ** Write entry to JDE
+     C                   if        wkjdegl = 'Y'
+     C*
+      *
+      * SDN440 added for new fields in e10911
+     C                   movel     glicu         gledbt                         edi batch no
+     C                   movel     gldoc         gledtn                         edi trans #->gldoc
+     C                   z-add     gljeln        gledln                         edi line no
+     C                   movel     '0'           gledsp                         edi success procd
+     C                   movel     'A'           gledtc                         edi trans action
+     C                   movel     'J'           gledtr                         edi trans type
+     C                   move      xxsyssyndt    glabdt                         Date updated
+     C                   time                    glabtm                         Time Last Updated
+     C                   movel     'TFJDE271 '   glakvn                         pgm  Last Updated
+     C                   movel     gluser        glajvn                         user id created
+     C
+     C                   write     i0911
+     C*
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a batch record
+      *---------------------------------------------------------------
+      *
+     C     $wrtbat       begsr
+      *
+      * Write a record to batch control file
+      *
+      ** IF NOT LIVE WITH M3
+      *
+     C                   if        wkjdegl = 'Y'
+     C**   key01         chain     f0011                              92
+     C     KEY01         CHAIN     I0011l1                            92        sdn440
+     C                   if        *in92 = *on                                  If no hit
+     C                   z-add     wkbatcnt      icndo
+     C                   z-add     wkbatcnt      icdocn
+     C** sdn440          z-add     wkbatval      icaicu
+     C***                z-add     wkbatval      icame                            sdn440
+     C                   move      wkbatvald     icaicu                           no dec-sdn440
+     C                   z-add     wkbatvald     icame                            sdn440
+      *
+     C                   z-add     glicu         icicu
+     C                   move      *blank        icist                           sdn440
+     C**                 movel     wkuser        icuser                          sdn440
+     C                   MOVEL     xxedus        ICUSER
+     C                   move      glicut        icicut
+     C                   move      gldicj        icdicj
+     C                   move      'A'           iciapp
+     C                   move      'Y'           icbal
+     C                   move      ' '           icbalj
+     C                   move      'N'           icpob
+     C                   move      'Y'           iciboi
+      *
+     C** sdn440          write     i0011
+     C                   WRITE     I0011l1
+     C*
+     C* WRITE RUN LOG HEADER WORKFILE - WILL BE READ IN CL tf410cl TO PUSH BATCHES TO ZPROCESSOR
+     C*
+     C                   call      'E1LCXFR'
+     c                   parm                    RETURN            7
+     C                   parm                    icICUT                         BATCH TYPE
+     C                   parm                    icICU                          BATCH NUMBER
+     C                   parm                    icuser                         USER
+     C                   parm                    glco                           company
+      *
+     C                   endif                                                  If no hit
+     C                   endif                                                  If no hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Get dates into JDE format
+      *---------------------------------------------------------------
+      *
+     C     $date         begsr
+      *
+     C****SDN440         call      'X0028'
+     C*                  parm                    xxsidat
+     C*                  parm      *blank        xxedat
+     C*                  parm                    xxffmt
+     C*                  parm      '*JUL   '     xxtfmt
+     C*                  parm      '*NONE'       xxsep
+     C*                  parm      *blank        xxertst
+     C*                  parm      *blank        xxctry
+      *
+     C                   call      'E10028A'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxedat
+      *
+     c                   move      xxedat        xxsidat
+     C                   move      xxsidat       #sidat            6
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve the amounts that you will be uploading to JDE
+      *---------------------------------------------------------------
+      *
+      * You will be writing JDE records for the following dollars from the:
+      *   A) Cash Distribution Header file
+      *        1) TF total payment amount
+      *   B) Cash Distribution Detail file
+      *        1) TF sales expense cash distributed amount
+      *        2) TF absorbed freight cash distributed amount
+      *        3) TF broker commission cash distributed amount
+      *        4) TF other sales expense cash distributed amount
+      *
+     C     $rtvamt       begsr
+      *
+     C     ldbtsn        chain     tfp012                             92
+     C                   if        *in92 = *off                                 If header
+     C                   move      no            first
+      *
+      * Accumulate values from the Cash Distribution Detail records.
+      *
+     C     ldbtsn        setll     tfp013
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     ldbtsn        reade     tfp013                                 91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * Accumulate:
+     C                   add       cdtsxcdam     wktsxcdam
+     C                   add       cdtafcdam     wktafcdam
+     C                   add       cdtbccdam     wktbccdam
+     C                   add       cdtoxcdam     wktoxcdam
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+     C                   endif                                                  If header
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print report headings
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print detail line
+      *---------------------------------------------------------------
+      *
+     C     $l1dtl        begsr
+      *
+     C                   select
+     C                   when      wkaid = *blank
+     C                   eval      l1acct = '*** Unknown ' +
+     C                                      %trim(wkmcu) + '.' +
+     C                                      %trim(wkobj) + '.' +
+     C                                      %trim(wksub)
+     C                   eval      l1desc = 'Error on Account ID retrieval'
+      *
+     C                   when      xxerrm = *blank
+     C                   eval      l1acct = %trim(wkmcu) + '.' +
+     C                                      %trim(wkobj) + '.' +
+     C                                      %trim(wksub)
+     C                   other
+     C                   eval      l1acct = '*** Unknown ' +
+     C                                      %trim(wkmcu) + '.' +
+     C                                      %trim(wkobj) + '.' +
+     C                                      %trim(wksub)
+     C                   eval      l1desc = 'Cost Center/Obj/Sub error'
+     C                   endsl
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   except    l1dtl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C     *entry        plist
+     C                   parm                    xxm3lv320
+     C                   parm                    xxm3lv960
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    glicut
+     C                   kfld                    wkbatnbr
+      *
+      *
+      * Retrieve the dollars that you will be uploading to JDE.
+      *
+     C                   exsr      $rtvamt
+     C                   if        first = no and                               If anything
+     C                             (chttpam   <> 0 or
+     C                              wktsxcdam <> 0 or
+     C                              wktafcdam <> 0 or
+     C                              wktbccdam <> 0 or
+     C                              wktoxcdam <> 0)
+      *
+     C                   move      yes           procfl
+      *
+      * Flip the Daily Date to MMDDYY format.
+      *
+     C     *iso          test(d)                 chddt                  92
+     C                   if        *in92 = *off                                 If OK daily
+     C                   move      chddt         wkisodate
+     C     *mdy          move      wkisodate     h1mdy
+     C                   endif                                                  If OK daily
+      *
+      * Retrieve/save a batch Number for:
+      *   1) Triumph
+      *   2) Seaboard
+     C                   call      'TFJDE800'
+     C     wksbatnbr     parm      0             xxbatnbr
+      *
+     C                   call      'TFJDE800'
+     C     wktbatnbr     parm      0             xxbatnbr
+      *
+      *
+      * Retrieve/save a Document Number for:
+      *   1) Triumph
+      *   2) Seaboard
+     C                   call      'TFJDE801'
+     C     wksdocnbr     parm      0             xxdocnbr
+     c                   add       1             wksbatcnt                       sdn440 SF doc count
+      *
+     C                   call      'TFJDE801'
+     C     wktdocnbr     parm      0             xxdocnbr
+     c                   add       1             wktbatcnt                       sdn440 TF doc count
+      *
+      *
+      * Set up/save Company numbers as both 3,0 numeric and 5 alpha fields.
+      *
+     C                   move      *zero         wksco5a
+     C                   move      '320'         wksco5a
+      *
+     C                   move      *zero         wktco5a
+     C                   move      '960'         wktco5a
+      *
+      * Set up defaults for records in F0911-Account Ledger File
+      *
+      * Get system date into the format required by JDE by calling JDE's routine.
+      *
+     C                   time                    wktime
+     C                   move      wktime        wkdate
+     C                   move      wkdate        xxsidat
+     C                   move      '*SYSVAL'     xxffmt
+      *
+     c*
+     C     *mdy          movel     udate         wkisodate                       sdn440
+     C                   movel     wkisodate     xxccyymmdd                      sdn440
+     C                   call      'HP8008'                                      sdn440
+     C                   parm                    xxccyymmdd                      sdn440
+     C                   parm      0             xxsyssyndt
+     C                   exsr      $date
+     C                   move      xxsidat       glupmj
+     C                   move      xxsidat       gldsyj
+     C                   move      xxsidat       gldicj
+      *
+      * Retrieve the Accounting Year/Period associated with the Date.
+      *
+     C                   call      'TF815'
+     C                   parm      chddt         xxdt
+     C                   parm      'A'           xxapfl
+     C                   parm      0             xxyr
+     C     glpn          parm      0             xxpe
+     C                   parm      0             xxwk
+      *
+     C                   z-add     xxyr          wkccyy
+     C                   z-add     wkcc          glctry
+     C                   z-add     wkyy          glfy
+      *
+      * Get Daily Date into JDE format by calling JDE date routine.
+      *
+     C                   move      chddt         xxsidat
+     C                   move      '*YMD   '     xxffmt
+     c                   move      chddt         xxccyymmdd                        sdn440
+     C                   exsr      $date
+     C                   move      xxsidat       gldgj
+     C                   move      xxsidat       gldsvj
+      *
+      * Set up some defaults
+      *
+     C                   movel     sdjob         gljobn
+     C                   time                    glticu
+     C                   time                    glupmt
+      *
+     C                   move      '2'           glam
+     C                   move      'AA'          gllt
+     C** sdn440          move      '00000'       glpkco
+     C** sdn440          move      '00000'       glokco
+     C** sdn440          move      '000'         glpsfx
+     C                   move      '     '       glpkco                         sdn440
+     c                   move      '     '       glokco                         sdn440
+     C                   move      '   '         glpsfx                         sdn440
+     C                   move      'JE'          gldct
+     C                   move      'G '          glicut
+     C*** sdn440         move      'R'           glrcnd
+     C                   move      ' '           glrcnd                           sdn440
+     C                   move      ' '           glrcnd                           sdn440
+     C                   move      'D'           glcrrm                           sdn440
+     C                   move      'USD'         glcrcd                           sdn440
+     C                   movel     'TFJDE271  '  glpid                            sdn440
+     C                   endif                                                  If anything
+      *
+      * Get company value OMSJDE for User ID to use for gledus
+      *
+     c                   movel     'OMSJDEUSR '  xxval
+     c                   call      'PUQ6XFR '
+     C                   PARM                    XXRTN             7
+     C                   PARM      360           xxnumco           3 0
+     C                   PARM                    XXVAL            10
+     C                   PARM                    XXEDUSSF         10             360 user id
+     c                   movel     'OMSJDEUSR '  xxval
+     c                   call      'PUQ6XFR '
+     C                   PARM                    XXRTN             7
+     C                   PARM      960           xxnumco
+     C                   PARM                    XXVAL            10
+     C                   PARM                    XXEDUSTF         10             960 user id
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oprint132  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           65 'CASH POST REPORT'
+     O                                          122 'DATE'
+     O                       udate         y    132
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                                           65 'JOURNAL ENTRIES'
+     O                                          122 'TIME'
+     O                       rtime              132 '  :  :  '
+      *
+      *
+     O          e            h1hdr          2
+     O                                          122 'PAGE'
+     O                       page          z    132
+      *
+     O          e            h1hdr          1
+     O                                           16 'Daily date:'
+     O                       h1mdy          b    26 '  /  /  '
+      *
+     O          e            h1hdr          2
+     O                                           16 'CD batch number:'
+     O                       ldbtsn        z     26
+      *
+      *
+      *-------------------------------------------------------------
+      * Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr       0  1
+     O                                           14 'Account Number'
+     O                                           41 'Description'
+     O                                           76 'Debit'
+     O                                           94 'Credit'
+      *
+     O          e            h1hdr       0  2
+     O                       dash               132
+      *
+      *
+      *-------------------------------------------------------------
+      * Company header
+      *-------------------------------------------------------------
+      *
+     O          e            h2hdr       0  0
+     O                       h2conm               8
+     O                                           25 'JDE Batch Nbr:'
+     O                       h2batnbr      z     35
+     O                                           54 'JDE Document Nbr:'
+     O                       h2docnbr      z     64
+      *
+     O          e            h2hdr       0  1
+     O                       h2conm               8
+     O                                           25 'JDE Batch Nbr:'
+     O                       h2batnbr      z     35
+     O                                           54 'JDE Document Nbr:'
+     O                       h2docnbr      z     64
+      *
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       0  1
+     O                       l1acct         b    28
+     O                       l1desc         b    60
+     O                       l1dbam        kb    77
+     O                       l1cram        kb    95
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank       0  1
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata         1
+     O                                           25 'There were no dollars to '
+     O                                           30 'post.'
+      /eject

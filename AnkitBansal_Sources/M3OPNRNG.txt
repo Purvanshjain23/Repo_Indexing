@@ -1,0 +1,179 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  M3OPNRNG                                     */
+/*  PROGRAM NAME:    CREATE M3 INTERFACES FOR OPEN INVOICES IN A RANGE  */
+/*  PROGRAMMER:      RMC                                        */
+/*  CREATE DATE:     10/19/16                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS CALLED ON DEMAND TO BUILD INTERFACE  */
+/*                   FILES WITH INVOICES IN A RANGE OF NUMBERS     */
+/*                                                                 */
+/*                   IT PERFORMS THE FOLLOWING FUNCTIONS:          */
+/*                   A) SETS LIB LIST                             */
+/*                   B) CREATE FILES IN QTEMP                    */
+/*                   C) GETS DATA LIBRARY FOR M3ILIB                 */
+/*                   D) GETS EMAIL ADDRESSS TO RECEIVE THE FILES */
+/*                   E) CALL PBY5XFR ' ' TO CREATE OMP300 FOR 3RD PARTY INVS */
+/*                   F) CALL M3OPNSTG (' '  'aa') CREATE PLB9CPP    */
+/*                      per order type OR/CM/DM      */
+/*                   G) EMAILS IN/CM/DM FILES TO EMAIL ADDR  */
+/*                  HH) CLRPM OMP300                            */
+/*                  HH) CALL PBTAXFR ' ' TO CREATE OMP300 FOR IP ORDERS */
+/*                  HH) CALL M3GLSTG (' ' ) CREATE PLB9CPP/PLCACPP */
+/*                   I) COPY PLB9CPP/PLCGCPP/PLCKCPP/PLCACPP TO M3ILIB        */
+/*                   J) GETS DATA LIBRARY FOR DATA MART              */
+/*                   K) COPY PLCKCPP TO DATA MART LIB  */
+/*******************************************************************/
+/* MODIFIED:                                                       */
+/*  RMC E004055 5.24.2016 ADDED UPDATE TO PLCKCPP FOR ORD/CUST PO */
+/*  RMC E004055 6.14.2016 ADDED CALL M3ACC1410 TO ROLLUP ADDTL 1410  */
+/*                        FOR AN INVOICE TO THE SEQ --0--  1410     */
+/*                        M3 CAN HAVE 1 1410 PER INVOICE.          */
+/*  RMC E004055 6.28.2016 ADDED 2ND CALL TO PBTAXFR/CALL M3GLSTG TO CREATE */
+/*              ENTRIES FOR 'IP' INVOICES. THEY GO TO THE GL, NOT AR    */
+/*              UPDATE LST INV COMP VALUE IN THE 2ND CALL TO PBTAXFR  */
+/*  RMC E004055 11/16/16 NEW TO RUN FOR A RANGE OF INV/CM/DM. BOTH PARMS */
+/*              MUST BE PASSED IN, MAY BE THE SAME IF ONLY ONE IS NEEDED */
+/*******************************************************************/
+             PGM        PARM(&RETRN &FINV &TINV)
+             DCL        VAR(&DATE) TYPE(*DEC) LEN(7 0) VALUE(0000000)
+             DCL        VAR(&INVOICE) TYPE(*DEC) LEN(7 0) /*START INV */
+             DCL        VAR(&FINV) TYPE(*DEC) LEN(7 0) /*START INV */
+             DCL        VAR(&TINV) TYPE(*DEC) LEN(7 0) /*END  INV */
+             DCL        VAR(&KEYVALUE) TYPE(*CHAR) LEN(15)
+             DCL        VAR(&EMAILTO) TYPE(*CHAR) LEN(30)
+             DCL        VAR(&M3ILIB) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&DMLIB) TYPE(*CHAR) LEN(10)  /* DATA MART LIB */
+             DCL        VAR(&CUSTYP) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&LSTINV) TYPE(*DEC) LEN(7 0) +
+                          VALUE(0000000) /* LAST INV */
+             DCL        VAR(&RETRN) TYPE(*CHAR) LEN(7)
+
+             MONMSG     MSGID(CPF2103 CPF2130)
+
+  /*         ADDLIBLE   LIB(OMSDEVGEN) POSITION(*AFTER COMMON)        ++
+             ADDLIBLE   LIB(HPEDEVGEN) POSITION(*AFTER COMMON)        +
+             ADDLIBLE   LIB(JPRODTST) POSITION(*AFTER COMMON)         */
+
+   IF COND(&FINV=0)  THEN(GOTO END)                  /* FALL OUT  */
+   IF COND(&TINV=0)  THEN(GOTO END)
+   IF COND(&FINV > &TINV)  THEN(GOTO END)
+
+      /* GET SYSTEM VALUE FOR INTERFACE FILE LIBRAY - VALUE M3ILIB    */
+
+             CALL       PGM(PBSHXFR) PARM(' ' &M3ILIB)
+             IF         COND(&M3ILIB = '       ') THEN(CHGVAR +
+                          VAR(&M3ILIB) VALUE('HPEDEVGEN'))
+      /* GET SYSTEM VALUE FOR DATA MART FILE LIBRAY - VALUE DATAMART  */
+             CALL       PGM(PPJXXFR) PARM(' ' 'DATAMART' &DMLIB)
+             IF         COND(&DMLIB = '       ') THEN(CHGVAR +
+                          VAR(&M3ILIB) VALUE('OMSDEVGEN'))
+
+             ADDLIBLE   LIB(PRKFLIB) POSITION(*LAST) /* PLB8REP XFEF +
+                          PLB9CPP,PLCGCPP TABLES ARE HERE  */
+             MONMSG     MSGID(CPF2103)
+
+  /* SET UP QTEMP FILES                                                 */
+
+             CRTDUPOBJ  OBJ(OMP300) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF2130) EXEC(CLRPFM FILE(QTEMP/OMP300))
+             CRTDUPOBJ  OBJ(OML300D) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF2130)
+             CRTDUPOBJ  OBJ(OML300A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF2130)
+             CRTDUPOBJ  OBJ(OML300E) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF2130)
+             CRTDUPOBJ  OBJ(OML300I) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF2130)
+             CRTDUPOBJ  OBJ(PLB9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PLCGCPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PLCKCPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PLCACPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+   /* -----------------------------------------------------------------   */
+  /* GET LAST INVOICE INTERFACED FROM COMPANY VALUE  IN COMP VALUE  */
+   /* -----------------------------------------------------------------   */
+      /*     CHGVAR     VAR(&INVOICE) VALUE(0000000)                       +
+             CALL       PGM(PBXMXFR) PARM(' ' 'M3LSTINV  ' &INVOICE)     +
+             CHGVAR     VAR(&LSTINV) VALUE(&INVOICE)                     */
+
+             CHGVAR     VAR(&INVOICE) VALUE(&FINV)     /* SET FROM INV#  */
+
+/*   GOTO IP     */
+   /* -----------------------------------------------------------------   */
+  /* CREATE OMP300  RECORDS - FOR ALL WITHIN THE RANGE OF INVOICES      */
+   /* -----------------------------------------------------------------   */
+             CHGVAR     VAR(&CUSTYP) VALUE('  ')
+             CALL       PGM(*LIBL/PBY5XFR) PARM(&RETRN &INVOICE &CUSTYP &TINV)
+
+  /* ACCUMULATE ADDTIONAL 1410 FOR AN INVOICE TO THE SEQ -0- 1410 RCD   */
+      /* M3 CAN TAKE ONLY ONE 1410 PER INVOICE                         */
+
+             CALL       PGM(*LIBL/M3ACC1410) PARM(&RETRN)
+
+  /* GET EMAIL ADDRESS TO EMAIL FILES TO                              */
+             CALL       PGM(PBWZXFR) PARM(&RETRN 'M3INVEMAIL' &EMAILTO)
+
+  /* CREATE PLCGCPP RECORDS - ONE BATCH FOR EACH TYPE                      */
+
+IN:          CHGVAR     VAR(&KEYVALUE) VALUE('               ')
+             CALL       PGM(M3OPNSTG) PARM('' 'OR' 'D' &KEYVALUE)
+           CPYF OMP300 RMCFLIB/OMP300 MBROPT(*REPLACE)
+
+             IF COND(&KEYVALUE *GT  ' ') THEN(DO)
+             EXECUTE    VIEW(AR_INVOICE) +
+                          TOSTMF('/TMP/AR_INV.txt') REPLACE(*YES) +
+                          RECIPIENT(&EMAILTO) SETVAR((&KEYVALUE +
+                          &KEYVALUE))
+             ENDDO
+
+CM:          CHGVAR     VAR(&KEYVALUE) VALUE('               ')
+             CALL       PGM(M3OPNSTG) PARM('' 'CM' 'D' &KEYVALUE)
+             IF COND(&KEYVALUE *GT  ' ') THEN(DO)
+             EXECUTE    VIEW(AR_INVOICE) RECIPIENT(&EMAILTO) +
+                          TOSTMF('/TMP/AR_CM.txt') REPLACE(*YES) +
+                          SETVAR((&KEYVALUE &KEYVALUE))
+             ENDDO
+DM:          CHGVAR     VAR(&KEYVALUE) VALUE('               ')
+             CALL       PGM(M3OPNSTG) PARM('' 'DM' 'D' &KEYVALUE)
+             IF COND(&KEYVALUE *GT  ' ') THEN(DO)
+             EXECUTE    VIEW(AR_INVOICE) RECIPIENT(&EMAILTO) +
+                          TOSTMF('/TMP/AR_DM.txt') REPLACE(*YES) +
+                          SETVAR((&KEYVALUE &KEYVALUE))
+             ENDDO
+   /* -----------------------------------------------------------------   */
+   /* CREATE OMP300 AND INTERFACE TABLES FOR IP INTERCOMPANY INVOICES   */
+   /* -----------------------------------------------------------------   */
+  IP:        CLRPFM     FILE(QTEMP/OMP300)
+             CHGVAR     VAR(&CUSTYP) VALUE('IP')
+             CALL       PGM(*LIBL/PBY5XFR) PARM(&RETRN &INVOICE &CUSTYP &TINV)
+             CALL       PGM(M3GLSTG) PARM(' ')
+   /* -----------------------------------------------------------------   */
+   /* COPY TO DATA LIBRARY SO WE KNOW WHAT WAS INTERFACE IN THIS RUN      */
+   /* -----------------------------------------------------------------   */
+             CPYF       FROMFILE(QTEMP/PLCGCPP) +
+                          TOFILE(&M3ILIB/PLCGCPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+             CPYF       FROMFILE(QTEMP/PLCACPP) +
+                          TOFILE(&M3ILIB/PLCACPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+             CPYF       FROMFILE(QTEMP/PLB9CPP) +
+                          TOFILE(&M3ILIB/PLB9CPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+             CPYF       FROMFILE(QTEMP/PLCKCPP) +
+                          TOFILE(&M3ILIB/PLCKCPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+             CLRPFM     FILE(&DMLIB/PLCKCPP)
+             CPYF       FROMFILE(QTEMP/PLCKCPP) +
+                          TOFILE(&DMLIB/PLCKCPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+
+  END:       ENDPGM

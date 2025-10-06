@@ -1,0 +1,506 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * ENVIRONMENT:  PORK DIVISION
+      * SYSTEM:       AS/400
+      * PROGRAM:      MP650
+      * DESCRIPTION:  MP2: List of Purchase Orders with Open Items
+      * PROGRAMMER:   LeAnne Fedor
+      * DATE:         04/30/02
+      *
+      * FUNCTION:  Batch program to list the purchase orders that have transaction quantities
+      *            that are less than the associated invoiced quantities.
+      *
+      *            This listing is submitted from MP450-Specify Listing of Purchase
+      *            Orders with Open Items.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/01/02  LeAnne Fedor
+      *           Added a report total on 'amount'. Also, rewrote. We now want all p.o's
+      *           where the 'transaction qty' is less than the 'invoiced quantity'....
+      *           instead of all purchase orders that had no invoices against them.
+      *           So, changed report title to be more specific.
+      *
+      * 03/12/08  LeAnne Ramsey
+      *           We gave all functionality to High Plains Biodiesel. So,
+      *           we now run over two different library lists. We added a Data Area
+      *           holding Company Number. We will now print Company Number/Name at
+      *           the top of the Report.
+      *           Also changed from qprint to print132.
+      *
+      * 03/30/11  Barb Gutierrez
+      *           Qty has increased to include 2 decimal positions, rate has increased
+      *           to include 4 decimal positions.  Made necessary changes to accomodate
+      *           this.  E001398
+      *
+      * 03/06/14  LeAnne Ramsey (E2992)
+      *           Added Accounting Company as a required selection. Added an OPNQRY to
+      *           extract the data; changed the primary key on MPL102C to be Accounting
+      *           Company.
+      *
+      * 03/26/19  Brad Baden  (E14631)
+      *           Recompile only due to field size changes in database.
+      *
+      * 10/29/19  Brad Baden  (E15721)  Correct Transaction Date on report
+      *           Currently the Transaction Date on the report is from the
+      *           first PO Detail record read whether or not it has open
+      *           items.  Move the logic to retrieve the date to use the
+      *           PO Detail Transaction Date for the first PO with open
+      *           items.
+      *
+      * 05/24/21  Danny Nguyen   (S17068)
+      *           DBFC on MPP103 file. PDITEMRT field length changed from 9.4 to 11.4.
+      *           DBFC on MPP105 file. IDAPAM field length changed from 9.2 to 11.2.
+      *           Changed 'l1am' length from 9.2 to 11.2. Adjusted 'Open Amount'
+      *           column 1 position to the right.
+      *
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fcaabrel1  if   e           k disk
+      *    Company
+      *
+      *
+     Fmpl102c   if   e           k disk
+      *    MP2: Purchase Order Header
+      *
+      *
+     Fmpp103    if   e           k disk
+      *    MP2: Purchase Order Detail
+      *
+      *
+     Fmpl105a   if   e           k disk
+      *    MP2: Invoice Detail
+      *
+      *
+     Fprint132  o    f  132        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D prtfl           s              1    inz('N')
+     D dash            s             86    inz(*all'-')
+     d rtime           s              6  0
+      *
+      * Control fields
+      *
+     d svjdvnno        s                   like(phjdvnno)
+     D first           s              1    inz('Y')
+     D newpo           s              1    inz('Y')
+      *
+      *
+      * Work fields
+      *    bg...increased wkpoinqt, wkpotrqt, wkinqt, and wkopqt from 15.0 to 15.2
+      *
+     d wkpoinqt        s             15  2
+     d wkpotrqt        s             15  2
+     d wkinqt          s             15  2
+     d wkopqt          s             15  2
+     d wkam            s             15  2
+     d wkpoam          s             15  2
+      *
+      *
+      * Work fields for date manipulation
+      *
+     D wkmdy           s               D   datfmt(*mdy)
+      *
+      *
+      * Print fields
+      *
+     d h1conm          s                   like(abadtx)
+      *
+     d l1mmddyy        s              6  0
+17068d** l1am            s              9  2
+17068d l1am            s             11  2
+      *
+     d t1am            s             11  2
+      *
+      *
+      ****************************************************************
+      * DATA AREA
+      ****************************************************************
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldjdvnno               1      8  0
+     D  ldjdvnnm               9     48
+     D  ldacono               49     51  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Print header
+     C                   exsr      $h1hdr
+      *
+      * Read all purchase order header records selected by the open query.
+      *
+     C     *loval        setll     mpl102c
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      mpl102c                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Control break
+     C                   if        first = yes
+     C                   move      no            first
+     C                   endif
+      *
+      * Determine if this purchase order is 'open'
+      *
+     C                   exsr      $open
+      *
+      * If the p.o. is 'open', continue with the processing
+      *
+     C                   if        wkpoinqt < wkpotrqt                          If open
+      *
+     C                   if        first = yes
+     C                   move      no            first
+     C                   z-add     phjdvnno      svjdvnno
+     C                   endif
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+      * Print detail line
+      *
+     C                   if        phjdvnno <> svjdvnno
+     C                   except    blank
+     C                   z-add     phjdvnno      svjdvnno
+     C                   endif
+      *
+      * Set up 'amount' in print field and accumulate for Report Total.
+      *
+     C                   z-add     wkpoam        l1am
+     C                   add       wkpoam        t1am
+      *
+     C                   except    l1dtl
+     C                   if        ldjdvnno <> 0
+     C                   setoff                                       86
+     C                   endif
+      *
+     C                   movel     yes           prtfl
+      *
+     C                   endif                                                  If open
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *---------------------------------------------------------------
+      * EOF processing
+      *---------------------------------------------------------------
+      * If the file was empty, print the standard 'no data...'
+      * error message
+      *
+     C                   if        prtfl = no
+     C                   except    nodata
+     C                   else
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+     C                   except    t1tot
+     C                   endif
+      *
+     c                   except    endrpt
+      *
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * Determine if this Purchase Order is Open
+      *---------------------------------------------------------------
+      *
+      * A Purchase Order is 'open' when:
+      *   invoiced quantity is less than transaction quantity
+      *
+     C     $open         begsr
+      *
+     C                   z-add     0             wkpotrqt
+     C                   z-add     0             wkpoinqt
+     C                   z-add     0             wkam
+     C                   z-add     0             wkpoam
+     C                   move      yes           newpo
+      *
+      * Read each p.o. detail record. For each record,
+      *  1) accumulate the transaction quantity for the p.o.
+      *  2) retrieve/sum the invoiced quantity for the p.o.
+      *  3) if the transaction/invoiced quantity is different for the
+      *     p.o. detail record, calculate the 'open' amount
+      *
+     C     phposn        setll     mpp103
+      *
+     C                   dou       *in91 = *on                                  Do po detail
+     C     phposn        reade     mpp103                                 91
+     C                   if        *in91 = *off                                 If a detail
+      *
+      * Accumulate the 'transaction quantity' for the p.o.
+      *
+     C                   add       pdtrqt        wkpotrqt
+      *
+      * If you ultimately end up processing this p.o., you will need a
+      * transaction date. So, flip it from CCYYMMDD to MMDDYY just in
+      * case---just do it on the first record read.
+      *
+      * 10/29/19  Brad Baden  (E15721)  Correct Transaction Date on report
+     C*                  if        newpo = yes                                  If first
+     C*                  exsr      $newpo
+     C*                  move      no            newpo
+     C*                  endif                                                  If first
+      *
+      * Process all Invoice Detail records for this p.o. detail line
+      *
+     C                   exsr      $invdtl
+      *
+      * If the 'invoiced quantity' for this p.o. detail line is less than
+      * the 'transaction quantity', calculate the 'open' amount for this
+      * detail line.
+     C                   if        wkinqt < pdtrqt
+      *
+      * 10/29/19  Brad Baden  (E15721)  Correct Transaction Date on report
+     C                   if        newpo = yes                                  If first
+     C                   exsr      $newpo
+     C                   move      no            newpo
+     C                   endif                                                  If first
+      *
+     C     pdtrqt        sub       wkinqt        wkopqt
+     C     wkopqt        mult(h)   pditemrt      wkam
+     C                   add       wkam          wkpoam
+     C                   endif
+      *
+     C                   endif                                                  If a detail
+     C                   enddo                                                  Do po detail
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * First time processing for each p.o.
+      *---------------------------------------------------------------
+      *
+     C     $newpo        begsr
+      *
+     C     *iso          test(d)                 pdtrdt                 92
+     C                   if        *in92 = *on                                  If bad date
+     C                   z-add     0             l1mmddyy
+     C                   else
+     C     *iso          move      pdtrdt        wkmdy
+     C                   movel     wkmdy         l1mmddyy
+     C                   endif                                                  If bad date
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve all Invoice Detail records for a P.O. Detail line
+      *---------------------------------------------------------------
+      *
+     C     $invdtl       begsr
+      *
+      * Read all Invoice Detail records that exist for this p.o. detail line.
+      *
+     C                   z-add     0             wkinqt
+     C     key01         setll     mpl105a
+      *
+     C                   dou       *in93 = *on                                  Do inv dtl
+     C     key01         reade     mpl105a                                93
+     C                   if        *in93 = *off
+      *
+      * Accumulate the 'invoiced quantity' for the p.o.
+      *
+     C                   add       idinqt        wkpoinqt
+      *
+      * Accumulate the 'invoiced quantity' for the p.o. detail line.
+      *
+     C                   add       idinqt        wkinqt
+      *
+     C                   endif
+     C                   enddo                                                  Do inv dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print headings
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+      * If the users have selected a single vendor, they only want his number/name
+      * to print on the first line of each page. So, every time you page break, set
+      * on indicator 86...set it off after you print the detail line.
+      *
+     C                   if        ldjdvnno <> 0
+     C                   seton                                        86
+     C                   endif
+      *
+     C                   except    h1hdr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    pdposn
+     C                   kfld                    pdrcno
+     C                   kfld                    pdserno
+      *
+      * Set up a line of underscores and retrieve time for report heading.
+      *
+     C                   movel     *all'-'       dash
+     C                   time                    rtime
+      *
+      * Setup the user selections in the headings.
+      *
+     C     ldacono       chain     caabrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      h1conm = abadtx
+     C                   endif
+      *
+      * All vendors
+     C                   if        ldjdvnno = 0
+     C                   seton                                        8688
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oprint132  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           52 'MP2 INTERFACE TO JDE'
+     O                                           76 'DATE'
+     O                       udate         y     86
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                                           44 'LIST OF PURCHASE ORDERS'
+     O                                           60 ' WITH OPEN ITEMS'
+     O                                           76 'TIME'
+     O                       rtime               86 '  :  :  '
+      *
+     O          e            h1hdr          1
+     O                                           76 'PAGE'
+     O                       page          z     86
+      *
+     O          e            h1hdr          1
+     O                                           19 'Accounting Company:'
+     O                       ldacono       z     28
+     O                       h1conm              60
+      *
+     O          e            h1hdr          2
+     O                                           19 'JDE Vendor:'
+     O              N88      ldjdvnno      z     28
+     O               88                          24 'ALL'
+     O              N88      ldjdvnnm            70
+      *
+      *
+     O          e            h1hdr          1
+     O                                           10 'JDE VENDOR'
+     O                                           61 'PURCHASE'
+     O                                           69 'TRAN'
+17068O**                                         85 'OPEN'
+17068O                                           86 'OPEN'
+      *
+     O          e            h1hdr          1
+     O                                            8 'NUMBER'
+     O                                           27 'JDE VENDOR NAME'
+     O                                           58 'ORDER'
+     O                                           69 'DATE'
+17068O**                                         85 'AMOUNT'
+17068O                                           86 'AMOUNT'
+      *
+     O          e            h1hdr          0
+     O**                     dash                86
+17068O                       dash                87
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       1
+     O               86      phjdvnno      z      8
+     O               86      phjdvnnm            52
+      *
+     O                       phpono              61
+     O                       l1mmddyy       b    71 '  -  -  '
+17068O**                     l1am          kb    86
+17068O                       l1am          kb    87
+      *
+      *-------------------------------------------------------------
+      * Total line
+      *-------------------------------------------------------------
+      *
+     O          e            t1tot       1
+17068O**                                         86 '---------------'
+17068O                                           87 '---------------'
+      *
+     O          e            t1tot       1
+     O                                           70 'Total:'
+17068O**                     t1am          kb    86
+17068O                       t1am          kb    87
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank       1
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata      1
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'
+      *
+      *-------------------------------------------------------------
+      * End of Report
+      *-------------------------------------------------------------
+      *
+     O          e            endrpt      2
+     O                                           25 '***** End of Report *****'

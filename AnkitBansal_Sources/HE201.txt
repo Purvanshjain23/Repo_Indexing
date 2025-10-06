@@ -1,0 +1,557 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Procurement and Evaluation
+      *              Datamart
+      * PROGRAM:     HE201 - Build HPE Datamart Weight Distribution Header and
+      *                      Detail Files
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     10/30/00
+      *
+      * FUNCTION:    The primary file in this program is the workfile built in
+      *              program HE200. A workfile is required to give us the fields
+      *              we need for sorting/breaking/summing data.
+      *
+      *              We read the workfile and roll-up records writing a 'header'
+      *              record for each farm site/load type/kill date'.
+      *              For each header record, we write multiple 'detail' records...one
+      *              for each 'live weight' range from the HPE Cutout Weight Range file.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      * 10/31/00  LeAnne Fedor
+      *           Until the OMS Calendar file is changed to allow retrieval of
+      *           the PIC date/year/week, we need to manipulate the values
+      *           returned from the call to the Calendar file.
+      *
+      * 01/23/01  LeAnne Fedor
+      *           The OMS Calendar file now contains the HPS Pic date,
+      *           HPS calendar year and HPS calendar week. These fields
+      *           will now be retrieved from the OMS calendar file.
+      *
+      * 04/23/01  LeAnne Fedor
+      *           Added head received and adjusted live weight.
+      *
+      * 01/29/02  LeAnne Fedor
+      *           Replaced hardcoded 'accounting quarter' logic with our new generic
+      *           program.
+      *
+      * 11/03/20  ISE (H16853)
+      *           Recompile only. Increased the Buy order Number field length from 5 to 7.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fpkb1cpla  if   e           k disk
+      *  HPE Carcass Detail
+      *
+      *
+     Fpdi1rel4  if   e           k disk
+      *  HPE Cutout weight range
+      *
+      *
+     Fhep300    if   e           k disk
+      *  Datamart HPE weight distribution workfile
+      *
+      *
+     Fhep201    o    e           k disk
+      *     Datamart HPE: Weight Distribution Header
+      *
+      *
+     Fhep202    o    e           k disk
+      *     Datamart HPE: Weight Distribution Detail
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      * Arrays for holding weight ranges retrieved from HPE file
+      *
+     D maxlb           s              3  0 dim(50) ascend
+     D range           s              7    dim(50)
+      *
+      * Define 4 arrays that will hold killed/trimmed/manual/broken back head
+      *
+     D kill            s              5  0 dim(50)
+     D trim            s              5  0 dim(50)
+     D manu            s              5  0 dim(50)
+     D brok            s              5  0 dim(50)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D svfscd          s                   like(whfscd)
+     D svltcd          s                   like(whltcd)
+     D svb0dt          s                   like(whb0dt)
+     D count           s              3  0
+      *
+      *
+      * Parm fields
+      *
+     D xxperiod        s                   like(dhacpe)
+     D xxquarter       s                   like(dhacqr)
+      *
+     D xxhmnb          s                   like(whhmnb)
+     D xxb0dt          s                   like(whb0dt)
+     D xxreturn        s              7a
+     D xxjulian        s              5  0
+     D xxcdwk          s                   like(dhcdwk)
+     D xxday           s              1a
+     D xxacyr          s                   like(dhacyr)
+     D xxacpe          s                   like(dhacpe)
+     D xxacwk          s                   like(dhacwk)
+     D xxhpscdyr       s                   like(dhcdyr)
+     D xxhpscdwk       s                   like(dhcdwk)
+     D xxhpspicdt      s                   like(dhpicdt)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wknulldt        s                   like(dhkldt) inz(D'0001-01-01')
+      *
+      *
+      * Workfields
+      *
+     D wkwt            s              3  0
+     D wkyield         s             15  4
+     D wkfld           s             15  2
+      *
+     D wkaic3          s                   like(i1aic3) inz(360)
+     D wkrxcd          s                   like(i1rxcd) inz('10LBLV')
+     D wkminlb         s              3  0
+     D wkmaxlb         s              3  0
+     D wkalphmin       s              3
+     D wkalphmax       s              3
+     D wkrange         s              7
+      *
+      *
+      * Array indexes
+     D x               s              2  0
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *-----------------------------------------------------------------------
+      * Data structure for matching date formats between the Hog Procurement
+      * and Evaluation System and the Hog Production System
+      *-----------------------------------------------------------------------
+      *
+      * Dates in the Hog Production System are stored as ccyymmdd.
+      *
+     d                 ds
+     d  wkcymd                 1      8  0
+     d  wkcen                  1      2  0
+     d  wkyer                  3      4  0
+     d  wkmon                  5      6  0
+     d  wkday                  7      8  0
+      *
+      * Hog Procurement and Evaluation dates are stored as cyymmdd.
+      *
+     D                 DS
+     D  wk0ymd                 1      7  0
+     D  wkcc                   1      1  0
+     D  wkyy                   2      3  0
+     D  wkmm                   4      5  0
+     D  wkdd                   6      7  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Process the workfile rolling up records to the farm site/kill date/load
+      * type level.
+      *
+     C     *loval        setll     hep300
+      *
+     C                   dou       *in90 = *on                                  Main do loop
+     C                   read      hep300                                 90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * First time/one time processing
+      *
+     C                   if        first = yes
+     C                   exsr      $loadarray
+     C                   exsr      $setup
+     C                   move      no            first
+     C                   endif
+      *
+      * Control break
+     C                   if        whfscd <> svfscd or                          If break
+     C                             whb0dt <> svb0dt or
+     C                             whltcd <> svltcd
+     C                   exsr      $writehdr
+     C                   exsr      $writedtl
+     C                   exsr      $setup
+     C                   endif                                                  If break
+      *
+      * Accumulate the following directly into the header record fields:
+      *
+      *  Head received
+     C                   add       whcwnb        dhcwnb
+      *  Head killed
+     C                   add       whfenb        dhfenb
+      *  Hot weight
+     C                   add       whe0nb        dhe0nb
+      *  Live weight
+     C                   add       whcynb        dhcynb
+      *  Adj live weight
+     C                   add       whlrnb        dhlrnb
+      *
+      *
+      * Accumulate the following into workfields for eventual calculation of
+      * rolled-up averages at the break level.
+      *   1) lean percent
+      *   2) loin eye
+      *   3) backfat
+      *
+     C     whe0nb        mult      whf4nb        wkfld
+     C                   add       wkfld         dhlean
+
+     C     whe0nb        mult      whf3nb        wkfld
+     C                   add       wkfld         dhloin
+
+     C     whe0nb        mult      whf2nb        wkfld
+     C                   add       wkfld         dhback
+      *
+      *
+      * Process all 'carcass detail' records for this tattoo header.
+      *
+     C                   exsr      $carcass
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do loop
+      *
+      * EOF processing
+      *
+     C                   exsr      $writehdr
+     C                   exsr      $writedtl
+      *
+     C                   seton                                        lr
+      /eject
+      *----------------------------------------------------------------
+      * Process 'carcass detail' records for this tattoo header
+      *----------------------------------------------------------------
+      *
+      * Omit records where 'record add/del sts' is 'D'
+      * Only process records where 'record status' is 'A'
+      *
+     C     $carcass      begsr
+      *
+     C     key01         setll     pkb1cpla
+     C                   dou       *in91 = *on                                  Do carcass
+     C     key01         reade     pkb1cpla                               91
+     C                   if        *in91 = *off and                             If more
+     C                             b1ajst = 'A' and
+     C                             b1inst <> 'D'
+      *
+      * Calculate 'live weight' by:
+      *  1) calculating yield
+      *  2) dividing hot weight by yield
+      *
+     C                   eval      wkyield =
+     C                             (((b1ewnb / .76) - 245) * .00036) + .75
+      *
+     C                   if        wkyield <> 0
+     C     b1ewnb        div(h)    wkyield       wkwt
+     C                   else
+     C                   z-add     0             wkwt
+     C                   endif
+      *
+      *
+      * Determine which 'range' this live weight falls into.
+      *
+     C                   eval      x = 1
+     C     wkwt          lookup    maxlb(x)                           92  92
+     C                   if        *in92 = *on                                  If lb hit
+      *
+      * Add 1 to the appropriate 'killed head' occurrence
+      *
+     C                   add       1             kill(x)
+      *
+      * If this carcass was 'trimmed', increment the appropriate 'trimmed head'
+      * occurrence
+      *
+     C                   if        b1gdst <> *blank
+     C                   add       1             trim(x)
+     C                   add       1             dhtrhd
+     C                   endif
+      *
+      * If this carcass was 'broken back', increment the appropriate 'broken back'
+      * occurrence
+      *
+     C                   if        b1vcst = '1'
+     C                   add       1             brok(x)
+     C                   add       1             dhbbhd
+     C                   endif
+      *
+      * If this carcass was 'manually adjusted', increment the appropriate 'manual head'
+      * occurrence
+      *
+     C                   if        b1utst <> *blank
+     C                   add       1             manu(x)
+     C                   add       1             dhmnhd
+     C                   endif
+     C                   endif                                                  If lb hit
+      *
+     C                   endif                                                  If more
+     C                   enddo                                                  Do carcass
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Write header record
+      *----------------------------------------------------------------
+      *
+     C     $writehdr     begsr
+      *
+      * If the header 'hot weight' is not zero, calculate:
+      *  a) average loin eye depth
+      *  b) average backfat inches
+      *  c) average lean percent
+      *
+     C                   if        dhe0nb <> 0
+     C     dhlean        div(h)    dhe0nb        dhleanavg
+     C     dhloin        div(h)    dhe0nb        dhloinavg
+     C     dhback        div(h)    dhe0nb        dhbackavg
+     C                   endif
+      *
+     C                   write     dhrec
+     C                   clear                   dhrec
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Write detail records
+      *----------------------------------------------------------------
+      *
+     C     $writedtl     begsr
+      *
+     C                   z-add     0             x
+      *
+     C                   do        count                                        Do detail
+     C                   add       1             x
+     C                   move      range(x)      ddrange
+     C                   z-add     kill(x)       ddklhd
+     C                   z-add     trim(x)       ddtrhd
+     C                   z-add     brok(x)       ddbbhd
+     C                   z-add     manu(x)       ddmnhd
+     C                   write     ddrec
+     C                   enddo                                                  Do detail
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------
+      * Populate fields that remain constant in the header and detail files
+      *--------------------------------------------------------------------------
+      *
+     C     $setup        begsr
+      *
+      * Map farms site and load type directly from the workfile to both
+      * the header and detail records.
+      *
+     C                   z-add     whfscd        dhfscd
+     C                   z-add     whfscd        ddfscd
+      *
+     C                   move      whltcd        dhltcd
+     C                   move      whltcd        ddltcd
+      *
+      *
+      * Format the SYNON kill date into an 8,0 field
+      *
+     C                   z-add     whb0dt        wk0ymd
+     C                   z-add     wkyy          wkyer
+     C                   z-add     wkmm          wkmon
+     C                   z-add     wkdd          wkday
+     C                   if        wkcc = 0
+     C                   z-add     19            wkcen
+     C                   else
+     C                   z-add     20            wkcen
+     C                   endif
+      *
+      *  Test the field for a valid date
+      *
+     C     *iso          test(d)                 wkcymd                 92
+     C                   if        *in92 = *on                                  If invalid
+     C                   movel     wknulldt      dhkldt
+     C                   movel     wknulldt      ddkldt
+     C                   else
+      *
+      * Format the 8,0 kill date into the Datamart 'date format' field and
+      * populate both the header record and the detail record.
+      *
+     C                   move      wkcymd        dhkldt
+     C                   move      wkcymd        ddkldt
+     C                   endif                                                  If invalid
+      *
+      * Retrieve the following info from the OMS Calendar file for the
+      * kill date.
+      *   1) accounting year
+      *   2) accounting period
+      *   3) accounting week
+      *   4) HPS calendar year
+      *   5) HPS calendar week
+      *   5) HPS PIC date
+      *
+      * You will call a SYNON program for this retrieval using as
+      * input parms 1) company number and 2) kill date
+      *
+     C                   call      'POF3XFR'
+     C                   parm      *blank        xxreturn
+     C                   parm      whhmnb        xxhmnb
+     C                   parm      whb0dt        xxb0dt
+     C                   parm      0             xxjulian
+     C                   parm      0             xxacyr
+     C                   parm      0             xxacpe
+     C                   parm      0             xxacwk
+     C                   parm      *blank        xxday
+     C                   parm      0             xxcdwk
+     C                   parm      0             xxhpspicdt
+     C                   parm      0             xxhpscdyr
+     C                   parm      0             xxhpscdwk
+      *
+     C                   if        xxreturn = *blank                            If date hit
+     C                   z-add     xxhpscdyr     dhcdyr
+     C                   z-add     xxhpscdwk     dhcdwk
+     C                   z-add     xxhpspicdt    dhpicdt
+     C                   z-add     xxacyr        dhacyr
+     C                   z-add     xxacpe        dhacpe
+     C                   z-add     xxacwk        dhacwk
+      *
+      *
+      * Call the generic program to retrieve the quarter associated with the
+      * accounting period.
+      *
+     C                   call      'HP8006'
+     C                   parm      dhacpe        xxperiod
+     C     dhacqr        parm      0             xxquarter
+      *
+     C                   endif                                                  If date hit
+      *
+      * Populate control break fields
+      *
+     C                   z-add     whfscd        svfscd
+     C                   z-add     whb0dt        svb0dt
+     C                   move      whltcd        svltcd
+      *
+      * Clear arrays
+      *
+     C                   z-add     0             kill
+     C                   z-add     0             trim
+     C                   z-add     0             brok
+     C                   z-add     0             manu
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Load the weight range arrays
+      *----------------------------------------------------------------------------------
+      *
+     C     $loadarray    begsr
+      *
+      * Read the HPE Cutout Weight range file and load two arrays:
+      *   1) maximum pounds and 2) max-min range text
+      *
+     C                   z-add     0             x
+      *
+     C     key02         setll     pdi1rel4
+     C                   dou       *in92 = *on                                  Do ranges
+     C     key02         reade     pdi1rel4                               92
+     C                   if        *in92 = *off                                 If not EOF
+     C                   add       1             x
+     C                   z-add     i1vvnb        maxlb(x)
+     C                   exsr      $concat
+     C                   move      wkrange       range(x)
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do ranges
+      *
+      *
+      * If you did not find any HPE cutout records, set up a single entry
+      * in the arrays.
+     C                   if        x = 0
+     C                   z-add     1             x
+     C                   z-add     999           maxlb(x)
+     C                   eval      wkrange = '  0-999'
+     C                   move      wkrange       range(x)
+     C                   endif
+      *
+      * Save a counter of the number of records that you wrote to the arrays.
+      *
+     C                   z-add     x             count
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Concatenate minimum and maximum pounds into a text field
+      *----------------------------------------------------------------
+      *
+     C     $concat       begsr
+      *
+     C                   z-add     i1vsnb        wkminlb
+     C                   z-add     i1vvnb        wkmaxlb
+     C                   move      wkminlb       wkalphmin
+     C                   move      wkmaxlb       wkalphmax
+      *
+     C                   eval      wkrange = wkalphmin + '-' + wkalphmax
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * *inzsr - initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *   none
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    whhmnb
+     C                   kfld                    whbnnb
+     C                   kfld                    whbonb
+     C                   kfld                    whcvnb
+     C                   kfld                    whb0dt
+      *
+     C     key02         klist
+     C                   kfld                    wkaic3
+     C                   kfld                    wkrxcd
+      *
+     C                   endsr
+      /EJECT

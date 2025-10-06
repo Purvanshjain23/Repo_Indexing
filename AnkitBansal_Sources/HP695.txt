@@ -1,0 +1,1271 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP695
+      * TITLE:       INVENTORY RECAP BY GROUP
+      * PROGRAMMER:  MARY PALMER
+      * CREATED:     11/23/94
+      *
+      *  FUNCTION:   THIS PROGRAM PRINTS A SINGLE LINE REPORT OF THE
+      *              INVENTORY COUNTS AND COSTS OF HOG GROUPS FOR THE
+      *              PERIOD END DATE.
+      *
+      *              The Period Close function calls this program twice printing
+      *              both the PHASE version and the STAGE version:
+      *
+      *                  PHASE version   sorts by phase/farm
+      *
+      *                  STAGE version   sorts by stage of growth/total days of growth
+      *                                  includes only Grow Finish groups
+      *
+      *              Both versions run over workfile HSP395.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 02/08/01  LeAnne Fedor
+      *           Added a 'cost of transfers' column. Also, will now print only
+      *           whole dollars. Also, changed layout from 132 to 198 and made it
+      *           similar to HP696--which the users compare to this report.
+      *
+      * 08/02/01  LeAnne Fedor
+      *           The report is no longer generated on-demand. It is now part of EOP.
+      *           Added new column for 'group type'.
+      *           Changed sort to be by 'farm' instead of 'cost center'.
+      *           We no longer print groups whose inventory dollars are zero.
+      *
+      * 08/08/01  LeAnne Fedor
+      *           We changed our 'no print' logic.
+      *           Now, we do not print groups where both the inventory amount and the
+      *           head are zero. If either are valued, we print the group line.
+      *
+      * 04/04/02  LeAnne Fedor
+      *           Per Jeff Sherboundy, removed all special logic for FHAUL/CHAUL.
+      *           They will now be treated as the 'expenses' that they truly are.
+      *
+      * 10/31/02  LeAnne Fedor
+      *           Changed the logic to handle a second version of this report. Thus,
+      *           you can generate the report by:
+      *                  PHASE version   sorts by phase/farm
+      *                  STAGE version   sorts by stage of phase/total days in phase
+      *                                  includes only Grow Finish groups
+      *
+      * 01/29/03  LeAnne Fedor
+      *           Removed all hardcoded special logic for SHAUL.
+      *
+      * 02/11/03  LeAnne Fedor
+      *           Switched all the logic for the STAGE version from 'stage of phase' to
+      *           'stage of growth'.
+      *
+      * 04/10/03  LeAnne Fedor
+      *           Replaced HSP086-Costed Transfers file with new file HSP118.
+      *
+      * 07/15/03  LeAnne Fedor
+      *           Changed 'Cull Sale' logic to use 'net' dollars instead of 'gross' dollars.
+      *           And, the report can now be generated 'on-demand'.
+      *
+      * 10/16/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 03/26/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 01/21/21  ISE            TSN593
+      *           Replaced *loval with *start
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp011    if   e           k disk
+      *    Production phase
+      *
+      *
+     Fhsp018    if   e           k disk
+      *    Farm site
+      *
+      *
+     Fhsl038e   if   e           k disk
+      *    Feed ticket detail
+      *
+      *
+     Fhsl048c   if   e           k disk
+      *    Expense ticket
+      *
+      *
+     Fhsp055    if   e           k disk
+      *    Period costs for hogs moved out
+      *
+      *
+      *
+     Fhsl058d   if   e           k disk    rename(merec:merecd)
+      *   Movement event
+      *
+      *
+     Fhsl064b   if   e           k disk
+      *    Check detail
+      *
+      *
+     Fhsl065c   if   e           k disk
+      *    Check adjustments
+      *
+      *
+     Fhsp084    if   e           k disk
+      *  Sale header
+      *
+      *
+     Fhsl118c   if   e           k disk
+      *    Cost movements: Costed movements
+      *
+      *
+     Fhsp395    if   e           k disk
+      *    Workfile for groups
+      *
+      *
+     Fqprint    o    f  198        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+     D stage           c                   'TOTAL FOR STAGE '
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      *  PRINT ARRAYS FOR TOTALS
+      *
+     D artiam          S             11  0 DIM(3)                               TRANSFER IN $
+     D arfdam          S             11  0 DIM(3)                               FEED COST
+     D arxtam          S             11  0 DIM(3)                               EXPENSE COST
+     D artcam          S             11  0 DIM(3)                               TOTAL COST    E
+     D arcsam          S             11  0 DIM(3)                               COST OF SALES E
+     D arctam          S             11  0 DIM(3)                               COST OF TRANSFERS
+     D arinam          S             11  0 DIM(3)                               INVENTORY $   E
+     D arhd            S             11  0 DIM(3)                               INV HEAD
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D rtime           s              6  0
+     D dash            s            198    inz(*all'-')
+      *
+     D length          s              2  0
+     D start           s              2  0
+      *
+      *
+      * Control fields
+      *
+     D version         s              5
+     D first           s              1    inz('Y')
+     D groupcount      s              5  0
+     D farmcount       s              5  0
+      *
+     D svppcd          s                   like(wgppcd)
+     D svfscd          s                   like(wgfscd)
+     D svalphstg       s                   like(wgalphstg)
+     D svnumstg        s                   like(wgnumstg)
+     D svgrwday        s                   like(wggrwday)
+      *
+      *
+      * Work fields
+      *
+     D wkalphfscd      s              5
+     D wkdesc          s             35
+      *
+     D wkcullam        s             15  4
+     D wktiam          s             15  2
+     D wkxtam          s             15  2
+     D wkfdam          s             15  2
+     D wkcsam          s             15  2
+     D wkctam          s             15  2
+      *
+      *
+      * Array index
+      *
+     D x               s              1  0
+      *
+      *
+      * Print fields for headings
+      *
+     d href            s              9
+     d hrbods          s                   like(ldbods)
+     d hrptds          s                   like(ldptds)
+     d hrppds          s                   like(ldppds)
+     d hrfsnm          s                   like(ldfsnm)
+     d hrcellall       s              3
+     d hrgtds          s                   like(ldgtds)
+     d hrcrds          s                   like(ldcrds)
+      *
+      *
+      * Print fields for detail line
+      *
+     D d1fsnm          s             10
+     D d1hd            s                   like(cmhd)
+     D d1tiam          s              9  0
+     D d1fdam          s                   like(d1tiam)
+     D d1xtam          s                   like(d1tiam)
+     D d1tcam          s                   like(d1tiam)
+     D d1csam          s                   like(d1tiam)
+     D d1ctam          s                   like(d1tiam)
+     D d1inam          s                   like(d1tiam)
+      *
+      *
+      * Print fields for total line
+      *
+     D t1desc          s             35
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *
+      * Define parms for the generic movement program
+      *
+     D xxcymd          s                   like(memedt)
+     D xxhgsn          s                   like(cmorhgsn)
+     D @@nu50          s              5  0
+     D gpihd           s                   like(@@nu50)
+     D pinhd           s                   like(@@nu50)
+     D tinhd           s                   like(@@nu50)
+     D tisphd          s                   like(@@nu50)
+     D tidphd          s                   like(@@nu50)
+     D pouhd           s                   like(@@nu50)
+     D touhd           s                   like(@@nu50)
+     D tosphd          s                   like(@@nu50)
+     D todphd          s                   like(@@nu50)
+     D rinhd           s                   like(@@nu50)
+     D rouhd           s                   like(@@nu50)
+     D qinhd           s                   like(@@nu50)
+     D qouhd           s                   like(@@nu50)
+     D morhd           s                   like(@@nu50)
+     D inahd           s                   like(@@nu50)
+      *
+     D @@nu92          s              9  2
+     D pinlb           s                   like(@@nu92)
+     D tinlb           s                   like(@@nu92)
+     D tisplb          s                   like(@@nu92)
+     D tidplb          s                   like(@@nu92)
+     D poulb           s                   like(@@nu92)
+     D toulb           s                   like(@@nu92)
+     D tosplb          s                   like(@@nu92)
+     D todplb          s                   like(@@nu92)
+     D rinlb           s                   like(@@nu92)
+     D roulb           s                   like(@@nu92)
+     D qinlb           s                   like(@@nu92)
+     D qoulb           s                   like(@@nu92)
+     D morlb           s                   like(@@nu92)
+      *
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *
+      *----------------------------------------------------------------
+      * LDA - REPORT selectIONS
+      *----------------------------------------------------------------
+      *
+      *
+     D                UDS
+     D  LDBPDT                 1     08  0
+     D  LDEPDT                 9     16  0
+     D  LDPER                 17     18  0
+     D  LDEFFL                19     19
+     D  LDCCYY                20     23  0
+     D  LDBMDY                60     66  0
+     D  LDEMDY                70     76  0
+     D  LDERFL                80     80
+      *
+     D  ldfsbo                87     91
+     D  ldptcd                92     96
+     D  ldppcd                97    101
+     D  ldcell               102    103  0
+     D  ldcrcd               104    108
+     D  ldfscd               109    113  0
+     D  ldgtcd               114    114
+      *
+     D  ldbods               115    144
+     D  ldptds               145    154
+     D  ldppds               155    184
+     D  ldfsnm               185    209
+     D  ldgtds               210    224
+     D  ldcrds               225    234
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+593  C*    *loval        setll     hsp395
+593  C     *start        setll     hsp395
+      *
+      * Read the group workfile
+      *
+     C                   dou       *in90 = *on                                  Main do loop
+     C                   read      hsp395                                 90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   if        first = yes
+     C                   exsr      $first
+     C                   endif
+      *
+      * Check for control breaks
+      *
+     C                   select
+     C                   when      version = 'PHASE'
+     C                   exsr      $brkphase
+      *
+     C                   when      version = 'STAGE'
+     C                   exsr      $brkstage
+     C                   endsl
+      *
+      * Move Farm Name to print field
+      *
+     C                   movel     wgfsnm        d1fsnm
+      *
+      * Retrieve inventory head
+      *
+     C                   exsr      $head
+      *
+      * Accumulate the following for the group thru the period end date:
+      *  1) Transfer-in cost
+      *  2) Feed cost
+      *  3) Expenses
+      *  4) Cull sale dollars
+      *
+     C                   exsr      $trani
+     C                   exsr      $feed
+     C                   exsr      $exp
+     C                   exsr      $culls
+      *
+      * Subtract the cull sales dollars from the expense dollars
+      *
+     C                   sub       wkcullam      wkxtam
+      *
+      * Retrieve sales and transfer cost from period cost file.
+      *
+     C                   exsr      $costs
+      *
+      * Move workfields values to print fields with no decimal places.
+      *
+     C                   z-add(h)  wktiam        d1tiam
+     C                   z-add(h)  wkfdam        d1fdam
+     C                   z-add(h)  wkxtam        d1xtam
+     C                   z-add(h)  wkcsam        d1csam
+     C                   z-add(h)  wkctam        d1ctam
+      *
+      * Calculate total cost as: transfer in + feed + expenses
+      *
+     C     d1tiam        add       d1fdam        d1tcam
+     C                   add       d1xtam        d1tcam
+      *
+      *
+      * Calculate inventory amount as:
+      *   Total cost - cost of sales - cost of transfers out
+      *
+     C     d1tcam        sub       d1csam        d1inam
+     C                   sub       d1ctam        d1inam
+      *
+      * If both head and inventory amount are zero, then do not print/accumulate.
+      *
+     C                   if        d1inam = 0 and d1hd = 0                      If no head/$
+     C                   z-add     0             d1hd
+     C                   z-add     0             d1tiam
+     C                   z-add     0             d1fdam
+     C                   z-add     0             d1xtam
+     C                   z-add     0             d1tcam
+     C                   z-add     0             d1csam
+     C                   z-add     0             d1ctam
+     C                   z-add     0             d1inam
+     C                   else
+      *
+      * Accumulate values into arrays for total lines
+      *
+     C                   add       d1hd          arhd
+     C                   add       d1tiam        artiam
+     C                   add       d1fdam        arfdam
+     C                   add       d1xtam        arxtam
+     C                   add       d1tcam        artcam
+     C                   add       d1csam        arcsam
+     C                   add       d1ctam        arctam
+     C                   add       d1inam        arinam
+      *
+      * Print detail line
+     C                   exsr      $d1dtl
+     C                   endif                                                  If no head/$
+      *
+      * Clear accumulators for detail lines.
+      *
+     C                   z-add     0             wktiam
+     C                   z-add     0             wkfdam
+     C                   z-add     0             wkxtam
+     C                   z-add     0             wkcsam
+     C                   z-add     0             wkctam
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do loop
+      *
+      *---------------------------------------------------------------
+      * EOF processing
+      *---------------------------------------------------------------
+      * If the file was empty, print the standard 'no data...'
+      * error message
+      *
+     C                   if        first = yes                                  If no recs
+     C                   exsr      $hrhdr
+     C                   except    nodata
+     C                   else
+      * Print totals
+     C                   select
+     C                   when      version = 'PHASE'
+     C                   exsr      $fstot
+     C                   exsr      $pptot
+     C                   exsr      $rptot
+      *
+     C                   when      version = 'STAGE'
+     C                   exsr      $stgtot
+     C                   exsr      $rptot
+     C                   endsl
+      *
+     C                   endif                                                  If no recs
+      *
+      * Call utlility program to reclaim resources--close files and
+      * cleanup after the generic programs that do not set on the last
+      * record indicator.
+      *
+     C                   call      'UTRCRSC'
+     C                   seton                                        lr
+      /EJECT
+      *----------------------------------------------------------------
+      * Save farm site info
+      *----------------------------------------------------------------
+      *
+     C     $fscd         begsr
+      *
+     C                   z-add     wgfscd        svfscd
+     C                   z-add     0             groupcount
+      *
+      * Set on the indicator to force printing of farm info on the
+      * subsequent detail line.
+      *
+     C                   seton                                        87
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Check for control breaks when printing the PHASE version
+      *----------------------------------------------------------------
+      *
+      * The 'PHASE' version breaks on:
+      *    Production phase
+      *    Farm site
+      *
+     C     $brkphase     begsr
+      *
+     C                   select
+     C                   when      wgppcd <> svppcd
+     C                   exsr      $fstot
+     C                   exsr      $pptot
+      *
+     C                   when      wgfscd <> svfscd
+     C                   exsr      $fstot
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Check for control breaks when printing the STAGE version
+      *----------------------------------------------------------------
+      *
+      * The 'STAGE' version:
+      *   1) prints stage totals on 'stage of growth' break
+      *   2) prints a blank line when the total growth days breaks within stage of growth
+      *
+     C     $brkstage     begsr
+      *
+     C                   select
+     C                   when      wgnumstg <> svnumstg
+     C                   exsr      $stgtot
+      *
+     C                   when      wggrwday <> svgrwday
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Retrieve production phase description and print report headings
+      *----------------------------------------------------------------
+      *
+     C     $ppds         begsr
+      *
+     C                   movel     wgppcd        svppcd
+      *
+     C     svppcd        chain     hsp011                             92
+     C                   if        *in92 = *off                                 IF FOUND
+     C                   movel(P)  ppppds        hrppds
+     C                   else
+     C                   movel(P)  'Unknown'     hrppds
+     C                   endif                                                  IF FOUND
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Save the 'stage'
+      *----------------------------------------------------------------
+      *
+     C     $savestg      begsr
+      *
+     C                   movel     wgalphstg     svalphstg
+     C                   z-add     wgnumstg      svnumstg
+     C                   z-add     wggrwday      svgrwday
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Print detail line
+      *----------------------------------------------------------------
+      *
+     C     $d1dtl        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $hrhdr
+     C                   endif
+      *
+     C                   if        version = 'STAGE'                            If STAGE version
+      *
+     C                   if        wgfscd <> svfscd
+     C                   seton                                        87
+     C                   z-add     wgfscd        svfscd
+     C                   endif
+      *
+     C                   if        wggrwday <> svgrwday
+     C                   except    blank
+     C                   z-add     wggrwday      svgrwday
+     C                   endif
+      *
+     C                   endif                                                  If STAGE version
+      *
+      * Print detail line
+      *
+     C                   except    d1dtl
+     C                   setoff                                       87
+      *
+     C                   add       1             groupcount
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Print farm total
+      *----------------------------------------------------------------
+      *
+     C     $fstot        begsr
+      *
+      * Set up array index to retrieve farm site totals
+      *
+     C                   z-add     1             x
+      *
+      * If you had more than one group on the farm, print the farm site total.
+      *
+     C                   select
+     C                   when      groupcount > 1
+      *
+      * Move farm site number to an alpha field and strip the leading zeros.
+      * Then concatenate it with text for the total line description field.
+      *
+     C                   move      svfscd        wkalphfscd
+     C                   if        %subst(wkalphfscd:1:1) = '0'                 If position 1
+     C                   eval      %subst(wkalphfscd:1:1) = *blank
+     C                   if        %subst(wkalphfscd:2:1) = '0'                 If position 2
+     C                   eval      %subst(wkalphfscd:2:1) = *blank
+     C                   if        %subst(wkalphfscd:3:1) = '0'                 If position 3
+     C                   eval      %subst(wkalphfscd:3:1) = *blank
+     C                   if        %subst(wkalphfscd:4:1) = '0'                 If position 4
+     C                   eval      %subst(wkalphfscd:4:1) = *blank
+     C                   endif                                                  If position 4
+     C                   endif                                                  If position 3
+     C                   endif                                                  If position 2
+     C                   endif                                                  If position 1
+      *
+      * Concatenate
+     C                   eval      wkdesc = 'Total for Farm: ' +
+     C                                      %trim(wkalphfscd)
+      *
+     C                   except    under
+     C                   exsr      $t1tot
+     C                   other
+      *
+      * There was only 1 group on this farm; so, print a blank line instead of
+      * a farm total line....and clear the farm total array entries.
+      *
+     C                   add       1             farmcount
+     C                   exsr      $clear
+     C                   except    blank
+     C                   endsl
+      *
+      *
+      * If you are not at EOF, retrieve farm site name for next farm.
+      *
+     C                   if        *in90 = *off
+     C                   exsr      $fscd
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Print production phase total
+      *----------------------------------------------------------------
+      *
+     C     $pptot        begsr
+      *
+     C                   z-add     2             x
+     C                   eval      wkdesc = 'Total for Phase: ' + %trimr(svppcd)
+      *
+      * Print total line
+     C                   exsr      $t1tot
+      *
+      * If not EOF, go get the description for the new phase and print
+      * report headings.
+     C                   if        *in90 = *off
+     C                   exsr      $ppds
+     C                   exsr      $hrhdr
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Print Stage total
+      *----------------------------------------------------------------
+      *
+     C     $stgtot       begsr
+      *
+      * Set up array index to retrieve stage totals
+      *
+     C                   z-add     1             x
+      *
+     C                   eval      wkdesc = 'Total for Stage: '
+     C                                    + %trimr(svalphstg)
+     C                   except    under
+     C                   exsr      $t1tot
+      *
+      * If you are not at EOF, save the stage fields and set on the overflow
+      * indicator to force the next stage to break to a new page.
+      *
+     C                   if        *in90 = *off
+     C                   exsr      $savestg
+     C                   seton                                        of
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Total for report
+      *---------------------------------------------------------------
+      *
+     C     $rptot        begsr
+      *
+     C                   z-add     3             x
+     C                   eval      wkdesc = 'Total for Report:'
+      *
+      * Print total line
+     C                   exsr      $t1tot
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print total line
+      *---------------------------------------------------------------
+      *
+     C     $t1tot        begsr
+      *
+     C                   if        *inof = *on
+     C                   except    hrhdr
+     C                   endif
+      *
+     C     ' '           checkr    wkdesc        length
+     C                   eval      start = 35 - length + 1
+      *
+     C                   eval      %subst(t1desc:start) =
+     C                             %subst(wkdesc:1:length)
+      *
+     C                   except    t1tot
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Print report headings
+      *----------------------------------------------------------------
+      *
+     C     $hrhdr        begsr
+      *
+     C                   except    hrhdr
+      *
+      * Set on the indicator that make farm site print on the subsequent
+      * detail line.
+      *
+     C                   seton                                        87
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Clear the array values for the designated index
+      *----------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   z-add     0             arhd (x)
+     C                   z-add     0             artiam (x)
+     C                   z-add     0             arfdam (x)
+     C                   z-add     0             arxtam (x)
+     C                   z-add     0             artcam (x)
+     C                   z-add     0             arcsam (x)
+     C                   z-add     0             arctam (x)
+     C                   z-add     0             arinam (x)
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Retrieve inventory head counts and weights
+      *----------------------------------------------------------------
+      *
+     C     $head         begsr
+      *
+     C                   z-add     wghgsn        xxhgsn
+     C                   z-add     ldepdt        xxcymd
+      *
+     C                   call      'HPMOVE'      plist01
+      *
+     C                   add       gpihd         d1hd
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Process feed tickets and accumulate dollars
+      *----------------------------------------------------------------
+      *
+     C     $feed         begsr
+      *
+     C     wghgsn        setll     hsl038e
+      *
+     C                   dou       *in91 = *on                                  DO FEED
+     C     wghgsn        reade     hsl038e                                91
+     C                   if        *in91 = *off and                             IF NOT EOF
+     C                             fdtkdt <= ldepdt
+      *
+     C                   add       fdinam        wkfdam
+     C                   add       fdmfam        wkfdam
+     C                   add       fdmdam        wkfdam
+     C                   add       fddlam        wkfdam
+      *
+     C                   endif                                                  IF NOT EOF
+     C                   enddo                                                  DO FEED
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Process expense tickets for the group
+      *----------------------------------------------------------------
+      *
+      * Accumualte dollars for expense tickets for the group
+      *
+     C     $exp          begsr
+      *
+     C     wghgsn        setll     hsl048c
+      *
+     C                   dou       *in91 = *on                                  DO EXPENSES
+     C     wghgsn        reade     hsl048c                                91
+     C                   if        *in91 = *off and                             IF NOT EOF
+     C                             xtxedt <= ldepdt
+      *
+     C                   add       xtxtam        wkxtam
+      *
+     C                   endif                                                  IF NOT EOF
+     C                   enddo                                                  DO EXPENSES
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Retrieve cull sale dollars for a group
+      *----------------------------------------------------------------
+      *
+      * Accumulate dollars from cull sales. These dollars will be deducted
+      * from expenses.
+      *
+     C     $culls        begsr
+      *
+     C                   z-add     0             wkcullam
+      *
+      * Read the movement event file for the group. Only process sales movements
+      * with a shipped date on or before the cut-off date.
+      *
+     C     wghgsn        setll     hsl058d
+      *
+     C                   dou       *in91 = *on                                  DO EVENT
+     C     wghgsn        reade     hsl058d                                91
+     C                   if        *in91 = *off and                             IF A SALE
+     C                             memtcd = 'S' and
+     C                             memedt <= ldepdt
+      *
+      * Retrieve sales header to check for a sale type--
+      * only process cull sales; omit scheduled sales.
+      *
+     C     memvsn        chain     hsp084                             92
+     C                   if        *in92 = *off and                             If cull sale
+     C                             shstcd = 'CULLS' and
+     C                             shmscd <> 'SC'
+      *
+      * Retrieve check detail records for this movement/group to
+      * accumulate gross dollars. For each check detail record, retrieve
+      * the deductions/additions.
+      *
+     C     key01         setll     hsl064b
+      *
+     C                   dou       *in93 = *on                                  DO CHECK DET
+     C     key01         reade     hsl064b                                93
+     C                   if        *in93 = *off                                 IF NOT DEAD
+     C                   add       cdgram        wkcullam
+      *
+      * Now, retrieve all the adjustments for this detail line so that
+      * you can get to the 'net' amount for the check detail line.
+      * (NOTE: Deductions/additions are carried in the Adjustment file
+      * with the appropriate +/- sign. So, just 'add' them to the 'gross'.)
+      *
+     C     key02         setll     hsl065c
+     C                   dou       *in94 = *on                                  Do ded/add
+     C     key02         reade     hsl065c                                94
+     C                   if        *in94 = *off and cjcjfl = 'D'
+     C                   add       cjcjam        wkcullam
+     C                   endif
+     C                   enddo                                                  Do ded/add
+      *
+     C                   endif                                                  IF NOT DEAD
+     C                   enddo                                                  DO CHECK DET
+      *
+     C                   endif                                                  IF CULL SALE
+     C                   endif                                                  IF A SALE
+     C                   enddo                                                  DO EVENT
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Retrieve/sum costed transfers into the destination group
+      *----------------------------------------------------------------
+      *
+     C     $trani        begsr
+      *
+     C     wghgsn        setll     hsl118c
+      *
+     C                   dou       *in91 = *on or                               Do trans
+     C                             cmacyr > ldccyy or
+     C                             (cmacyr = ldccyy and cmacpe > ldper)
+      *
+     C     wghgsn        reade     hsl118c                                91
+     C                   if        *in91 = *off and cmmtcd = 'T' and            If not EOF
+     C                             (cmacyr < ldccyy or
+     C                             (cmacyr = ldccyy and cmacpe <= ldper))
+     C                   add       cmam          wktiam
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do trans
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------
+      * Retrieve cost of sales and transfers from period cost file
+      *--------------------------------------------------------------
+      *
+     C     $costs        begsr
+      *
+      *
+     C     wghgsn        setll     hsp055
+      *
+      * Process period cost records for the group through the period being
+      * closed.
+      *
+     C                   dou       *in91 = *on                                  DO LOOP
+     C     wghgsn        reade     hsp055                                 91
+     C                   if        *in91 = *off                                 IF COST
+      *
+     C                   select
+     C                   when      pcacyr < ldccyy
+     C                   add       pcsam         wkcsam
+     C                   add       pcajam        wkcsam
+     C                   add       pctam         wkctam
+      *
+     C                   when      pcacyr = ldccyy and
+     C                             pcacpe <= ldper
+     C                   add       pcsam         wkcsam
+     C                   add       pcajam        wkcsam
+     C                   add       pctam         wkctam
+     C                   endsl
+      *
+     C                   endif                                                  IF COST
+     C                   enddo                                                  DO LOOP
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * First time processing
+      *----------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+     C                   move      no            first
+      *
+     C                   select
+     C                   when      version = 'PHASE'
+     C                   exsr      $ppds
+     C                   exsr      $fscd
+      *
+     C                   when      version = 'STAGE'
+     C                   exsr      $savestg
+     C                   endsl
+      *
+     C                   exsr      $hrhdr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm incoming
+      *
+     C     *entry        plist
+     C                   parm                    version
+      *
+      * Parm list
+      *
+     C     plist01       plist
+     C                   parm                    xxhgsn
+     C                   parm                    xxcymd
+      * Head
+     C                   parm                    gpihd                          GROUP INV
+     C                   parm                    pinhd                          PIG IN
+     C                   parm                    tinhd                          TRSF IN
+     C                   parm                    tisphd                         SAME PHASE
+     C                   parm                    tidphd                         DIFF PHASE
+     C                   parm                    pouhd                          PIGS OUT
+     C                   parm                    touhd                          TRSF OUT
+     C                   parm                    tosphd                         SAME PHASE
+     C                   parm                    todphd                         DIFF PHASE
+     C                   parm                    rinhd                          REJECT IN
+     C                   parm                    rouhd                          REJECT OUT
+     C                   parm                    qinhd                          QUALITY IN
+     C                   parm                    qouhd                          QUALITY OUT
+     C                   parm                    morhd                          MORTALITY
+     C                   parm                    inahd                          INV ADJ
+      * Pounds
+     C                   parm                    pinlb                          PIG IN
+     C                   parm                    tinlb                          TRSF IN
+     C                   parm                    tisplb                         SAME PHASE
+     C                   parm                    tidplb                         DIFF PHASE
+     C                   parm                    poulb                          PIG OUT
+     C                   parm                    toulb                          TRSF OUT
+     C                   parm                    tosplb                         SAME PHASE
+     C                   parm                    todplb                         DIFF PHASE
+     C                   parm                    rinlb                          REJECT IN
+     C                   parm                    roulb                          REJECT OUT
+     C                   parm                    qinlb                          QUALITY IN
+     C                   parm                    qoulb                          QUALITY OUT
+     C                   parm                    morlb                          MORTALITY
+      *
+      * Key lists
+      *
+      *
+     C     key01         klist
+     C                   kfld                    memvsn
+     C                   kfld                    mehgsn
+      *
+      *
+     C     key02         klist
+     C                   kfld                    cdchdt
+     C                   kfld                    cdcvno
+     C                   kfld                    cdchno
+     C                   kfld                    cdlnno
+      *
+      *
+      * Retrieve time for report headings
+      *
+     C                   time                    rtime
+      *
+      * Check the 'version' (sort sequence)
+      *
+     C                   select
+     C                   when      version = 'PHASE'
+     C                   seton                                        88
+      *
+     C                   when      version = 'STAGE'
+     C                   seton                                        89
+     C                   endsl
+      *
+      *
+      * Setup Headings for User's report selection
+      *
+     C                   select
+     C                   when      ldeffl = 'D'
+     C                   movel(p)  'On-Demand'   href
+     C                   seton                                        98
+      *
+     C                   when      ldeffl = 'E'
+     C                   movel(p)  '  Edit   '   href
+      *
+     C                   when      ldeffl = 'F'
+     C                   movel(p)  '  Final  '   href
+     C                   endsl
+      *
+     C                   if        ldfsbo = *blank
+     C                   movel     'All'         hrbods
+     C                   else
+     C                   movel     ldbods        hrbods
+     C                   endif
+      *
+     C                   if        ldptcd = *blank
+     C                   movel     'All'         hrptds
+     C                   else
+     C                   movel     ldptds        hrptds
+     C                   endif
+      *
+     C                   if        ldppcd = *blank
+     C                   movel(p)  'All'         ldppds
+     C                   endif
+      *
+     C                   if        ldfscd = 0
+     C                   movel     'All'         hrfsnm
+     C                   else
+     C                   movel     ldfsnm        hrfsnm
+     C                   endif
+      *
+     C                   if        ldcell = 0
+     C                   movel     'All'         hrcellall
+     C                   else
+     C                   move      *blank        hrcellall
+     C                   endif
+      *
+     C                   if        ldgtcd = *blank
+     C                   movel     'All'         hrgtds
+     C                   else
+     C                   movel     ldgtds        hrgtds
+     C                   endif
+      *
+     C                   if        ldcrcd = *blank
+     C                   movel     'All'         hrcrds
+     C                   else
+     C                   movel     ldcrds        hrcrds
+     C                   endif
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------
+      * REPORT HEADING LINES
+      *-------------------------------------------------------------
+      *
+     OQPRINT    E            HRHDR          1 01
+     O                       SDPGM               10
+     O                                          108 'HOG PRODUCTION SYSTEM'
+     O                                          188 'DATE'
+     O                       UDATE         Y    198
+      *
+     O          E            HRHDR          1
+     O                       SDUSR               10
+     O                                          110 'INVENTORY RECAP BY GROUP'
+     O                                          188 'TIME'
+     O                       RTIME              198 '  :  :  '
+      *
+     O          E            HRHDR          1
+     O               88                         104 ' Sequenced by Production'
+     O               88                         + 1 'Phase/Farm'
+      *
+     O               89                          93 ' Sequenced by Stage of'
+     O               89                         + 1 'Growth (Grow Finish Groups'
+     O               89                         + 1 'Only)'
+      *
+     O                                          188 'PAGE'
+     O                       PAGE          Z    198
+      *
+     O          E            HRHDR          2
+     O                       href               103
+      *
+      *
+     O          E            HRHDR          1
+     O                                           17 'CUT-OFF DATE ...:'
+     O                       LDEMDY        Y     27
+     O                                           35 'Period'
+     O                       LDPER         Z     38
+     O                       LDCCYY        Z     44
+      *
+      *
+     O               98                          84 'COMPANY RELATIONSHIP:'
+     O               98      ldcrcd              91
+     O               98      hrcrds             103
+      *
+      *
+     O          e    98      hrhdr          1
+     O                                           17 'BUSINESS OFFICE.:'
+     O                       ldfsbo              24
+     O                       hrbods              59
+      *
+     O                                           84 'CELL:'
+     O                       ldcell        z     91
+     O                       hrcellall           96
+      *
+      *
+     O          e    98      hrhdr          1
+     O                                           17 'PRODUCTION TYPE.:'
+     O                       ldptcd              24
+     O                       hrptds              39
+      *
+     O                                           84 'FARM SITE:'
+     O                       ldfscd        z     91
+     O                       hrfsnm             118
+      *
+      *
+     O          e    98      hrhdr          2
+     O                                           17 'PRODUCTION PHASE:'
+     O                       ldppcd              24
+     O                       ldppds              59
+      *
+     O                                           84 'GROUP TYPE:'
+     O                       ldgtcd              91
+     O                       hrgtds             108
+      *
+      *-------------------------------------------------------------
+      * COLUMN HEADING LINES
+      *-------------------------------------------------------------
+      *
+     O          E            HRHDR          1
+     O                                            5 'FARM'
+     O                                           24 'COST'
+     O                                           38 'HOG'
+     O                                           48 'GROUP'
+     O                                           71 'WKS-DAYS'
+     O                                           85 'INV'
+     O                                          101 'TRAN IN'
+     O                                          117 'FEED'
+     O                                          134 'EXPENSE'
+     O                                          150 'TOTAL'
+     O                                          166 'COST'
+     O                                          182 'COST'
+     O                                          197 'INVENTORY'
+      *
+     O          E            HRHDR          1
+     O                                            5 'SITE'
+     O                                           11 'NAME'
+     O                                           26 'CENTER'
+     O                                           40 'GROUP'
+     O                                           48 'TYPE'
+     O                                           54 'BLDG'
+     O                                           61 'ROOM'
+     O                                           72 'OF GROWTH'
+     O                                           85 'HEAD'
+     O                                          101 'COST'
+     O                                          117 'COST'
+     O                                          134 'COST'
+     O                                          150 'COST'
+     O                                          166 'OF TRANSFERS'
+     O                                          182 'OF SALES'
+     O                                          197 'AMOUNT'
+      *
+     O          E            HRHDR          2
+     O                       DASH               198
+      *
+     O          E            HRHDR          1
+     O               88      HRPPDS              30
+      *
+     O               89                          16 'Stage of Growth:'
+     O               89      svalphstg           22
+      *
+      *-------------------------------------------------------------
+      * DETAIL LINE
+      *-------------------------------------------------------------
+      *
+     O          e            d1dtl       1
+     O               87      wgfscd        z      5
+     O               87      d1fsnm              17
+     O                       wgcjd               29
+     O                       wghgcd              42
+     O                       wggtcd              47
+     O                       wgblcd              55
+     O                       wgrmcd              62
+      *
+     O                       wggrwwk       lb    66
+     O                                           67 '-'
+     O                       wggrwday      lb    70
+      *
+     O                       d1hd          KB    86
+     O                       d1tiam        KB   102
+     O                       d1fdam        KB   118
+     O                       d1xtam        KB   135
+     O                       d1tcam        KB   151
+     O                       d1ctam        KB   167
+     O                       d1csam        KB   183
+     O                       d1inam        KB   198
+      *
+      *-------------------------------------------------------------
+      * Total line
+      *-------------------------------------------------------------
+      *
+     O          E            t1tot       1  1
+     O                       t1desc         B    70
+     O                       arhd(x)       KB    86
+     O                       artiam(x)     KB   102
+     O                       arfdam(x)     KB   118
+     O                       arxtam(x)     KB   135
+     O                       artcam(x)     KB   151
+     O                       arctam(x)     KB   167
+     O                       arcsam(x)     KB   183
+     O                       arinam(x)     KB   198
+      *
+      *-------------------------------------------------------------
+      * Print underscores
+      *-------------------------------------------------------------
+      *
+     O          e            under       1
+     O                                           85 '--------------'
+     O                                          101 '--------------'
+     O                                          117 '--------------'
+     O                                          134 '--------------'
+     O                                          150 '--------------'
+     O                                          166 '--------------'
+     O                                          182 '--------------'
+     O                                          197 '--------------'
+      *
+      *-------------------------------------------------------------
+      * Print a blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank          1
+      *
+      *-------------------------------------------------------------
+      * NO DATA MESSAGE LINE
+      *-------------------------------------------------------------
+      *
+     O          E            NODATA         1
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'
+      *

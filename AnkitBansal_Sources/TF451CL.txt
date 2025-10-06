@@ -1,0 +1,171 @@
+/***************************************************************** */
+/*                                                                 */
+/*  SYSTEM:          TRIUMPH FOODS                                 */
+/*  PROGRAM NUMBER:  TF451CL                                       */
+/*  PROGRAM NAME:    WEEKLY INVENTORY CLOSE                        */
+/*  PROGRAMMER:      LEANNE RAMSEY                                 */
+/*  CREATE DATE:     03/27/07                                      */
+/*                                                                 */
+/*  FUNCTION:        WEEKLY INVENTORY CLOSE                        */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFICATIONS:                                                  */
+/*******************************************************************/
+/* 04/23/07  LeAnne Ramsey                                         */
+/*           Added a call to TF242 to update "flags" and           */
+/*           Item Structure Values in the Weekly Revenue Detail    */
+/*           file prior to processing.                             */
+/*                                                                 */
+/* 05/21/07  LEANNE RAMSEY                                         */
+/*           ADDED A NEW DATA AREA (DATSTPRD) TO CONTROL E-MAILS.  */
+/*                                                                 */
+/* 10/01/07  LeAnne Ramsey                                         */
+/*           Added a call to TF206 to update the Revenue Detail    */
+/*           file with Inventory Values.                           */
+/*                                                                 */
+/* 10/03/07  LeAnne Ramsey                                         */
+/*           Added an OPNQRY over the TFP010 file.                 */
+/*                                                                 */
+/* 07/24/08  LeAnne Ramsey                                         */
+/*           Changed the call to TF242 is have WeekEnding Date as  */
+/*           a parm. TF242 is now also called in the Meat Cost     */
+/*           function and the LDAs were radically different. So,   */
+/*           we changed TF242 to use an incoming parm instead of   */
+/*           going to the LDA for WeekEnding Date.                 */
+/*                                                                 */
+/* 05/06/09  LeAnne Ramsey                                         */
+/*           Removed print logic; no printing is done directly     */
+/*           from this program.                                    */
+/*                                                                 */
+/* 11/18/10  LeAnne Ramsey                                         */
+/*           For a Preliminary run only (not on a Final), Tom Dye  */
+/*           wants us to generate both the listing and the DWL     */
+/*           XLS over the TFP151-Sales Timing Allocation Detail.   */
+/*           The Listing will sit on LaRie Hillman's spool-        */
+/*           file with the other reports. We will email the XLS.   */
+/*                                                                 */
+/* 11/13/17  Danny Nguyen  R12011A-Weekly Product Revenue          */
+/*           File TFP010 was changed. Recompile only.              */
+/*                                                                 */
+/*******************************************************************/
+
+             PGM
+
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(110)
+
+             DCL        VAR(&EMAIL) TYPE(*CHAR) LEN(38)
+
+             DCL        VAR(&USER)    TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBNAME) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBNBR)  TYPE(*CHAR) LEN(6)
+
+             DCL        VAR(&LDPFCD)  TYPE(*CHAR) LEN(1)
+             DCL        VAR(&LDWEDT)  TYPE(*DEC) LEN(8)
+             DCL        VAR(&TSTPRDFL) TYPE(*CHAR) LEN(1)
+
+             CHGVAR     VAR(&LDPFCD)    VALUE(%SST(*LDA 1 1))
+             CHGVAR     VAR(&LDWEDT)    VALUE(%SST(*LDA 29 8))
+
+/*----------------------------------------------------------------*/
+/* For sending Emails:                                            */
+/* Retrieve Data Area that lets us know whether we are in Test    */
+/* or Production (Always default to the "TEST" Distribution List.)*/
+/*----------------------------------------------------------------*/
+
+             CHGVAR     VAR(&EMAIL) VALUE('TF Test')
+             RTVDTAARA  DTAARA(DATSTPRD (1 1)) RTNVAR(&TSTPRDFL)
+
+
+/*----------------------------------------------------------------*/
+/* ALWAYS DELETE ANY/ALL EXISTING WEEKLY RECORDS FOR THE WEEK     */
+/*----------------------------------------------------------------*/
+
+             CALL       PGM(TF250)
+
+/*----------------------------------------------------------------*/
+/* UPDATE VALUES IN THE WEEKLY REVENUE DETAIL RECORDS             */
+/*----------------------------------------------------------------*/
+
+             CALL       PGM(TF206) PARM('R' &LDWEDT) /* Inventory */
+             CALL       PGM(TF242) PARM(&LDWEDT)     /* Item Structure values */
+
+/*--------------------------------------------------------------------------*/
+/* BUILD WEEKLY INVENTORY FILES                                             */
+/*--------------------------------------------------------------------------*/
+
+/* Sales Timing Allocation                                                  */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('PRWEDT *EQ')
+             CHGVAR     VAR(%SST(&QDATA 12 8)) VALUE(&LDWEDT)
+             CHGVAR     VAR(%SST(&QDATA 21 22)) VALUE('*AND PRITYCD +
+                          *EQ "FG "')
+             CHGVAR     VAR(%SST(&QDATA 44 20)) VALUE('*AND PRINVFL +
+                          *EQ "Y"')
+             CHGVAR     VAR(%SST(&QDATA 65 21)) VALUE('*AND PRRCEXFL *EQ +
+                          "N"')
+             CHGVAR     VAR(%SST(&QDATA 87 22)) VALUE('*AND PRCOOWNFL +
+                          *EQ "N"')
+
+             OVRDBF     FILE(TFL010A) SHARE(*YES)
+             OPNQRYF    FILE((TFL010A)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+
+             CALL       PGM(TF251)
+
+             CLOF       OPNID(TFL010A)
+             DLTOVR     FILE(TFL010A)
+
+/* Freezer Charges                                                          */
+
+             CALL       PGM(TF252)
+
+/*--------------------------------------------------------------------------*/
+/* GENERATE THE REPORTS                                                     */
+/*--------------------------------------------------------------------------*/
+
+             CHGDTAARA  DTAARA(*LDA (50 1)) VALUE('B')
+             CALL       PGM(TF452CL)
+
+/* If Final, e-mail the reports                                             */
+
+             IF         COND(&LDPFCD *EQ 'F') THEN(DO)            /* If Final */
+
+             RTVJOBA    JOB(&JOBNAME) USER(&USER) NBR(&JOBNBR)
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('TF Inventory Close'))
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT('Final: Weekly +
+                          Inventory Close') MSG('Distribution List: +
+                          TF Inventory Close') ATTLIST((* *PDF *N +
+                          *ALL &JOBNBR/&USER/&JOBNAME *ALL *ALL))
+             MONMSG     MSGID(CPF0000)
+
+             ENDDO                                                /* If Final */
+
+             DLTOVR     FILE(*ALL)
+
+/*-------------------------------------------------------------------*/
+/* When this is a Preliminary Run, Tom Dye wants us to generate the: */
+/*    1) Sales Timing Allocation Detail Download (emailed as an XLS) */
+/*    2) Sales Timing Allocation Detail Report   (sets on Spoolfile) */
+/* So, we will set the LDA to B=Both (both the DWL and Report)       */
+/* and call the Sales Timing Allocation Detail CLP.                  */
+/*-------------------------------------------------------------------*/
+
+             IF         COND(&LDPFCD *EQ 'P') THEN(DO)
+             CHGDTAARA  DTAARA(*LDA (300 1)) VALUE('B')
+             CALL       PGM(TF454CL)
+             ENDDO
+
+/*-------------------------------------------------------------------*/
+/* ALWAYS UPDATE THE FUNCTION CONTROL FILE                           */
+/*-------------------------------------------------------------------*/
+
+             CALL       PGM(TF253) PARM(&LDPFCD)
+
+
+             ENDPGM
+

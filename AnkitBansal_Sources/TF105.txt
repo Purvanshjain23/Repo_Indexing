@@ -1,0 +1,798 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF105
+      * TITLE:       Revise Cash Distribution Header
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     05/17/05
+      *
+      *
+      * FUNCTION: Uses an edit record format to add/change/delete records.
+      *
+      *           This program is called from TF405-Work with Cash Distribution Header.
+      *
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 12/01/06  LeAnne Ramsey
+      *           Logic changed to use new Datamart Calendar file.
+      *
+      * 05/14/07  LeAnne Ramsey
+      *           Added edit that 'date' cannot be a 'future' date.
+      *
+      * 09/30/09  Alice Brownfield    ---   E00493
+      *           Added the new "AR Adj PayOut amount" to the screen and into
+      *           Trumph's Total Payment Amount.
+      *           Also, removed the 'SBF Pre-Commencement Amount' from the screen and
+      *           from this program. That logic is now obsolete...since we are long past
+      *           the need for "PreCommencement" logic.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Ftfd105    cf   e             workstn infds(iofeed)
+      *
+      *
+     Ftfp012    uf a e           k disk
+      *   Cash distribution header
+      *
+      *
+     Ftfp097    if   e           k disk
+      *    Status codes
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D create          c                   'CREATE'
+     D revise          c                   'REVISE'
+     D delete          c                   'DELETE'
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D set1            c                   'SET1  '
+     D edit1           c                   'EDIT1 '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+     D update          c                   'UPDATE'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D mode            s              6
+     D pgm             s             10
+     D msgfl           s             10
+     D routne          s              6
+     D rtncd           s              2
+     D action          s                   like(mode)
+     D maxmsg          s              2  0  inz(20)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               d   datfmt(*iso)
+     D wkddt           s              8  0
+     D wksysdt         s              8  0
+      *
+      *
+      * Parms
+      *
+     D xxdt            s              8  0
+     D xxsatdt         s              8  0
+     D xxyr            s              4  0
+     D xxwk            s              2  0
+     D xxpe            s              4  0
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *---------------------------------------------------------------
+      * Data areas
+      *---------------------------------------------------------------
+      * Definition for external data area 'DATFBTSN' for assigning the next
+      * Batch Number.
+      *
+     Dnextbtsn         s              7  0 dtaara(datfbtsn)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /eject
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off                                         Main do loop
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     edit1         $edit1
+     C     routne        caseq     update        $upd1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo                                                  Main do loop
+      /eject
+      *----------------------------------------------------------------
+      * Set environment for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $set1         begsr
+      *
+      * If incoming mode is REVISE or DELETE, then retrieve the database
+      * record.  Do not lock the record.  Typically, in DELETE mode, these
+      * values will not be displayed. However, if there is an error on the
+      * delete action, the panel will be displayed with messages.
+      *
+     C                   select
+     C                   when      mode = create                                WH create
+     C                   z-add     0             d1btsn
+     C                   move      *blank        d1stds
+     C                   z-add     0             d1mdy
+     C                   z-add     0             d1dpdccam
+     C                   z-add     0             d1dcdccam
+     C                   z-add     0             d1bpdccam
+     C                   z-add     0             d1bcdccam
+     C                   z-add     0             d1boaam
+     C                   z-add     0             d1bcdiaam
+     C                   z-add     0             d1wtppam
+     C                   z-add     0             d1rbam
+     C                   z-add     0             d1cpam
+     C                   z-add     0             d1tdaam
+     C                   move      *blank        d1tdacom
+     C                   z-add     0             d1asxcdam
+     C                   z-add     0             d1scdam
+     C                   z-add     0             d1tcdam
+     C                   z-add     0             d1ttpam
+      *
+     C                   when      mode = revise or mode = delete               WH revise/delete
+     C     d1btsn        chain(n)  tfp012                             92
+     C                   if        *in92 = *on                                  If no hit
+     C                   seton                                        62
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09008'
+     C                   endif
+     C                   else
+      *
+     C                   z-add     chdpdccam     d1dpdccam
+     C                   z-add     chdcdccam     d1dcdccam
+     C                   z-add     chbpdccam     d1bpdccam
+     C                   z-add     chbcdccam     d1bcdccam
+     C                   z-add     chboaam       d1boaam
+     C                   z-add     chbcdiaam     d1bcdiaam
+     C                   z-add     chwtppam      d1wtppam
+     C                   z-add     chrbam        d1rbam
+     C                   z-add     chcpam        d1cpam
+     C                   z-add     chtdaam       d1tdaam
+     C                   move      chtdacom      d1tdacom
+     C                   z-add     chasxcdam     d1asxcdam
+     C                   z-add     chscdam       d1scdam
+     C                   z-add     chtcdam       d1tcdam
+     C                   z-add     chttpam       d1ttpam
+      *
+      *
+      * Flip Daily Date from CCYYMMDD to MMDDYY for display
+      *
+     C                   if        chddt <> 0
+     C     *iso          test(d)                 chddt                  92
+     C                   if        *in92 = *off                                 If OK date
+     C                   move      chddt         wkisodate
+     C     *mdy          move      wkisodate     d1mdy
+     C                   endif                                                  If OK date
+     C                   endif
+      *
+      * Retrieve Status description
+      *
+     C     chchstcd      chain     tfp097                             92
+     C                   if        *in92 = *off
+     C                   move      ststds        d1stds
+     C                   endif
+      *
+     C                   endif                                                  If no hit
+     C                   endsl
+      *
+      * If the user is deleting and there were no errors when retrieving the
+      * record, go on to the update routine without displaying the screen.
+      * Otherwise, display the screen.
+      *
+     C                   if        error = 0 and action = delete                If no error
+     C                   eval      routne = update
+     C                   else
+     C                   eval      routne = scrn1
+     C                   endif                                                  If no error
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Perform operator I/O for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $scrn1        begsr
+      *
+      * Write the error messages from the error arrays to the
+      * error message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * Set indicators to control input/output fields and available
+      * function keys.
+     C                   exsr      $ind
+      *
+      *
+      * Write screen 1 to CRT
+      *
+     C                   write     tf105k1
+     C                   write     tf105ec
+     C                   exfmt     tf105r1
+      *
+      * Clear messages
+     C                   exsr      $clmsg
+      *
+      *
+      * Reset action to be equal to the incoming mode.  This is required
+      * in case the user took F11-Delete and got an error on the
+      * deletion and now needs to be able to change the record and take
+      * an action other than delete
+      *
+     C                   eval      action = mode
+      *
+      * Get user's input and set routine
+      *
+     C                   select
+     C                   when      *in03 = *on                                  F3-exit
+     C                   eval      rtncd = '03'
+     C                   eval      routne = exit
+      *
+     C                   when      *in05 = *on                                  F5-refresh
+     C                   eval      routne = set1
+      *
+     C                   when      *in09 = *on                                  F9-accept
+     C                   exsr      $edit1
+      *
+     C                   if        error = 0
+     C                   exsr      $upd1
+     C                   else
+     C                   eval      routne = scrn1
+     C                   endif
+      *
+     C                   when      *in11 = *on or mode = delete                 F11-delete
+     C                   eval      action = delete
+     C                   eval      routne = update
+      *
+     C                   when      *in12 = *on                                  F12-previous
+     C                   eval      rtncd = '12'
+     C                   eval      routne = exit
+     C                   other
+      *
+      * User has pressed enter
+      *
+     C                   eval      routne = edit1
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Set indicators to control/protect screen fields
+      *----------------------------------------------------------------
+      *
+     C     $ind          begsr
+      *
+     c                   select
+     C                   when      mode = revise
+     C                   seton                                        60
+      *
+     C                   when      mode = create
+     C                   seton                                        61
+      *
+     C                   when      mode = delete
+     C                   seton                                        62
+     c                   endsl
+      *
+      * When Header is already 'Assigned', you cannot change the
+      * Daily Date.  So, set an indicator to protect it.
+      *
+     C                   if        chchstcd = 'A'
+     C                   seton                                        63
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Edit input fields for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $edit1        begsr
+      *
+      * *IN62 will be on if the record the user is trying to access has
+      * been deleted by another user.  So, only perform the edits for the
+      * fields on the screen if the indicator is off
+      *
+     C                   if        *in62 = *off                                 If here
+      *
+      *
+      * Validate Daily Date if the Header is not Assigned
+      *
+     C                   if        *in63 = *off
+     C                   exsr      $ddtmdy
+     C                   else
+     C                   z-add     chddt         wkddt
+     C                   endif
+      *
+      * Bank Report-Prior Day Total Cash Collected
+      *
+     C                   if        d1bpdccam < 0
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+     C                   endif
+      *
+      * Bank Report-Current Day Total Cash Collected
+      *
+     C                   if        d1bcdccam < 0
+     C                   seton                                        32
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+     C                   endif
+      *
+      *
+      * Bank Report-Opening Available Amount
+      *
+     C                   if        d1boaam < 0
+     C                   seton                                        33
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+     C                   endif
+      *
+      *
+      * Bank Report-Current Day Immediate Availability Amount
+      *
+     C                   if        d1bcdiaam < 0
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+     C                   endif
+      *
+      *
+      * Unapplied wire transfer prepayments
+      *
+     C                   if        d1wtppam < 0
+     C                   seton                                        36
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+     C                   endif
+      *
+      *
+      * Required balance in account
+      *
+     C                   if        d1rbam < 0
+     C                   seton                                        37
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+     C                   endif
+      *
+      * The Cash Payment Amount (which is output only) must be greater than zero.
+      *
+     C                   eval      d1cpam = d1boaam + d1bcdiaam
+     C                                    - d1wtppam - d1rbam
+      *
+     C                   if        d1cpam <= 0
+     C                   seton                                        39
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS08061'
+     C                   endif
+     C                   endif
+      *
+      * TF distribution adjustment comment
+      *
+     C                   if        d1tdaam <> 0 and d1tdacom = *blank
+     C                   seton                                        38
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS08060'
+     C                   endif
+     C                   endif
+      *
+     C                   endif                                                  If here
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * Validate Daily Date
+      *------------------------------------------------------------------------------------
+      *
+     C     $ddtmdy       begsr
+      *
+     C                   z-add     0             wkddt
+      *
+     C                   select
+     C                   when      d1mdy = 0
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+      *
+     C                   when      d1mdy < 0
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+     C                   other
+      *
+     C     *mdy          test(d)                 d1mdy                  92
+     C                   if        *in92 = *on                                  If bad date
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09004'
+     C                   endif
+     C                   else
+      *
+      *
+      * Flip Daily Date to CCYYMMDD format
+      *
+     C     *mdy          move      d1mdy         wkisodate
+     C                   move      wkisodate     wkddt
+      *
+      * Date cannot be a future date.
+      *
+     C                   if        wkddt > wksysdt
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS00426'
+     C                   endif
+     C                   endif
+      *
+      * See if a Saturday week-ending date exists in the Datamart Calendar file
+      * since we ultimately have to get year/week stuff for that Saturday.
+      *
+     C                   call      'TF811'
+     C                   parm      wkddt         xxdt
+     C                   parm      0             xxsatdt
+     C                   parm      0             xxyr
+     C                   parm      0             xxpe
+     C                   parm      0             xxwk
+      *
+     C     *iso          test(d)                 xxsatdt                92
+     C                   if        *in92 = *on                                  If bad Saturday
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09229'
+     C                   endif
+     C                   endif                                                  If bad Saturday
+     C                   endif                                                  If bad date
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Write/update/delete record in database file
+      *----------------------------------------------------------------
+      *
+     C     $upd1         begsr
+      *
+      * If deleting, perform deletion integrity checks.
+      *
+     C                   if        action = delete
+     C                   exsr      $dltck
+     C                   endif
+      *
+      * If user action is revising or deleting, determine that the
+      * record he is accessing still exists prior to attempting to
+      * update.  Lock the record for update.
+      *
+     C                   if        error = 0 and                                If OK
+     C                             (action = delete or action = revise)
+     C     d1btsn        chain     tfp012                             92
+     C                   if        *in92 = *on                                  If not found
+     C                   seton                                        62
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09008'
+     C                   endif
+     C                   endif                                                  If not found
+     C                   endif                                                  If OK
+      *
+      *
+      * If there are no errors, delete, revise or create the record.
+      *
+     C                   if        error = 0                                    If no error
+      *
+     c                   select
+     C                   when      action = delete
+     C                   delete    chrec
+     C                   other
+      *
+      * Move DSPF fields to database file fields
+      *
+     C                   z-add     wkddt         chddt
+     C                   z-add     d1dpdccam     chdpdccam
+     C                   z-add     d1dcdccam     chdcdccam
+     C                   z-add     d1bpdccam     chbpdccam
+     C                   z-add     d1bcdccam     chbcdccam
+     C                   z-add     d1boaam       chboaam
+     C                   z-add     d1bcdiaam     chbcdiaam
+     C                   z-add     d1wtppam      chwtppam
+     C                   z-add     d1rbam        chrbam
+     C                   z-add     d1cpam        chcpam
+     C                   z-add     d1tdaam       chtdaam
+     C                   move      d1tdacom      chtdacom
+     C                   z-add     d1asxcdam     chasxcdam
+     C                   z-add     d1scdam       chscdam
+     C                   z-add     d1tcdam       chtcdam
+     C                   z-add     d1ttpam       chttpam
+      *
+     C                   exsr      $dates
+      *
+     C                   if        action = create
+     C                   exsr      $defaults
+     C                   write     chrec
+     C                   else
+     C                   update    chrec
+     C                   endif                                                  If create
+     C                   endsl
+     C                   endif                                                  If no error
+      *
+      * Always redisplay when:
+      *     1) there are errors
+      *     2) you are creating records
+      *
+     C                   select
+     C                   when      error > 0
+     C                   movel     scrn1         routne
+      *
+     C                   when      mode = create
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09040'
+     C                   eval      routne = set1
+     C                   movel     set1          routne
+     C                   other
+      *
+     C                   eval      rtncd = '00'
+     C                   movel     exit          routne
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------
+      * Deletion integrity checks
+      *-------------------------------------------------------------------------------------
+      *
+     C     $dltck        begsr
+      *
+      * You cannot delete a Header if it has a status of Assigned. But, we have
+      * disabled the Delete Function Key when the status is Assigned. So, we don't
+      * have to make any edits.
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * Set defaults when creating a new record
+      *------------------------------------------------------------------------------------
+      *
+     C     $defaults     begsr
+      *
+      * Set the Header to Open
+      *
+     C                   move      'O'           chchstcd
+      *
+      * Get the next system-assigned 'Batch Number' from the Data Area
+      *
+     C     *lock         in        nextbtsn
+     C                   add       1             nextbtsn
+     C                   eval      chbtsn = nextbtsn
+     C                   out       nextbtsn
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------
+      * Calc "Date" info
+      *-------------------------------------------------------------------------------------
+      *
+     C     $dates        begsr
+      *
+      * Find Saturday subsequent to Daily Date using the generic program.
+      *
+     C                   call      'TF811'
+     C                   parm      wkddt         xxdt
+     C     chwedt        parm      0             xxsatdt
+     C     chyr          parm      0             xxyr
+     C                   parm      0             xxpe
+     C     chwk          parm      0             xxwk
+      *
+      * Calc the "Week Beginning Date" by subtracting 6 days for the Ending Date.
+      *
+     C     *iso          test(d)                 chwedt                 92
+     C                   if        *in92 = *off                                 If good date
+     C     *iso          move      chwedt        wkisodate
+     c     wkisodate     subdur    6:*d          wkisodate
+     C                   movel     wkisodate     chwbdt
+     C                   else
+     C                   z-add     0             chwbdt
+     C                   endif                                                  If good date
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------
+      * Write error messages
+      *-------------------------------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Set on last record indicator and end job
+      *----------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        lr
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm Lists
+      *
+     C     *entry        plist
+     C     d1mode        parm                    mode
+     C                   parm                    d1btsn
+     C                   parm                    rtncd
+      *
+     C                   movel     mode          action
+      *
+      * Key lists
+      *  None
+      *
+      * Retrieve System Date for date edtiing
+      *
+     C     *mdy          move      udate         wkisodate
+     C                   move      wkisodate     wksysdt
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+     C                   endsr
+      /eject

@@ -1,0 +1,379 @@
+// ?------------------------------------------------------------------------------------------------
+// ?Synon action diagram for PMS5XFR
+// ?Date: 14.08.2025 Time: 03:44:03
+// ?------------------------------------------------------------------------------------------------
+
+//?Execute user function
+
+//?FP1271 - RMC - 03/20/08 Run in BATCH mode at certain times, so the
+//? Carlisle machines wont be overloaded with Prod chg Transactions:::::
+//? If a tare weight changed from the Edit Packaging Item or
+//? Edit Packaging Item Weights options, its modified sts will be "Y":
+//? 1) Read pkg items with modifed sts=Y, and recalc the FG misc
+//?             Tare Wgt that use the pkg item
+//? 2) Crt download to Carlisle rcd if FG tare weight was changed.
+//? 3) Chg modified sts to "N" after proc Packaging item rcd
+//? 4) SQL Packaging item change log rcds with EDI sts = " ", then chg to M
+//?   chg the sts in the Change Log to "M" so they wont be read again.
+//?S00221 RMC 10/02/08 If BX (boxes) are included in the misc tare
+//?   then dont update the company item  with the box weight;
+//?  The FG Misc Tare will be calcd from all the packaging items wgts*qty
+//?   Carlisle will have -0- for the box's unit weight
+//? If BX (boxes) are NOT included in the misc tare,
+//? Then The company item is updated, and boxes arent in the misc tare
+//?   Carlisle will have the box's unit weight also
+//?E00221 10/02/08 RMC - added company to key of packaging type file
+//?E00221 11/26/08 RMC - do normal rounding for BOXES per john z, brad h
+//?E00326 PKD Added "JZ Rounding".
+EXECUTE FUNCTION(RTV Alpha Value        RT) TYPE(RTVOBJ) FILE(PDKMREP)          AC1381513;
+PARAMETER(PAR.Company_Number);
+PARAMETER('PKGFLAG');
+PARAMETER(LCL.System_Value_Alpha);
+{
+ //?USER: Processing if Data record not found
+
+ // PGM.*Return code = CND.*Record does not exist
+ PGM.*Return_code = 'Y2U0005';
+
+ //?USER: Process Data record
+
+ MOVE *ALL (To: PAR From: DB1);
+
+}
+
+
+CASE;
+
+// IF LCL.System Value Alpha is Equal to Y
+IF LCL.System_Value_Alpha = 'Y';
+
+EXECUTE FUNCTION(RTV Pkg Item Modified RT) TYPE(RTVOBJ) FILE(POARREP)           AC1865901;
+PARAMETER(PAR.Company_Number);
+{
+ //?USER: Process Data record
+
+ EXECUTE FUNCTION(Rtv Incl in Misc Tare RT) TYPE(RTVOBJ) FILE(POCAREP)           AC1865444;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Pckg_Item_Type);
+ PARAMETER(LCL.Incl_in_Misc_Tare);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  QUIT;
+
+ }
+
+ CASE;
+
+ // IF LCL.Incl in Misc Tare is Yes
+ IF LCL.Incl_in_Misc_Tare = 'Y';
+
+ EXECUTE FUNCTION(Rtv Calc FG MiscTr-al RT) TYPE(RTVOBJ) FILE(POAZCPP)           AC1865914;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Packaging_Item_Code);
+ {
+  //?USER: Processing if Data record not found
+
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+  //?USER: Process Data record
+
+  // Call program Clc Misc Tare Wt       XF.
+  CALL PROGRAM(Clc Misc Tare Wt       XF) ('PMRZXFR');
+  PARAMETER(DB1.Company_Number);
+  PARAMETER(DB1.Item_Code);
+  PARAMETER('Y');
+
+ }
+
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ //?E00221 10/02/08 RMC do this if Boxes are not in Misc Tare calc
+ //?FOR BOXES:  Chg company item and item default here     8/28/08
+ CASE;
+
+ // IF DB1.Item Code is Entered
+ IF DB1.Item_Code <> *ZERO;
+
+ EXECUTE FUNCTION(CHG Item Unit Wt only CH) TYPE(CHGOBJ) FILE(CABZREP)           AC1897520;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(DB1.Pckg_Tare_Weight);
+ {
+  //?USER: Processing before Data update
+
+  EXECUTE FUNCTION(Set Date/Time Stamp   IF) TYPE(EXCINTFUN)                      AC1142219;
+  PARAMETER(DB1.Job_Time);
+  PARAMETER(DB1.User_Id);
+  PARAMETER(DB1.Job_Name);
+  PARAMETER(DB1.Job_Date);
+  {
+   //?Execute internal function
+
+   // PAR.Job Time = JOB.*Job time
+   PAR.Job_Time = JOB.*Job_time;
+
+   // PAR.User Id = JOB.*USER
+   PAR.User_Id = JOB.*USER;
+
+   // PAR.Job Name = JOB.*JOB
+   PAR.Job_Name = JOB.*JOB;
+
+   // PAR.Job Date = JOB.*Job date
+   PAR.Job_Date = JOB.*Job_date;
+
+  }
+
+  //?USER: Processing after Data update
+
+  EXECUTE FUNCTION(Rtv/Chg Unt wgt,sts    RT) TYPE(RTVOBJ) FILE(OMBYREP)          AC1465399;
+  PARAMETER(PAR.Item_Code);
+  PARAMETER(PAR.Unit_Weight);
+  PARAMETER(PAR.Unit_Weight_Change_Sts);
+  {
+   //?USER: Process Data record
+
+   // WRK.Conversion Factor 1 = DB1.Conversion Factor 1
+   WRK.Conversion_Factor_1 = DB1.Conversion_Factor_1;
+
+   // WRK.Conversion Factor 2 = DB1.Conversion Factor 2
+   WRK.Conversion_Factor_2 = DB1.Conversion_Factor_2;
+
+   //?IF Update the Conversion Factor who's unit of measure = LB
+   CASE;
+
+   // IF DB1.U/M - Second Dft is Pounds
+   IF DB1.UOM_Second_Dft = 'LB';
+
+   // WRK.Conversion Factor 1 = PAR.Unit Weight
+   WRK.Conversion_Factor_1 = PAR.Unit_Weight;
+
+   //?IF Update the Conversion Factor who's unit of measure = LB
+   // IF DB1.U/M - Third Dft is Pounds
+   IF DB1.UOM_Third_Dft = 'LB';
+
+   // WRK.Conversion Factor 2 = PAR.Unit Weight
+   WRK.Conversion_Factor_2 = PAR.Unit_Weight;
+
+   ENDIF;
+
+   EXECUTE FUNCTION(Chg Unt Wgt & chg sts CH) TYPE(CHGOBJ) FILE(OMBYREP)           AC1465398;
+   PARAMETER(DB1.Item_Code);
+   PARAMETER(WRK.Conversion_Factor_1);
+   PARAMETER(WRK.Conversion_Factor_2);
+   PARAMETER(PAR.Unit_Weight);
+   PARAMETER(PAR.Unit_Weight_Change_Sts);
+  }
+
+ }
+
+ ENDIF;
+
+ ENDIF;
+
+ EXECUTE FUNCTION(Chg Packaging Item    CH) TYPE(CHGOBJ) FILE(POARREP)           AC1602024;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Packaging_Item_Code);
+ PARAMETER(DB1.Pckg_Item_Description);
+ PARAMETER(DB1.Pckg_List_Sequence);
+ PARAMETER(DB1.Pckg_Type_Class);
+ PARAMETER(DB1.Pckg_Item_Type);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(DB1.Pckg_Unit_Cost);
+ PARAMETER(DB1.Pckg_Tare_Weight);
+ PARAMETER(DB1.Pckg_Reporting_Group);
+ PARAMETER(DB1.Pckg_Group_Category);
+ PARAMETER('N');
+ PARAMETER(DB1.Pckg_Unused_Status_3);
+ PARAMETER(DB1.Pckg_Unused_Sts_2);
+ PARAMETER(DB1.Pre_printed_Bag_Sts);
+ PARAMETER(DB1.Pckg_Unused_Status_5);
+ PARAMETER(DB1.Pckg_Unused_Status_6);
+ PARAMETER(DB1.Pckg_Unused_Status_7);
+ PARAMETER(DB1.Pckg_Unused_Status_8);
+ PARAMETER(DB1.Pckg_Unused_Status_9);
+ PARAMETER(DB1.Pckg_Unused_Status_10);
+ PARAMETER(DB1.Pckg_Unused_Code);
+ PARAMETER(DB1.Record_Status);
+ PARAMETER(DB1.Create_Date);
+ PARAMETER(DB1.Create_Time);
+ PARAMETER(DB1.Create_User);
+ PARAMETER(DB1.Create_Program);
+ PARAMETER(DB1.Change_Date);
+ PARAMETER(DB1.Change_Time);
+ PARAMETER(DB1.Change_User);
+ PARAMETER(DB1.Change_Program);
+ {
+  //?USER: Processing after Data read
+
+  CASE;
+
+  // IF PAR.Pckg Reporting Group NE DB1.Pckg Reporting Group
+  IF PAR.Pckg_Reporting_Group <> DB1.Pckg_Reporting_Group;
+
+  EXECUTE FUNCTION(Rtv Pckng Reprtng Cat RT) TYPE(RTVOBJ) FILE(POCBREP)           AC1653012;
+  PARAMETER(PAR.Pckg_Reporting_Group);
+  PARAMETER(WRK.Pckg_Group_Category);
+  {
+   //?USER: Processing if Data record not found
+
+   MOVE *ALL (To: PAR From: CON);
+
+   //?USER: Process Data record
+
+   MOVE *ALL (To: PAR From: DB1);
+
+   QUIT;
+
+  }
+
+  // IF *OTHERWISE
+  IF *OTHERWISE;
+
+  // WRK.Pckg Group Category = DB1.Pckg Group Category
+  WRK.Pckg_Group_Category = DB1.Pckg_Group_Category;
+
+  ENDIF;
+
+  CASE;
+
+  // IF DB1.Pckg Item Type NE PAR.Pckg Item Type
+  IF DB1.Pckg_Item_Type <> PAR.Pckg_Item_Type;
+
+  // OR DB1.Pckg Reporting Group NE PAR.Pckg Reporting Group
+  OR DB1.Pckg_Reporting_Group <> PAR.Pckg_Reporting_Group;
+
+  // OR DB1.Pckg Group Category NE WRK.Pckg Group Category
+  OR DB1.Pckg_Group_Category <> WRK.Pckg_Group_Category;
+
+  EXECUTE FUNCTION(Rtv Chg Pckg Itm flds RT) TYPE(RTVOBJ) FILE(POAZCPP)           AC1658130;
+  PARAMETER(DB1.Company_Number);
+  PARAMETER(DB1.Packaging_Item_Code);
+  PARAMETER(PAR.Pckg_Item_Type);
+  PARAMETER(PAR.Pckg_Reporting_Group);
+  PARAMETER(WRK.Pckg_Group_Category);
+  {
+   //?USER: Processing if Data record not found
+
+   // PGM.*Return code = CND.*Normal
+   PGM.*Return_code = *BLANK;
+
+   //?USER: Process Data record
+
+   EXECUTE FUNCTION(Chg Packaging BOM     CH) TYPE(CHGOBJ) FILE(POAZCPP)           AC1606856;
+   PARAMETER(DB1.Company_Number);
+   PARAMETER(DB1.Item_Code);
+   PARAMETER(DB1.Packaging_Item_Code);
+   PARAMETER(DB1.Packaging_Item_Quantity);
+   PARAMETER(PAR.Pckg_Item_Type);
+   PARAMETER(PAR.Pckg_Reporting_Group);
+   PARAMETER(PAR.Pckg_Group_Category);
+   {
+    //?USER: Processing before Data update
+
+    EXECUTE FUNCTION(Set Chg Date/Time      IF) TYPE(EXCINTFUN)                     AC1523476;
+    PARAMETER(DB1.Change_Date);
+    PARAMETER(DB1.Change_Time);
+    PARAMETER(DB1.Change_User);
+    PARAMETER(DB1.Change_Program);
+    {
+     //?Execute internal function
+
+     // PAR.Change Date = JOB.*Job date
+     PAR.Change_Date = JOB.*Job_date;
+
+     // PAR.Change Time = JOB.*Job time
+     PAR.Change_Time = JOB.*Job_time;
+
+     // PAR.Change User = JOB.*USER
+     PAR.Change_User = JOB.*USER;
+
+     // PAR.Change Program = JOB.*PROGRAM
+     PAR.Change_Program = JOB.*PROGRAM;
+
+    }
+
+    //?USER: Processing after Data update
+
+    EXECUTE FUNCTION(Rtv Active Status     RT) TYPE(RTVOBJ) FILE(PPBUREP)           AC1740339;
+    PARAMETER(DB1.Company_Number);
+    PARAMETER('PRDPKG');
+    PARAMETER(LCL.PFS_AccuSort_Active);
+    PARAMETER(LCL.PFS_Carlisle_Active);
+    {
+     //?USER: Processing if Data record not found
+
+     MOVE *ALL (To: PAR From: CON);
+
+     //?USER: Process Data record
+
+     MOVE *ALL (To: PAR From: DB1);
+
+    }
+
+    CASE;
+
+    // IF LCL.PFS Carlisle Active is Yes
+    IF LCL.PFS_Carlisle_Active = 'Y';
+
+    // Call program PFS One Prod Pkging   XF.
+    CALL PROGRAM(PFS One Prod Pkging   XF) ('PPNIXFR');
+    PARAMETER(DB1.Company_Number);
+    PARAMETER(DB1.Item_Code);
+    PARAMETER(DB1.Packaging_Item_Code);
+    PARAMETER('C');
+
+    ENDIF;
+
+   }
+
+  }
+
+  ENDIF;
+
+  //?USER: Processing before Data update
+
+  // DB1.Pckg Group Category = WRK.Pckg Group Category
+  DB1.Pckg_Group_Category = WRK.Pckg_Group_Category;
+
+  EXECUTE FUNCTION(Set Chg Date/Time      IF) TYPE(EXCINTFUN)                     AC1523476;
+  PARAMETER(DB1.Change_Date);
+  PARAMETER(DB1.Change_Time);
+  PARAMETER(DB1.Change_User);
+  PARAMETER(DB1.Change_Program);
+  {
+   //?Execute internal function
+
+   // PAR.Change Date = JOB.*Job date
+   PAR.Change_Date = JOB.*Job_date;
+
+   // PAR.Change Time = JOB.*Job time
+   PAR.Change_Time = JOB.*Job_time;
+
+   // PAR.Change User = JOB.*USER
+   PAR.Change_User = JOB.*USER;
+
+   // PAR.Change Program = JOB.*PROGRAM
+   PAR.Change_Program = JOB.*PROGRAM;
+
+  }
+
+ }
+
+}
+
+
+// Call program Exc Sequel and Upd    XF.
+CALL PROGRAM(Exc Sequel and Upd    XF) ('PMS4XFR');
+PARAMETER(PAR.Company_Number);
+
+ENDIF;
+

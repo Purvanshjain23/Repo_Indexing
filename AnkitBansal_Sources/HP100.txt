@@ -1,0 +1,835 @@
+      *These two lines here to aid in debugging when needed***************
+     H debug(*yes)
+     H option(*srcstmt:*nodebugio)
+     H DftActgrp(*no)
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP100
+      * TITLE:       Revise Feed Mill
+      * PROGRAMMER:  Lara Buser
+      * CREATED:     06/01/2017
+      *
+      * FUNCTION: Uses an edit record format to add/change/inactivate records from the
+      *           master file.
+      *
+      *           This program is called from HP400 - Work with Feed Mill
+      *
+      *           The field 'mode' contains the value passed into
+      *           this program from the calling program.  The field
+      *           'd1mode' is the screen field that displays the
+      *           value of 'mode'.  Mode will be CREATE, REVISE or INACTIVATE
+      *
+      *           Once in the program, mode and
+      *           d1mode will never change.  However, the action
+      *           being performed can change depending on the function
+      *           keys the user takes.
+      *
+      *           The user may inactivate an existing record by selecting
+      *           F11=INACTIVATE from this program. No records will be deleted.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      *   Date     Programmer
+      * 10/30/2019 Brad Baden   E15736
+      *            1. Add logic for new screen and database field "Cost
+      *               Though System Flag.  Validate for values Y and N
+      *               Only.  Make field promptable.
+      *            2. Do not allow the Feed Mill Code to be input capable
+      *               in REVISE mode.  Change made in display file.
+      *
+      ****************************************************************
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSP008    IF   E           K disk
+      *    Region
+      *
+     FHSP024    IF   E           K disk
+      *    Feed Type
+      *
+     FHPD100    cf   e             workstn
+     F                                     infds(iofeed)
+      *
+     FHSP009    UF A E           K disk
+      *    Business Office
+      *
+     FHSP062    IF   E           K disk
+      *    Company
+      *
+     FHSP089    UF A E           K disk
+      *    Feed Mill Alias
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D create          c                   'CREATE'
+     D inactivate      c                   'INACTIVATE'
+     D active          c                   'A'
+     D inactive        c                   'I'
+     D revise          c                   'REVISE'
+     D view            c                   'VIEW  '
+     D select          c                   'SELECT'
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D set1            c                   'SET1  '
+     D edit1           c                   'EDIT1 '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+     D update          c                   'UPDATE'
+     D feed            c                   'FEED'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      * Standard fields
+      *
+     D mode            s             10
+     D pgm             s             10
+     D msgfl           s             10
+     D routne          s              6
+     D rtncd           s              2
+     D action          s                   like(mode)
+     D maxmsg          s              2  0  inz(20)
+      *
+      * Parm fields
+      *
+     D xxaist          s                   like(maaist)
+     D xxmltcd         s                   like(mamltcd)
+     D xxmltds         s                   like(mamltds)
+     D xxftcd          s                   like(maftcd)
+     D xxcsfl          s                   like(macsfl)
+     D XXFMALNM        s                   like(maFMALNM)
+     D XXFMBO          s                   like(mafmbo)
+     D xxdvcd          s                   like(bodvcd)
+     D xxftds          s             10
+     D WKDVCD          s                   like(bodvcd)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off                                         Main do loop
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     edit1         $edit1
+     C     routne        caseq     update        $upd1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo                                                  Main do loop
+      /EJECT
+      *----------------------------------------------------------------
+      * Set environment for screen 1
+      *----------------------------------------------------------------
+     C     $set1         begsr
+      *
+      * Clear fields on display panel if creating
+      *
+     C                   select
+     C                   when      mode = create                                When Create
+     C                   move      *blank        d1fmbo
+     C                   move      *blank        d1fmalnm
+     C                   move      *blank        d1mmno
+     C                   move      *blank        d12sub
+     C                   move      *blank        d1ftcd
+     C                   move      *blank        d1mltcd
+     C                   move      *blank        d1mltds
+     C                   move      active        d1aist
+     C                   move      *blank        d1cocd
+     C                   move      *blank        d1rgcd
+      *
+      * If incoming mode is REVISE or INACTIVATE, then retrieve the database
+      * record.  Do not lock the record. If there is an error on the
+      * INACTIVATE action, the panel will be displayed with messages.
+      *
+     C                   when      mode = revise or mode = inactivate           WH revise/inactivate
+     C     d1fmbo        chain     hsp089                             92
+     C                   if        *in92 = *off                                 If rec exists
+     C                   move      mafmalnm      d1fmalnm
+     C                   move      mammno        d1mmno
+     C                   move      ma2sub        d12sub
+     C                   move      maftcd        d1ftcd
+     C                   move      mamltcd       d1mltcd
+     C                   move      mamltds       d1mltds
+     C                   move      maaist        d1aist
+     C                   move      macsfl        d1csfl
+     C     d1fmbo        chain     hsp009                             93        retrieve B/O
+     C                   if        *in93 = *Off                                  If there
+     C                   eval      d1cocd = bococd
+     C                   eval      d1rgcd = borgcd
+     C                   eval      d1dvcd = bodvcd
+     C                   eval      d1slcd = boslcd
+     C                   endif                                                  If Co# found
+      *
+     C                   endif                                                  If rec found
+     C                   endsl
+      *
+      * If the user is inactivating and there were no errors when retrieving the
+      * record, go on to the update routine without displaying the screen.
+      * Otherwise, display the screen.
+      *
+     C                   if        error = 0 and action = inactivate            If no error
+     C                   eval      routne = update                              inactive
+     C                   else
+     C                   eval      routne = scrn1                               add or chg
+     C                   endif                                                  If no error
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Perform operator I/O for screen 1
+      *----------------------------------------------------------------
+     C     $scrn1        begsr
+      *
+      * Write the error messages from the error arrays to the
+      * error message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * Set indicators to control input/output fields and available
+      * function keys.
+      *
+     c                   select
+     C                   when      mode = revise
+     C                   seton                                        60
+      *
+     C                   when      mode = create
+     C                   seton                                        6140
+      *
+     C                   when      mode = inactivate
+     C                   seton                                        62
+     c                   endsl
+      *
+      * Write screen 1 to CRT
+      *
+     C                   write     hp100k1
+     C                   write     hp100ec
+     C                   exfmt     hp100r1
+      *
+      * Clear messages
+      *
+     C                   exsr      $clmsg
+      *
+      * Reset action to be equal to the incoming mode.  This is required
+      * in case the user took F11-Inactivate and got an error and now needs to be
+      * able to change the record and take an action other than inactivate
+      *
+     C                   eval      action = mode
+      *
+      * Get user's input and set routine
+      *
+     C                   select
+      *
+     C                   when      *in03 = *on                                  F3-exit
+     C                   eval      rtncd = '03'
+     C                   eval      routne = exit
+      *
+     C                   when      *in04 = *on                                  F4=prompt
+     C                   exsr      $f4s1
+      *
+     C                   when      *in05 = *on                                  F5-refresh
+     C                   eval      routne = set1
+      *
+     C                   when      *in12 = *on                                  F12-previous
+     C                   eval      rtncd = '12'
+     C                   eval      routne = exit
+      *
+     C                   when      *in11 = *on or mode = inactivate             F11-inactivate
+     C                   eval      action = inactivate
+     C                   eval      routne = update
+      *
+     C                   other
+      *
+      * User has pressed enter
+      *
+     C                   eval      routne = edit1
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Edit input fields for screen 1
+      *----------------------------------------------------------------
+     C     $edit1        begsr
+      *
+      * *IN62 is on for inactive records. Also, possibly, for records that
+      * were deleted by another user - we will see.
+      * So, only perform the edits for the fields on the screen
+      * if the indicator is off
+      *
+     C                   if        *in62 = *off                                 Not Inactivate
+      *
+      * If creating a new record, validate:
+      *   1) Feed Mill B/O must not exist
+      *
+     C                   if        action = create                              If create
+     C                   exsr      $fmbo
+     C                   endif                                                  If create
+      *
+      * Always validate:
+      *   1) Feed Mill B/O name cannot be blank
+      *   2) active/inactive status must be A or I
+      *   3) Feed Mill Type code cannot be blank and must be TM or CO
+      *   4) Cost Through System Flag must be Y or N
+      *
+     C                   exsr      $fmalnm                                      B/O name
+     C                   exsr      $aist                                        status
+     C                   exsr      $mltcd                                       FM Type Code
+     C                   exsr      $mftcd                                       Manf Type Code
+     C                   exsr      $csfl                                        Cost Thru Sys Flag
+     C                   endif                                                  If here
+      *
+      * If there are no errors, attempt the write/update; otherwise,
+      * redisplay the screen.  If a record has been deleted out from
+      * under the user (*IN62 is ON), then the error message will be
+      * issued in the update subroutine.  So, always perform this code.
+      *
+     C                   if        error = 0
+     C                   exsr      $upd1
+     C                   else
+     C                   eval      routne = scrn1
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Validate Feed Mill Business Office
+      *----------------------------------------------------------------
+      * Validations:
+      *  1) required
+      *  2) cannot already exist in the master file on a CREATE
+      *  3) If not yet in the Business Office file then add it
+      *
+     C     $fmbo         begsr
+      *
+      * Eliminate leading spaces
+      *
+     C                   eval      d1fmbo = %triml(d1fmbo)
+      *
+     C                   select
+     C                   when      d1fmbo = *blank
+     C                   seton                                        35
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'                          value req'd
+     C                   endif
+     C                   other
+      *
+      * If CREATE mode, Feed Mill cannot exist in the HSP089 file and Must
+      * exist in the HSP009 Business Office file as Div=FEED
+     C     d1fmbo        chain(n)  hsp089                             92        read (no lock)
+     C                   if        *in92 = *off                                 If exists
+     C                   seton                                        35
+     C                   if        error < maxmsg                               Error
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS00905'                          Cannot create
+     C                   clear                   mgw
+     C                   movea     d1fmbo        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif                                                  Error
+      *
+      * Business Office must exist. If it does not then add it.
+     C                   else                                                   *in92 is *on
+     C     d1fmbo        chain     hsp009                             93        retrieve B/O
+     C                   if        *in93 = *ON                                   If not there
+     C     d1cocd        chain     hsp062                             95
+     C                   If        *in95 = *on                                  Co# not valid
+     C                   seton                                        39
+     C                   if        error < maxmsg                               Error
+     C                   add       1             error
+     C                   eval      mgid(e) =  'HS00169'                         Invalid Co#
+     C                   clear                   mgw
+     C                   movea     d1COCD        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif                                                  Error
+     C                   endif                                                  If *in95
+      *
+     C     d1rgcd        chain     hsp008                             94
+     C                   If        *in94 = *ON
+     C                   seton                                        30
+     C                   if        error < maxmsg                               Error
+     C                   add       1             error
+     C                   eval      mgid(e) =  'HS00382'                         Invalid Rgn
+     C                   clear                   mgw
+     C                   movea     d1rgcd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif                                                  Error
+     C                   endif                                                  If *in94
+     C                   endif                                                  If *in93
+      *
+      * If existing B/O
+      * Division Code in Business Office file must be FEED
+      *
+     C     bodvcd        ifne      'FEED'
+     C     *in93         andeq     *off
+     C                   seton                                        35        position fmbo
+     C                   if        error < maxmsg                               Error
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS00113'                          Not Feed Div
+     C                   clear                   mgw
+     C                   movea     bodvcd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif                                                  Error
+     C                   endif                                                  bodvcd ifne
+     C*
+     C                   endif                                                  If 92=*on
+      *
+     C                   endsl                                                  select
+      *
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Validate status
+      *---------------------------------------------------------------
+     C     $aist         begsr
+      *
+      * Must be A or I
+     C     d1aist        ifne      active                                       If not active
+     C     d1aist        andne     inactive
+     C                   seton                                        36
+     C                   if        error < maxmsg                               If error
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09105'                          I or A only
+     C                   endif                                                  If error
+     C
+     C                   endif                                                  If not active
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Validate cost through system flag
+      *---------------------------------------------------------------
+     C     $csfl         begsr
+      *
+      * Must be Y or N
+     C     d1csfl        ifne      yes                                          if not yes/no
+     C     d1csfl        andne     no
+     C                   seton                                        41
+     C                   if        error < maxmsg                               if error
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09106'                          Y or N only
+     C                   endif                                                  fi error
+     C
+     C                   endif                                                  fi not yes/no
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Validate name - cannot be blanks
+      *---------------------------------------------------------------
+     C     $fmalnm       begsr
+      *
+     C                   if        d1fmalnm = *blank
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'                          value req'd
+     C                   endif
+     C                   endif
+     C
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Edit Mill Type code - cannot be blanks
+      *---------------------------------------------------------------
+      *  1) Cannot be blanks
+      *  2) Must be CO or TM
+      *  2) Mill Type Code Description cannot be blank
+      *
+     C     $mltcd        begsr
+      *
+      * Mill Type Code cannot be blanks
+      *
+     C                   if        d1mltcd =   *blanks                          If d1mltcd
+     C                   seton                                        37
+      *
+     C                   if        error < maxmsg                               If error
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'                          value req'd
+     C                   endif                                                  If error
+      *
+     c                   else                                                   dlmltcd not blank
+      *
+      * Mill Type Code must be CO or TM
+     c                   if        d1mltcd <> 'CO' and                          if d1mltcd <> 'CO'
+     c                             d1mltcd <> 'TM'
+     c                   eval      *in37 = *on
+     c                   if        error < maxmsg                               if error < maxmsg
+     c                   add       1             error
+     c                   eval      mgid(e) = 'HS09274'                          invalid value
+     c                   endif                                                  fi error < maxmsg
+      *
+     c                   else                                                   dlmltd not blank
+      *
+      * Mill Type Code description cannot be blank (if type code is valid)
+     C                   if        d1mltds =   *blanks                          If d1mltds
+     C                   seton                                        38
+     C                   if        error < maxmsg                               If error
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'                          value req'd
+     C                   endif                                                  If error
+      *
+     C                   endif                                                  If d1mltds
+      *
+     C                   endif                                                  fi not %found(hsp024
+      *
+     C                   endif                                                  If d1mltcd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Validate Manf Type code
+      *---------------------------------------------------------------
+      *  1) Cannot be blanks
+      *  2) Must exist in file HSP024
+      *
+     C     $mftcd        begsr
+      *
+      * Feed Type Code cannot be blanks
+      *
+     C                   if        d1ftcd = *blanks                             if d1ftcd = blanks
+     C                   seton                                        33
+      *
+     C                   if        error < maxmsg                               if error
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'                          value req'd
+     C                   endif                                                  fi error
+      *
+     C                   else
+      *
+      * Feed Type Code must exist in file HSP024
+      *
+     c     d1ftcd        chain     hsp024
+     c                   if        not %found(hsp024)                           if not %found(hsp024
+     c                   eval      *in33 = *on
+     c                   if        error < maxmsg                               if error < maxmsg
+     c                   add       1             error
+     c                   eval      mgid(e) = 'HS09275'                          invalid value
+     c                   endif                                                  fi error < maxmsg
+      *
+     C                   endif                                                  fi not %found(hsp024
+      *
+     C                   endif                                                  fi d1ftcd = blanks
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      *  F4 prompt on screen 1
+      *---------------------------------------------------------------
+     C     $f4s1         begsr
+      *
+      * Active/inactive status
+      *
+     C                   select
+     C                   when      fld = 'D1AIST'
+     C                   call      'HP512'
+     C                   parm      *blank        xxaist
+     C                   seton                                        56
+     C                   if        xxaist <> *blank
+     C                   eval      d1aist = xxaist
+     C                   endif
+      *
+      * Mill Type Code
+      *
+     C                   when      fld = 'D1MLTCD'
+     C                   call      'HP5063'
+     C                   parm      *blank        xxmltcd
+     C                   parm      *blank        xxmltds
+     C                   seton                                        57
+     C                   if        xxmltcd<> *blank
+     C                   eval      d1mltcd = xxmltcd
+     C                   eval      d1mltds = xxmltds
+     C                   endif
+      *
+      * Feed Manufacturing Type Code
+      * FTDS is not used in this program but is passed
+      *
+     C                   when      fld = 'D1FTCD'
+     C                   call      'HP582'
+     C                   parm      *blank        xxftcd
+     C                   parm      *blank        xxftds
+     C                   seton                                        53
+      *
+     C                   if        xxftcd <> *blank
+     C                   eval      d1ftcd  = xxftcd
+     C                   endif
+      *
+      * Cost Through System Flag
+      * FTDS is not used in this program but is passed
+      *
+     C                   when      fld = 'D1CSFL'
+     C                   call      'HP522'
+     C                   parm      *blank        xxcsfl
+     C                   seton                                        51
+      *
+     C                   if        xxcsfl <> *blank
+     C                   eval      d1csfl  = xxcsfl
+     C                   endif
+      *
+      * Business Office
+      *
+     C                   when      fld = 'D1FMBO'
+     C                   call      'HP503'
+     C                   parm      *blank        xxfmbo
+     C                   parm      *blank        xxfmalnm
+     C                   parm      *blank        xxdvcd
+     C                   seton                                        55
+      *
+     C                   if        xxfmbo <> *blank
+     C                   eval      d1fmbo   =  xxfmbo
+     C                   eval      d1fmalnm = xxfmalnm
+     C                   eval      wkdvcd   = xxdvcd
+     C                   endif
+     C                   other
+      *
+      * F4 not valid for this field...issue message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error                                        013
+     C                   movel     'HS09011'     mgid(e)
+     C                   endif
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Write/update/delete record in database file
+      *----------------------------------------------------------------
+     C     $upd1         begsr
+      *
+      * If user action is revising or inactivating, determine that the
+      * record he is accessing still exists prior to attempting to
+      * update.  Lock the record for update.
+      *
+     C                   if        error = 0 and                                If OK
+     C                             (action = inactivate or action = revise)
+      *
+     C     d1fmbo        chain     hsp089                             92
+     C                   if        *in92 = *on                                  If not found
+     C                   seton                                        62
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09008'
+     C                   endif
+      *
+     C                   endif                                                  If not found
+     C                   endif                                                  If OK
+      *
+      * If the record exists, inactivate, revise or create the record.
+      *
+     C                   if        error = 0                                    If no error
+      *
+      * Move DSPF fields to database file fields
+      *
+     C                   move      d1fmbo        mafmbo                         feed mill code
+     C                   move      d1fmalnm      mafmalnm                       fm descript
+     C                   move      d1mmno        mammno                         fm mapping#
+     C                   move      d12sub        ma2sub                         g/l sub
+     C                   move      d1ftcd        maftcd                         manuf type cd
+     C                   move      d1mltcd       mamltcd                        mill type cd
+     C                   move      d1mltds       mamltds                        fm type descr
+     C                   move      d1aist        maaist                         status
+     C                   move      d1csfl        macsfl                         cost thru sys flag
+      *
+     c                   select
+      * Inactivate
+     C                   when      action = inactivate
+     C                   eval      maaist = inactive                            status
+     C                   update    marec
+     C                   eval      routne = exit                                next routine
+      * Create
+     C                   when      action = create                              create
+     C                   eval      routne = set1                                Next routine
+      *
+     C                   if        *in93 = *on
+     C                   eval      bobobo = d1fmbo
+     C                   eval      bobods = d1fmalnm
+     C                   eval      bococd = d1cocd
+     C                   eval      borgcd = d1rgcd
+     C                   eval      bodvcd = d1dvcd
+     C                   eval      boslcd = d1slcd
+     C                   eval      bobajd = *zero
+     C                   write     borec
+     C                   endif
+     C*
+     C                   write     marec
+     c                   if        error = 0                                    If no error
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09040'                          rec created
+     C                   endif                                                  If error = 0
+     C                   eval      d1cocd = *blank
+     C                   eval      d1rgcd = *blank
+      * Revise
+     C                   when      action = revise                              Revise
+     C                   eval      routne = exit                                next routine
+     C                   update    marec
+      * Catch all
+     C                   other
+     C                   eval      routne = exit                                next routine
+     C                   endsl
+      *
+     C                   endif                                                  If no errors
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Set on last record indicator and end job
+      *----------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        lr
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *   None
+      *
+      * Parm Lists
+      *
+     C     *entry        plist
+     C     d1mode        parm                    mode
+     C                   parm                    d1fmbo
+     C                   parm                    rtncd
+      *
+      * Set defaults if action = Create
+      *
+     C                   eval      action = mode
+     C                   IF        ACTION = Create
+     C                   eval      *in40 = *on                                  Create
+     C                   eval      d1dvcd = 'FEED'
+     C                   eval      d1slcd = 'OK1'
+     C                   endif
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+     C                   endsr
+      /EJECT

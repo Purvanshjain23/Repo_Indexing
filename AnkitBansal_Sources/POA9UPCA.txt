@@ -1,0 +1,243 @@
+/*********************************************************************/
+/*                                                                   */
+/*  PROGRAM   - POA9UPCA CLONE FROM POA9UPC                          */
+/*  SYSTEM    - ACCOUNTS RECEIVABLE                                  */
+/*  USER NAME - A/R MANAGER                                          */
+/*                                                                   */
+/*  FUNCTION:  THIS CL CREATES WORKFILES AND THEN USES A SEQUEL      */
+/*             STATEMENT TO SEND A FILE TO THE NETWORK DRIVE.        */
+/*             THE RESULT IS EMAILED TO THE REQUESTED ADDRESS        */
+/*                                                                   */
+/*  Parameters:                                                      */
+/*  Usage   Field       Field Description                            */
+/*  -----   ---------   ------------------------------------------   */
+/*    O     &RETURN     Return code                                  */
+/**** B     &COMPNYN    Company number                               */
+/*    B     &COMP       Company number  361 PER ROSE                 */
+/*    B     &ARCSTNO    A/R customer number                          */
+/*          &PARENTPS   - PARENT CUSTOMER NUMBER                    */
+/*    B     &ASOFDAT    As of date                                   */
+/*    B     &PRTZR      Print zero balances                          */
+/*    B     &RPTTYP     Report type (BLANK)                          */
+/*    B     &SLSRT      Sales route                                  */
+/*    B     &ARCSTN     A/R customer name                            */
+/*    B     &SLSRTN     Sales route name                             */
+/*    I     &AGECODE    AGING CODE                                   */
+/*                                                                   */
+/*********************************************************************/
+/* MODIFICATIONS: CLONE INFORMATIO FROM POA9UPC                      */
+/* MODIFICATIONS: CL POA9UPCA WHD 77070                              */
+/* 4/21/21  SLM WHD77070 AS A ME                                     */
+/* 4/21/21  REMOVE ALL PARMS INTO WITH THE EXCEPTIN &RETURN          */
+/* 4/21/21  SET PARMS VALUES TO                                      */
+/* 4/21/21  I.  AGING CONTROL: 30DAY                                 */
+/* 4/21/21  II. FROM DATE - PREVIOUS WEEKDAY -GET FROM CALENDAR FILE */
+/* 4/28/21  II.        USE 361 FOR COMPANY NUMBER   HPB   ENDAR FILE */
+/* 4/21/21 III. COMPANY:   BLANK FOR ALL                             */
+/* 4/21/21  IV. INCLUDE CB = N                                       */
+/* 4/21/21  V.  INCLUDE RB = N                                       */
+/* 4/21/21  V.  INCLUDE ZERO BALANCES 'Y                             */
+/* 4/21/21  VI. DETAIL SUMMARY = 1 - 4/28/21 ROSE SAYS WE MAY NOT    */
+/* 4/21/21  VI.                  NEED THE DETAIL SUMMARY             */
+/* 4/21/21  VII.PRINT ZEROS = Y                                      */
+/* 4/21/21 VIII.SALES ROUTE = BLANK                                  */
+/*                                                                   */
+/* 5/28/21 RMC H77070  IF CUSTOMER IS ACTIVE BUT HAS NO ACTIVITY      */
+/*                     THEY WONT BE IN ARP301 FROM AR300, SO CALL    */
+/*                     NEW PGM AR301 TO WRITE THEM TO THE WORKFILE   */
+/*                     ARP301 SO THEY GET REPORTED IN THE SQL        */
+/*********************************************************************/
+/* 4/21/21 SLM REMOVE PARMS                                          */
+             PGM        PARM(&RETURN)
+/*******     PGM        PARM(&RETURN &COMPNYN &ARCSTNO &ASOFDAT +    */
+/*******                  &INCLCB &INCLRB &RPTTYP &PRTZR &SLSRT +    */
+/*******                  &ARCSTN &SLSRTN &AGECODE &EMAIL)           */
+
+/* Declare Variables                                                */
+
+             DCL  VAR(&RETURN)  TYPE(*CHAR) LEN(7)
+/* WH77070   SLM 042721 */        /*                                   */
+/* ******    DCL  VAR(&COMPNYN) TYPE(*DEC) VALUE(0)                    */
+             DCL  VAR(&COMP) TYPE(*DEC) LEN(3 0) VALUE(0)
+/* WH77070   SLM 042721 */        /*                                   */
+             DCL  VAR(&ARCSTNO) TYPE(*DEC)
+             DCL  VAR(&ARCUS)   TYPE(*DEC)  LEN(7 0)
+             DCL  VAR(&ARCSTN)  TYPE(*CHAR) LEN(30)
+             DCL  VAR(&PARENT) TYPE(*DEC) LEN(7 0) VALUE(0)
+             DCL  VAR(&ASOFDAT) TYPE(*DEC)  LEN(7 0)
+             DCL  VAR(&ASDATE)  TYPE(*DEC)  LEN(7 0)
+/* WH77070   SLM 042721 */        /*                                   */
+             DCL  VAR(&PRTZR)   TYPE(*CHAR) LEN(1) VALUE('Y')
+/*********   DCL  VAR(&INCLRB) TYPE(*CHAR) LEN(1)             E5262    */
+             DCL  VAR(&INCLCB) TYPE(*CHAR) LEN(1) VALUE('N') /*WH77070*/
+             DCL  VAR(&INCLRB) TYPE(*CHAR) LEN(1) VALUE('N') /*WH77070*/
+             DCL  VAR(&RPTTYP)  TYPE(*CHAR) LEN(1)
+/* WH77070   SLM 042721 */        /*                                   */
+             DCL  VAR(&SLSRT)   TYPE(*CHAR) LEN(3) VALUE('   ')
+             DCL  VAR(&SLSRTN) TYPE(*CHAR) LEN(30) VALUE(*BLANKS)
+/* WH77070   SLM 042721 */        /*                                   */
+             DCL  VAR(&AGECODE) TYPE(*CHAR) LEN(6) VALUE('30DAY ')
+             DCL  VAR(&EMAIL)   TYPE(*CHAR) LEN(50)
+             DCL  VAR(&EMAILFMT) TYPE(*CHAR) LEN(5)
+
+             DCL    &SUFFIX1   *CHAR    (2)            /*  SUFFIX 1 */
+             DCL    &SUFFIX2   *CHAR    (2)            /*  SUFFIX 2 */
+             DCL    &SUFFIX3   *CHAR    (2)            /*  SUFFIX 3 */
+             DCL    &SUFFIX4   *CHAR    (2)            /*  SUFFIX 4 */
+             DCL    &SUFFIX5   *CHAR    (2)            /*  SUFFIX 5 */
+
+             DCL  VAR(&ALREADY)  TYPE(*CHAR) LEN(1)
+             DCL  VAR(&DOCUMENT) TYPE(*CHAR) LEN(10)
+             DCL  VAR(&PCFILE)   TYPE(*CHAR) LEN(32)
+             DCL  VAR(&EMAILDIS) TYPE(*CHAR) LEN(40)
+             DCL  VAR(&EMAILDI2) TYPE(*CHAR) LEN(40)
+
+/* INITIALIZE VARIABLES */
+/* GET DISTRIBUTION LIST FOR SYSTEM VALUE HPBCRDGRP NO COMPANY      */
+             CALL       PGM(PPJXXFR) PARM(' ' 'HPBCRDGRP' &EMAILDIS)
+             CALL       PGM(PPJXXFR) PARM(' ' 'HPBCRDMGR' &EMAILDI2)
+
+/* CALCULATE FROM DATE PREVIOUS WEEKDAY GET FROM CALANCER FILE 361  */
+             CALL       PGM(PBI8XFR) PARM(' ' &ASOFDAT)
+
+             CHGVAR VAR(&RPTTYP) VALUE(' ')
+             CHGVAR VAR(&RETURN) VALUE(' ')
+             CHGVAR     VAR(&COMP) VALUE('000') /* Blank for all */
+/********    CHGVAR VAR(&COMP)   VALUE(&COMPNYN)                    */
+             CHGVAR VAR(&ASDATE) VALUE(&ASOFDAT)
+/********    CHGVAR VAR(&ARCUS)  VALUE(&ARCSTNO)                    */
+/********************************************************************/
+/* CREATE WORKFILES                                                 */
+/*     USE THE COMMAND CUSTOMIZED BY JOHN ERICSON. THIS COMMAND     */
+/*     WILL ELIMINATE HARDCODING OF LIBRARIES. THE CUSTOMIZED       */
+/*     COMMAND IS CRTDUPOBJL FOR 'CREATE DUPLICATE OBJECT FROM      */
+/*     LIBRARY'.                                                    */
+/********************************************************************/
+/* CUSTOMER HEADINGS WORKFILE                                       */
+
+             CRTDUPOBJL OBJ(ARP300) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(ARL300A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(ARL300B) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/* INVOICE DETAIL WORKFILE                                          */
+
+             CRTDUPOBJL OBJ(ARP301) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(ARL301A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/* CUSTOMER TOTALS WORKFILE                                         */
+
+             CRTDUPOBJL OBJ(ARP302) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(ARL302A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(ARL302B) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/* REPORT TOTALS WORKFILE                                           */
+
+             CRTDUPOBJL OBJ(ARP303) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/* CUSTOMER FILE FOR COUNTRY CODE                                   */
+
+             CPYF       FROMFILE(*LIBL/CABBREP) +
+                          TOFILE(QTEMP/CABBREPX) MBROPT(*ADD) +
+                          CRTFILE(*YES)
+
+/* SALES ROUTE TOTALS WORKFILE                                      */
+
+             CRTDUPOBJL OBJ(ARP304) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJ  OBJ(PNFMCPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PNFMCPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PNFMCPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+
+/*  RUN PROGRAM TO BUILD WORKFILES                                   */
+             CALL       PGM(AR300) PARM(&COMP &ASDATE &ARCUS &PARENT +
+                          &SLSRT &PRTZR &RPTTYP &INCLCB &INCLRB +
+                          &SUFFIX1 &SUFFIX2 &SUFFIX3 &SUFFIX4 +
+                          &SUFFIX5 &AGECODE)
+
+/* ADD ACTIVE CUSTOMERS THAT DONT HAVE ACTIVITY               */
+             CALL       PGM(AR301)
+
+/* BUILD CUSTOMER SUMMARY WORKFILE                                   */
+             CALL       PGM(AR302) PARM(&COMP)
+
+/* DOWNLOAD 2 REPORTS TO THE REQUESTING EMAIL ADDRESS ONLY ARP301HPB */
+/* DOWNLOAD 1 REPORTS TO THE REQUESTING EMAIL ADDRESS ARP301HPB      */
+/* Add SEQUEL Library to List                                        */
+             CHGVAR VAR(&ALREADY) VALUE('N')
+             ADDLIBLE LIB(SEQUEL) POSITION(*LAST)
+             MONMSG MSGID(CPF2103) EXEC(DO)       /* already in libl */
+                CHGVAR VAR(&ALREADY) VALUE('Y')
+             ENDDO
+
+/* WH77070   SLM 042721 */        /* CLONE ARP301 TO ARP301HPB      */
+/* EMAIL THE REPORT TO THE REQUESTED EMAIL ADDRESS                  */
+/**********  IF         COND(&EMAIL *NE '                       ') +  */
+/**********               THEN(EXECUTE VIEW(ARP301) PCFMT(*XLS) +     */
+/*********                RECIPIENT(&EMAIL) EMLMSG('Daily A/R Aging + */
+/************             Download file'))                            */
+/* WH77070   SLM 042721 */        /* CLONE ARP301 TO ARP301HPB        */
+ /* CHANGE ARP301HPB BASED ON THE ARP301 FILE BEING BUILT AR301 PROGRAM */
+/**********  CHGVAR     VAR(&EMAIL) VALUE('issmaso, isrcent')         */
+             CHGVAR     VAR(&EMAIL) VALUE(&EMAILDIS)
+             IF         COND(&EMAIL *NE '                       ') +
+                          THEN(EXECUTE VIEW(ARP301HPB) PCFMT(*XLS) +
+                          RECIPIENT(&EMAIL) EMLMSG('Daily A/R Aging +
+                          Download file'))
+
+             CHGVAR     VAR(&EMAIL) VALUE(&EMAILDI2)
+             IF         COND(&EMAIL *NE '                       ') +
+                          THEN(EXECUTE VIEW(ARP301HPB) PCFMT(*XLS) +
+                          RECIPIENT(&EMAIL) EMLMSG('Daily A/R Aging +
+                          Download file'))
+
+/* WH77070   SLM 042721 */        /* REMOVE PNFMCPPA                 */
+/**********  IF         COND(&EMAIL *NE '                       ') + */
+/**********               THEN(EXECUTE VIEW(PNFMCPPA) PCFMT(*XLS) +  */
+/**********               RECIPIENT(&EMAIL) EMLMSG('Daily A/R +      */
+/**********               Customer Watch download file'))    *********/
+/* WH77070   SLM 042721 */
+
+/* Remove SEQUEL Library from List                                   */
+             IF COND(&ALREADY *EQ 'N') THEN(DO)
+                RMVLIBLE   LIB(SEQUEL)
+             ENDDO
+
+/*  THE FOLLOWING DLTF'S WERE ADDED BECAUSE THIS CL IS CALLED TWICE */
+/*  IF THE FILES ARE NOT DELETED, THE INFORMATION IN THE FILES      */
+/*  IS DUPLICATED, THEREFORE APPEARING TWICE.                       */
+
+             DLTF       FILE(QTEMP/ARL300A)
+             DLTF       FILE(QTEMP/ARL300B)
+             DLTF       FILE(QTEMP/ARP300)
+             DLTF       FILE(QTEMP/ARL301A)
+             DLTF       FILE(QTEMP/ARP301)
+             DLTF       FILE(QTEMP/ARL302A)
+             DLTF       FILE(QTEMP/ARL302B)
+             DLTF       FILE(QTEMP/ARP302)
+             DLTF       FILE(QTEMP/ARP303)
+             DLTF       FILE(QTEMP/ARP304)
+             DLTF       FILE(QTEMP/PNFMCPL0)
+             DLTF       FILE(QTEMP/PNFMCPL1)
+             DLTF       FILE(QTEMP/PNFMCPP )
+             DLTF       FILE(QTEMP/CABBREPX )
+
+             ENDPGM

@@ -1,0 +1,611 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Datamart--Sales
+      * PROGRAM:     SH216 - Datamart Sales: MPR Wholesale Pork Daily
+     4* PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     06/19/13
+      *
+      * FUNCTION: Beginning in January 2013, the USDA required us to upload
+      *           prices to them twice each day (in the morning and afternoon).
+      *
+      *           This is only for Pork..not Dailys.
+      *
+      *           Bard Hamilton wants us to pull this MPR data every
+      *           30 minutes. Rose C. is hoop-jumping to get us a file in
+      *           QTEMP.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * Date      Programmer
+      *
+      * 07/30/13  LeAnne Ramsey  (E2649)
+      *           Rewrote to handle the pulling of data every 30 minutes.
+      *
+      * 08/01/13  LeAnne Ramsey  (E2649)
+      *           Recompile only. I had to correct the text on field
+      *           MPPTSTDS-MPR Class Description in the Datmart file.
+      *
+      * 08/15/13  LeAnne Ramsey  (E2649)
+      *           Added Commodity Price Group Description (MPCMPGDS)
+      *
+      * 08/19/13  LeAnne Ramsey  (E2649)
+      *           Added Commodity Market Price (MPCMMKPR) and Amount (MPCMMKAM).
+      *
+      * 08/21/13  LeAnne Ramsey  (E2649)
+      *           Added a Consumed Component Item field. We will populate it with
+      *           the value from the BOM record where the Consumed Priority is 1.
+      *
+      * 08/23/13  LeAnne Ramsey  (E2649)
+      *           Added Requested Ship Date.
+      *
+      * 08/23/13  LeAnne Ramsey  (C2751)
+      *           The Commodity Market Amount (MPCMMKAM) was not being recalc'd
+      *           when we updated an existing record with more pounds.
+      *
+      * 09/09/13  LeAnne Ramsey  (E2755)
+      *           Added Order Sales Channel (MPORCHCD) and Description (MPORCHDS).
+      *
+      * 09/10/13  LeAnne Ramsey  (E2758)
+      *           Add Sales Yield % (from the BOM file) to this Datamart file.
+      *           Doug E. wanted it added as a "rate" value...not a %. So, I
+      *           convert the value from the BOM file from a % to a rate.
+      *
+      * 12/11/13  LeAnne Ramsey  (E2938)
+      *           Added new Entry/Firm Date (in 3 formats) with logic to populate it
+      *           with Rose Centonze's new field AOUYDT from PBAOCPP-MPR Wholesale Pork
+      *           Daily.
+      *
+      * 03/20/17  Danny Nguyen (R9547) - STF Item BOM
+      *           Hardcoded Company 440 based on Sioux City Plant ID, per RC.
+      *
+      * 08/07/19  Danny Nguyen (R15161) - Export Load AS400 Updates - WI 318
+      *           DBF Change on Order Header Extsn (PMAMREP) file. Changed:
+      *           OHE Voyage/Flight from 5.0 to 15A.
+      *           OHE Booking Number from 12A to 15A.
+      *           Added: OHE Genset Number 15A.
+      *           No logic change. Recompile only.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fcaajrel1  if   e           k disk
+      *  Type Codes
+      *
+      *
+     Fcaaprel1  if   e           k disk
+      *  Salesperson
+      *
+      *
+     Fcabzreld  if   e           k disk
+      *  Company/Item
+      *
+      *
+     Fcavllsl0  if   e           k disk
+      *  Synon values list
+      *
+      *
+     Fombyrel1  if   e           k disk
+      *  Item default
+      *
+      *
+     Fomfzrel0  if   e           k disk
+      *  Commodity group
+      *
+      *
+     Fopbfcplo  if   e           k disk
+      *  Order header
+      *
+      *
+     Fpbaocpl4  uf   e           k disk
+      *  MPR wholesale pork daily
+      *  (LF selects only records where Datamart Process Status is N-New or R-Ready)
+      *  (aka: omits records that were truly sent to USDA and already pulled into Cognos)
+      *
+      *
+     Fpdiorelf  if   e           k disk
+      *  Bill of materials
+      *  (LF selects only records where BOM Type is Consumed)
+      *
+      *
+     Fpdiorel4  if   e           k disk
+      *  Bill of materials
+      *  (LF selects only records where Active/Produced records)
+      *
+      *
+     Fpdjerel1  if   e           k disk
+      *  Sales route
+      *
+      *
+     Fpmamrel1  if   e           k disk
+      *  Order header extension
+      *
+      *
+     Fshl216a   uf   e           k disk    rename(mprec:mpreca)
+      *  Datamart: MPR wholesale pork daily
+      *
+      *
+     Fshl216b   uf   e           k disk    rename(mprec:mprecb)
+      *  Datamart: MPR wholesale pork daily
+      *
+      *
+     Fshp216    o    e           k disk
+      *  Datamart: MPR wholesale pork daily
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *---------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------
+      *
+      * Parm fields
+      *
+     D xxitem          s              7  0
+     D xxpr            s             11  4
+     D xxuom           s              2
+     D xxcocd          s              3  0
+     D xxreturn        s              7a
+     D xxsynondt       s              7  0
+      *
+      *
+      * Workfields
+      *
+     D wkorno          s                   like(mporno)
+     D wkcunoalph      s              7a
+     D wknonzero       s              7  0
+     D wkconpty        s                   like(iocnsm) inz(1)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wknulldt        s                   like(mpordt)   inz(D'0001-01-01')
+     D wkcymdiso       s               D   datfmt(*iso)
+     D wksysdt7        s              7  0
+      *
+      *
+      * The fields below are used to retrieve the Status Descriptions from
+      * the Synon Values file..Rose gave me the 5 List Numbers to hardcode
+      * for the specific retrievals.
+      *
+     D wklistno        s                   like(y2lsno)
+     D wkextval        s                   like(y2exvl)
+      *
+      *
+      ****************************************************************
+      * Data Structures
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * Process each record in the Synon MPR Wholesale Pork Daily file
+      * (Note: Rose limits the data in the LF.)
+      *
+     C     *loval        setll     pbaocpl4
+     C                   dou       *in90 = *on                                  Process loop
+     C                   read      pbaocpl4                               90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Move the first 7 characters of MPR Lot Identification to Order Number.
+      *
+     C                   movel     aozbt1        wkorno
+      *
+     C                   select
+      *
+      * Not a real pull to USDA...just one of the pulls for Cognos
+      *
+     C                   when      aopxst = 'N'
+     C                   exsr      $wrt216
+      *
+      * A real pull of data to the USDA
+      *
+     C                   when      aopxst = 'R'
+     C     key02         chain     shl216a                            92
+     C                   if        *in92 = *off
+     C                   add       aopnwg        mporwt
+     C     mpcmmkpr      mult      mporwt        mpcmmkam
+     C                   update    mpreca
+     C                   else
+     C                   exsr      $wrt216
+     C                   endif
+      *
+      * Mark the Synon MPR record with a C=Cognos Complete so we don't pull it
+      * again.
+     C                   move      'C'           aopxst
+     C                   update    @aocpqv
+     C                   endsl
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Process loop
+      *
+     C                   seton                                        lr
+      /EJECT
+      *--------------------------------------------------------------------
+      * Write a Datamart record.
+      *--------------------------------------------------------------------
+      *
+     C     $wrt216       begsr
+      *
+     C                   move      'S'           mpcorg
+      *
+      * Populate 'Sent to USDA Flag'
+      *
+     C                   select
+     C                   when      aopxst = 'N'
+     C                   move      no            mpusdafl
+     C                   when      aopxst = 'R'
+     C                   move      yes           mpusdafl
+     C                   endsl
+      *
+      * Populate Plant ID and then hardcode Company based on the ID.
+      *
+     C                   move      aopwaa        mpplantid
+     C                   select
+     C                   when      mpplantid = '13597'
+     C                   z-add     360           mpshcono
+     C                   when      mpplantid = '31965'
+     C                   z-add     960           mpshcono
+R9547 ** Set Company 440 for Sioux City Plant ID. Ok to hardcode, per RC.
+  |  C                   when      mpplantid = '46071'
+R9547C                   z-add     440           mpshcono
+     C                   endsl
+      *
+      * Populate Item and Item Description
+      *
+     C                   z-add     aofrc7        mpitcd
+     C                   movel     aozct1        mpitds
+      *
+      * Populate Ordered Weight (lbs) and FOB Plant Price/CWT
+      *
+     C                   z-add     aopnwg        mporwt
+     C                   z-add     aohmpr        mpfobpr
+      *
+      * Retrieve the BOM primary Consumed Item (ie: Consumed Priority of 1)
+      *
+     C     key04         chain     pdiorelf                           92
+     C                   if        *in92 = *off
+     C                   z-add     ioc9nb        mpconitcd
+     C                   endif
+      *
+      * Retrieve the BOM Sales Yield % from the BOM record where the
+      * Item produced itself (the Item/Component Item are the same).
+      *
+     C     key06         chain     pdiorel4                           92
+     C                   if        *in92 = *off
+     C                   eval      mpsyrt = iobopr / 100
+     C                   endif
+      *
+      * Commodity info
+     C                   exsr      $commodity
+      * Status fields
+     C                   exsr      $status
+      * Flip dates
+     C                   exsr      $dates
+      * Order info
+     C                   z-add     wkorno        mporno
+     C                   exsr      $order
+      *
+     C                   write     mprec
+     C                   clear                   mprec
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------
+      * Retrieve/calc Commodity Info
+      *-------------------------------------------------------------------------
+      *
+     C     $commodity    begsr
+      *
+      * Retrieve the Commodity Price Group (and description) for this Item
+      *
+     C     mpitcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      mplrcd = bylrcd
+     C     bylrcd        chain     omfzrel0                           92
+     C                   if        *in92 = *off
+     C                   eval      mpcmpgds = fzj4na
+     C                   endif
+     C                   endif
+      *
+      *
+      * Retrieve the Primary UOM for this Company/Item from Company/Item file.
+      * (Note: We need UOM to pass on the call to get Market Price.)
+      *
+     C     key03         chain     cabzreld                           92
+     C                   if        *in92 = *off                                 If got UOM
+     C                   move      bzadcd        xxuom
+      *
+      * Call a synon program to return Commodity Market Price.
+      *
+     C                   call      'POS2XFR'
+     C                   parm      *blank        xxreturn
+     C                   parm      mpshcono      xxcocd
+     C                   parm                    xxuom
+     C                   parm      mpitcd        xxitem
+     C                   parm      wksysdt7      xxsynondt
+     C     mpcmmkpr      parm      0             xxpr
+     C                   endif                                                  If got UOM
+      *
+      * Calculate Commodity Market Amount as:
+      *       Price * Ordered Weight
+      *
+     C     mpcmmkpr      mult      mporwt        mpcmmkam
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------
+      * Populate 5 Synon 'Status' fields; get Descriptions from Synon values
+      *-------------------------------------------------------------------------
+      * Rose gave me the 5 List Numbers to hardcode for the specific retrievals.
+      *
+     C     $status       begsr
+      *
+      *       Destination
+     C                   z-add     2050868       wklistno
+     C                   eval      wkextval = aopest
+     C                   move      aopest        mppest
+     C     key01         chain     @y2exin                            92
+     C                   if        *in92 = *off
+     C                   eval      mppestds = y2cntx
+     C                   endif
+      *
+      *        Sales Type
+     C                   z-add     2050880       wklistno
+     C                   eval      wkextval = aopist
+     C                   move      aopist        mppist
+     C     key01         chain     @y2exin                            92
+     C                   if        *in92 = *off
+     C                   eval      mppistds = y2cntx
+     C                   endif
+      *
+      *        Delivery Period
+     C                   z-add     2050861       wklistno
+     C                   eval      wkextval = aoplst
+     C                   move      aoplst        mpplst
+     C     key01         chain     @y2exin                            92
+     C                   if        *in92 = *off
+     C                   eval      mpplstds = y2cntx
+     C                   endif
+      *
+      *        Refrigeration
+     C                   z-add     2050874       wklistno
+     C                   eval      wkextval = aopqst
+     C                   move      aopqst        mppqst
+     C     key01         chain     @y2exin                            92
+     C                   if        *in92 = *off
+     C                   eval      mppqstds = y2cntx
+     C                   endif
+      *
+      *            Class
+     C                   z-add     2050856       wklistno
+     C                   eval      wkextval = aoptst
+     C                   move      aoptst        mpptst
+     C     key01         chain     @y2exin                            92
+     C                   if        *in92 = *off
+     C                   eval      mpptstds = y2cntx
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Flip Dates
+      *---------------------------------------------------------------
+      *
+     C     $dates        begsr
+      *
+      * Entry/Frim Date
+      *
+     C     *cymd         test(d)                 aouydt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      aouydt        mpefdt
+     C     *iso          move      mpefdt        mp80efdt
+     C                   move      mpefdt        mpefdtmd
+     C                   else
+     C                   move      wknulldt      mpefdt
+     C                   move      wknulldt      mpefdtmd
+     C                   endif
+      *
+      * Actual Ship Date
+      *
+     C     *cymd         test(d)                 aouzdt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      aouzdt        mpacshdt
+     C     *iso          move      mpacshdt      mp80acshdt
+     C                   move      mpacshdt      mpacshdtmd
+     C                   else
+     C                   move      wknulldt      mpacshdt
+     C                   move      wknulldt      mpacshdtmd
+     C                   endif
+      *
+      * Reporting Date
+      *
+     C     *cymd         test(d)                 aoutdt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      aoutdt        mprpdt
+     C     *iso          move      mprpdt        mp80rpdt
+     C                   move      mprpdt        mprpdtmd
+     C                   else
+     C                   move      wknulldt      mprpdt
+     C                   move      wknulldt      mprpdtmd
+     C                   endif
+      *
+      * Reporting AM or PM
+      *
+     C                   select
+     C                   when      aov0ny = 1
+     C                   eval      mprpampm = 'AM'
+     C                   when      aov0ny = 2
+     C                   eval      mprpampm = 'PM'
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve Order info
+      *---------------------------------------------------------------
+      *
+      * I key/retrieve the order using only the Order Number...not the Company/Order
+      * like we usually do. This is because the Company can flip in OMS from Triumph
+      * to Seaboard and vice versa. So, by the time I am reading these MPR records,
+      * the Company in the Order Header may no longer be the one associated with the
+      * 'Plant ID'. Order Number is unique; so, I will always get the correct Order.
+      *
+     C     $order        begsr
+      *
+     C     mporno        chain     opbfcplo                           92
+     C                   if        *in92 = *off                                 If order header
+      *
+      * Ship To Customer
+     C                   z-add     bebkc7        mpshcuno
+     C                   eval      mpshcunm = bebrtx
+     C                   move(p)   mpshcuno      wkcunoalph
+     C     '0'           check     wkcunoalph    wknonzero
+     C                   eval      wkcunoalph = %subst(wkcunoalph:wknonzero)
+      *
+     C                   eval      mpshcucdnm = %trim(wkcunoalph) + '-'
+     C                                                            + mpshcunm
+      *
+      * Retrieve Sales Person associated with Sales Route on Order Header
+      * (If you don't get a hit, just use Sales Route in your Datamart record.)
+      *
+     C     ber4cd        chain     pdjerel1                           92
+     C                   if        *in92 = *off
+     C                   move      jebccd        mporspcd
+     C                   else
+     C                   move      ber4cd        mporspcd
+     C                   endif
+      *
+     C     mporspcd      chain     caaprel1                           92
+     C                   if        *in92 = *off
+     C                   eval      mporspnm = apaltx
+     C                   eval      mporspcdnm = mporspcd + '-' + mporspnm
+     C                   endif
+      *
+      * Order Date
+      *
+     C     *cymd         test(d)                 bea0dt                 92
+     C                   if        *in92 = *off                                 If date OK
+     C     *cymd         move      bea0dt        mpordt
+     C     *iso          move      mpordt        mp80ordt
+     C                   move      mpordt        mpordtmd
+     C                   else
+     C                   move      wknulldt      mpordt
+     C                   move      wknulldt      mpordtmd
+     C                   endif                                                  If date OK
+      *
+      * Requested Ship Date
+      *
+     C     *cymd         test(d)                 bea5dt                 92
+     C                   if        *in92 = *off                                 If date OK
+     C     *cymd         move      bea5dt        mprqshdt
+     C     *iso          move      mprqshdt      mp80rqshdt
+     C                   move      mprqshdt      mprqshdtmd
+     C                   else
+     C                   move      wknulldt      mprqshdt
+     C                   move      wknulldt      mprqshdtmd
+     C                   endif                                                  If date OK
+      *
+      * Retrieve Order Sales Channel (aka: Customer Type) from the
+      * Order Header Extension file using a key of:
+      *      Company, Order Number
+      *
+     C     key05         chain     pmamrel1                           92
+     C                   if        *in92 = *off
+     C                   move      amchtx        mporchcd
+     C                   endif
+      *
+      * Retrieve Order Sales Channel description
+      *
+     C                   if        mporchcd <> *blank
+     C     mporchcd      chain     caajrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      mporchds = ajauna
+     C                   endif
+     C                   endif
+      *
+     C                   endif                                                  If order header
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Note: We don't have the 'organization' as an incoming parm since this is only
+      *       for Seaboard...not Daily's; I'll hardcode S=Seaboard for the Organization.
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    wklistno
+     C                   kfld                    wkextval
+      *
+     C     key02         klist
+     C                   kfld                    wkorno
+     C                   kfld                    aofrc7
+      *
+     C     key03         klist
+     C                   kfld                    mpshcono
+     C                   kfld                    mpitcd
+      *
+     C     key04         klist
+     C                   kfld                    mpshcono
+     C                   kfld                    mpitcd
+     C                   kfld                    wkconpty
+      *
+     C     key05         klist
+     C                   kfld                    beaic3
+     C                   kfld                    bec4nb
+      *
+     C     key06         klist
+     C                   kfld                    mpshcono
+     C                   kfld                    mpitcd
+     C                   kfld                    mpitcd
+      *
+      * Get System Date into Synon Format
+      *
+     C     *mdy          movel     udate         wkcymdiso
+     C     *cymd         movel     wkcymdiso     wksysdt7
+      *
+      * Everytime this program runs, I want to delete any/all records that have an N=No
+      * in the Sent to USDA Flag.
+      *
+     C     'N'           setll     shl216b
+     C                   dou       *in90 = *on                                  Do delete
+     C     'N'           reade     shl216b                                90
+     C                   if        *in90 = *off                                 If not EOF
+     C                   delete    mprecb
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do delete
+      *
+     C                   endsr
+      /EJECT

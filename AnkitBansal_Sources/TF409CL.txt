@@ -1,0 +1,364 @@
+/***************************************************************** */
+/*                                                                 */
+/*  SYSTEM:          TRIUMPH FOODS                                 */
+/*  PROGRAM NUMBER:  TF409CL                                       */
+/*  PROGRAM NAME:    REVENUE REPORT BY GL SUB                      */
+/*  PROGRAMMER:      LEANNE FEDOR                                  */
+/*  CREATE DATE:     02/13/06                                      */
+/*                                                                 */
+/*  FUNCTION:        CREATES WORKFILES AND A REPORT                */
+/*                                                                 */
+/*                   THESE WORKFILES ARE USED FOR THE REPORTS      */
+/*                   AND THEY ARE ALSO USED TO CREATE THE          */
+/*                   JDE JOURNAL ENTRY WHEN THE FINAL IS RUN.      */
+/*******************************************************************/
+/* MODIFIED:                                                       */
+/*                                                                 */
+/* 05/21/07  LEANNE RAMSEY                                         */
+/*           ADDED A NEW DATA AREA (DATSTPRD) TO CONTROL E-MAILS.  */
+/*                                                                 */
+/* 07/03/07  ALICE BROWNFIELD                                      */
+/*           COMMENT CHANGE ONLY                                   */
+/*                                                                 */
+/* 08/13/07  LEANNE RAMSEY                                         */
+/*           ADDED AN OPEN QUERY OVER PDJIREL3-ITEM CATEGORY TO    */
+/*           EXTRACT ONLY "CATEGORY=4" RECORDS.                    */
+/*           CHANGED OPEN QUERY OVER TFP010-WEEKLY PRODUCT REVENUE */
+/*           DETAIL FILE TO SELECT OUT ONLY FINISHED GOODS.        */
+/*                                                                 */
+/* 05/11/09  LeAnne Ramsey                                         */
+/*           Make Print logic match Meat Costing.                  */
+/*                                                                 */
+/* 06/10/09  LeAnne Ramsey                                         */
+/*           Added another workfile (TFP310) to handle revised     */
+/*           CoOwned logic in the post to JDE....which only        */
+/*           happens when this CL is called on a "Final" Revenue   */
+/*           Close.                                                */
+/*                                                                 */
+/* 07/27/09  LeAnne Ramsey                                         */
+/*           Added logic for Affiliated/Contract Sales (Mexico).   */
+/*                                                                 */
+/* 07/27/09  Brad Baden    R9717/E9718                             */
+/*           Added a QRYSLT to only allow records for companies    */
+/*           360 and 960 over file PDICCPLC.                       */
+/*                                                                 */
+/* 10/24/17  ROSE CENTONZE S11944                                  */
+/*           Added email dist list for STF, without report        */
+/*                                                                 */
+/* 11/13/17  Danny Nguyen  R12011A-Weekly Product Revenue          */
+/*           File TFP010 was changed, added 25 STF fields.         */
+/*           Changed Query Logic to include company 440 over the   */
+/*           History Dtl Accrual (PDICCPLC) file.                  */
+/*           Added call to print TF6090 report for ALL companies.  */
+/*                                                                 */
+/* 05/26/22 RMC DDSDDL REPLACE OPNQRYF WITH OPNSQLF FOR OMS FILE PDJIREP  */
+/*                     ADDED NEEDED OVRDBF AROUND THE COMMAND.              */
+/*                     CHANGE *AND TO AND IN &QDATA1,2 CHG *EQ TO = IN QRY  */
+/* 05/06/24 PIO   REPLACE OPNQRYF WITH OPNSQLF FOR OMS FILE PDICCPP         */
+/*                ADDED NEEDED OVRDBF AROUND THE COMMAND                    */
+/*                CHANGE *AND TO AND, *EQ TO =, *GE TO >= , *LE TO <=       */
+/*                IN &QDATA1                                                */
+/*******************************************************************/
+
+             PGM
+
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(160)
+             DCL        VAR(&QDATA1) TYPE(*CHAR) LEN(96)
+             DCL        VAR(&QDATA2) TYPE(*CHAR) LEN(10)
+
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&HOLD) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&SAVE) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&COPY) TYPE(*DEC)  LEN(1)
+
+             DCL        VAR(&EMAIL)     TYPE(*CHAR) LEN(38)
+             DCL        VAR(&SUBJECT)   TYPE(*CHAR) LEN(40)
+             DCL        VAR(&SKIPIT)    TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&LDFWEDT)   TYPE(*DEC)  LEN(8)
+             DCL        VAR(&LDTWEDT)   TYPE(*DEC)  LEN(8)
+             DCL        VAR(&LDPFCD)    TYPE(*CHAR) LEN(1)
+             DCL        VAR(&TSTPRDFL)  TYPE(*CHAR) LEN(1)
+             DCL        VAR(&LDCOFL)    TYPE(*CHAR) LEN(1)
+
+             CHGVAR     VAR(&LDPFCD)    VALUE(%SST(*LDA 37 1))
+             CHGVAR     VAR(&LDCOFL)    VALUE(%SST(*LDA 329 1))
+
+/*----------------------------------------------------------------*/
+/* FOR SENDING EMAILS:                                            */
+/* RETRIEVE DATA AREA THAT LETS US KNOW WHETHER WE ARE IN TEST    */
+/* OR PRODUCTION (ALWAYS DEFAULT TO THE "TEST" DISTRIBUTION LIST.)*/
+/*----------------------------------------------------------------*/
+
+             CHGVAR     VAR(&EMAIL) VALUE('TF Test')
+             RTVDTAARA  DTAARA(DATSTPRD (1 1)) RTNVAR(&TSTPRDFL)
+
+/*----------------------------------------------------------------*/
+/* RETRIEVE/SET PRINT DEFAULTS                                    */
+/*----------------------------------------------------------------*/
+
+ OUTQ:       CHGVAR     VAR(&OUTQ) VALUE(%SST(*LDA 401 10))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(*JOB))
+
+ HOLD:       CHGVAR     VAR(&HOLD) VALUE(%SST(*LDA 411 4))
+             IF         COND(&LDPFCD = 'F') THEN(CHGVAR VAR(&HOLD) +
+                          VALUE(*YES))
+             IF         COND(&HOLD *NE '*YES' *AND &HOLD *NE '*NO ') +
+                          THEN(CHGVAR VAR(&HOLD) VALUE(*NO))
+
+ SAVE:       CHGVAR     VAR(&SAVE) VALUE(%SST(*LDA 415 4))
+             IF         COND(&LDPFCD *NE ' ') +
+                          THEN(CHGVAR VAR(&SAVE) VALUE(*YES))
+             IF         COND(&SAVE *NE '*YES' *AND &SAVE *NE '*NO ') +
+                          THEN(CHGVAR VAR(&SAVE) VALUE(*NO))
+
+ COPY:       CHGVAR     VAR(&COPY) VALUE(%SST(*LDA 419 1))
+             IF         COND(&COPY = 0) THEN(CHGVAR VAR(&COPY) +
+                          VALUE(1))
+
+/*--------------------------------------------------------------------------*/
+/* Create workfiles                                                         */
+/*--------------------------------------------------------------------------*/
+
+             CRTDUPOBJL OBJ(TFP307) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJL OBJ(TFL307A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(TFP308) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJL OBJ(TFL308A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(TFP309) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJL OBJ(TFL309A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJL OBJ(TFL309B) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJL OBJ(TFP310) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+
+/*--------------------------------------------------------------------------*/
+/*  When this report is being generated from the Weekly Revenue Close       */
+/*  function (instead of On-Demand), set the LDA to:                        */
+/*    1) generate both the "detail" and the "summary" reports               */
+/*    2) include records with zero adjustment dollars                       */
+/*    3) include both co-owned and not co-owned products                    */
+/*    4) plop the "Revenue Close" week-ending date into the From/To         */
+/*       week-ending dates.                                                 */
+/*--------------------------------------------------------------------------*/
+
+             IF         COND(&LDPFCD *NE ' ') THEN(DO)
+             CHGDTAARA  DTAARA(*LDA (71 1)) VALUE('B')
+             CHGDTAARA  DTAARA(*LDA (328 1)) VALUE('Y')
+             CHGDTAARA  DTAARA(*LDA (329 1)) VALUE('B')
+             CHGDTAARA  DTAARA(*LDA (52 8)) VALUE(%SST(*LDA 22 8))
+             CHGDTAARA  DTAARA(*LDA (60 8)) VALUE(%SST(*LDA 22 8))
+             ENDDO
+
+/*--------------------------------------------------------------------------*/
+/*  Extract Item Category "4" records                                       */
+/*--------------------------------------------------------------------------*/
+
+             CHGVAR     VAR(&QDATA2) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA2 1 10)) VALUE('JIUSNB = 4')
+
+     /*      OVRDBF     FILE(PDJIREL3) SHARE(*YES)                         */
+       /*    OPNQRYF    FILE((PDJIREL3)) QRYSLT(&QDATA2) KEYFLD(*FILE) +
+                          SEQONLY(*YES)                                   */
+
+/*   OPEN SQL                                                      */
+             OVRDBF     FILE(PDJIREP) TOFILE(PDJIREP) LVLCHK(*NO)
+             OPNSQLF    SQL('SELECT * FROM PDJIREP WHERE' *BCAT +
+                          &QDATA2 *BCAT 'ORDER BY  jislcd +
+                          ASC,jiaic3 ASC,jiusnb ASC') +
+                          OPNID(PDJIREL3) OPTION(*ALL) SEQONLY(*NO) +
+                          RCDFMT(@JIREFR) ALWCPY(*IFRQD)
+   /*  Fromfile is the file in the program, tofile is 1st file in the opnsqlf */
+     /*  For the override to be SEEN BY ALL PROGRAMS, THE OVRDBF +
+                command must specify OVRSCOPE(*JOB) and OPNSCOPE(*JOB). */
+
+             OVRDBF     FILE(PDJIREL3) TOFILE(PDJIREP) LVLCHK(*NO) +
+                          OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+/*--------------------------------------------------------------------------*/
+/*  Extract History Detail Accrual records                                  */
+/*--------------------------------------------------------------------------*/
+/*  Select records where the Accrual Type is 'Sales Accrual" and the        */
+/*  Ledger Accrual Flag is Yes                                              */
+
+             CHGVAR     VAR(&QDATA1) VALUE(' ')
+  /*PIO      CHGVAR     VAR(%SST(&QDATA1 1 35)) VALUE('ICOKCD *EQ + +
+                          "SA" *AND ICFMTX = "Y"')                 */
+  /*PIO*/    CHGVAR     VAR(%SST(&QDATA1 1 35)) VALUE('ICOKCD =   +
+                          "SA"  AND ICFMTX = "Y"')
+ /* R12011 - Added Company 440 */
+ /*PIO       CHGVAR     VAR(%SST(&QDATA1 37 59)) VALUE('*AND (ICAIC3 + +
+                          = 360 *OR ICAIC3 = 960 *OR ICAIC3 +         +
+                          = 440)')                                   */
+ /*PIO*/     CHGVAR     VAR(%SST(&QDATA1 37 59)) VALUE(' AND (ICAIC3 +
+                          = 360  OR ICAIC3 = 960  OR ICAIC3 +
+                          = 440)')
+
+     /*      OVRDBF     FILE(PDICCPLC) SHARE(*YES)   +
+             OPNQRYF    FILE((PDICCPLC)) QRYSLT(&QDATA1) KEYFLD(*FILE) ++
+                          SEQONLY(*YES)                          */
+
+/*   OPEN SQL   UNCOMMENT AFTER CHANGE PDICCPP TO A DDL TABLE  */
+             OVRDBF     FILE(PDICCPP) TOFILE(PDICCPP) LVLCHK(*NO)
+             OPNSQLF    SQL('SELECT * FROM PDICCPP WHERE' *BCAT +
+                          &QDATA1 *BCAT 'ORDER BY  ICPRDT   +
+                          ASC,ICOKCD ASC,ICAIC3 ASC, ICC4NB ASC, +
+                          ICDPNB ASC, ICUENB ASC, ICDXNB ASC') +
+                          OPNID(PDICCPLC) OPTION(*ALL) SEQONLY(*NO) +
+                          RCDFMT(@ICCPCM) ALWCPY(*IFRQD)
+   /*  Fromfile is the file in the program, tofile is 1st file in the opnsqlf */
+     /*  For the override to be SEEN BY ALL PROGRAMS, THE OVRDBF +
+                command must specify OVRSCOPE(*JOB) and OPNSCOPE(*JOB). */
+
+             OVRDBF     FILE(PDICCPLC) TOFILE(PDICCPP) LVLCHK(*NO) +
+                          OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+
+/*--------------------------------------------------------------------------*/
+/*  Extract Weekly Product Revenue records and build workfiles              */
+/*--------------------------------------------------------------------------*/
+
+             CHGVAR     VAR(&LDFWEDT)   VALUE(%SST(*LDA 52 8))
+             CHGVAR     VAR(&LDTWEDT)   VALUE(%SST(*LDA 60 8))
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('PRWEDT *GE')
+             CHGVAR     VAR(%SST(&QDATA 12 8)) VALUE(&LDFWEDT)
+             CHGVAR     VAR(%SST(&QDATA 21 15)) VALUE('*AND PRWEDT +
+                          *LE')
+             CHGVAR     VAR(%SST(&QDATA 37 8)) VALUE(&LDTWEDT)
+
+             CHGVAR     VAR(%SST(&QDATA 46 46)) VALUE('*AND (PRRCEXFL +
+                          *EQ "N" *OR PRCOOWNFL *EQ "Y")')
+
+             CHGVAR     VAR(%SST(&QDATA 93 22)) VALUE('*AND PRITYCD +
+                          *EQ "FG "')
+
+/* User has limited the report to CO-Owned Products                      */
+
+             IF         COND(&LDCOFL *EQ 'C') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 116 22)) VALUE('*AND PRCOOWNFL +
+                          *EQ "Y"')
+             ENDDO
+
+/* User has limited the report to NOT CO-Owned Products               */
+
+             IF         COND(&LDCOFL *EQ 'N') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 116 22)) VALUE('*AND PRCOOWNFL +
+                          *EQ "N"')
+             ENDDO
+
+/* If this is being generated on-demand, limit the data to "Final" records. */
+/* (ie: Records built in a "Final" run of the Weekly Revenue Close function */
+
+             IF         COND(&LDPFCD *EQ ' ') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 139 19)) VALUE('*AND PRPFCD +
+                          *EQ "F"')
+             ENDDO
+
+             OVRDBF     FILE(TFL010E) SHARE(*YES)
+             OPNQRYF    FILE((TFL010E)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+
+/*--------------------------------------------------------------------------*/
+/*  Build workfiles                                                         */
+/*--------------------------------------------------------------------------*/
+
+             CALL       PGM(TF309)
+
+             CLOF       OPNID(TFL010E)
+             DLTOVR     FILE(TFL010E)
+
+             CLOF       OPNID(PDICCPLC)
+  /*PIO      DLTOVR     FILE(PDICCPLC)   */
+             DLTOVR     FILE(PDICCPLC) LVL(*JOB) /*PIO*/
+             MONMSG     MSGID(CPF9841)
+
+             CLOF       OPNID(PDJIREL3)
+             DLTOVR     FILE(PDJIREL3)
+             MONMSG     MSGID(CPF9841)
+
+/*--------------------------------------------------------------------------*/
+/*  Run report                                                              */
+/*--------------------------------------------------------------------------*/
+
+             OVRPRTF    FILE(PRINT198) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(&HOLD) SAVE(&SAVE)
+
+             CALL       PGM(TF609)
+
+    /* R12011 - Set Email Subject Line & Call Subroutine to Send Email. */
+             CHGVAR     VAR(&SUBJECT) VALUE('TF609-Revenue Report by +
+                          G/L Sub')
+             CALLSUBR   SUBR(SENDEMAIL)
+
+    /* R12011 - Report for All Companies (Includes STF) on Legal Size Paper. */
+             OVRPRTF    FILE(PRINT198) PAGESIZE(8.5 14 *UOM) LPI(12) +
+                          CPI(20) OVRFLW(87) DRAWER(2) PAGRTT(90) +
+                          OUTQ(&OUTQ) COPIES(&COPY) +
+                          SCHEDULE(*FILEEND) HOLD(&HOLD) SAVE(&SAVE)
+
+             CALL       PGM(TF6090)
+
+    /* R12011 - Set Email Subject Line & Call Subroutine to Send Email. */
+             CHGVAR     VAR(&SKIPIT) VALUE('Y')
+             CHGVAR     VAR(&SUBJECT) VALUE('TF6090-Revenue Report +
+                          by G/L Sub - ALL')
+             CALLSUBR   SUBR(SENDEMAIL)
+
+             DLTOVR     FILE(*ALL)
+
+/*--------------------------------------------------------------------------*/
+/* If this is a "Final" run out of the Weekly Revenue Close                 */
+/* (and you are in the "production" environment),                           */
+/*    e-mail the report to a distribution list                              */
+/*    dup the report to another spool file                                  */
+/*--------------------------------------------------------------------------*/
+    /* R12011 - Added Subroutine Wrapper to Existing Codes Below. **/
+             SUBR       SUBR(SENDEMAIL)
+
+             IF         COND(&LDPFCD *EQ 'F') THEN(DO)          /* If Final */
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                        VAR(&EMAIL) VALUE('TF Revenue Close'))
+
+    /* R12011 - Changed Subject Line as a Variable. */
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG('Distribution List: TF Revenue +
+                          Close') ATTLIST((* *PDF *N PRINT198 * *LAST))
+             MONMSG     MSGID(CPF0000)
+
+    /* R12011 - Do Not Send Email Notice a 2nd Time. */
+             IF         COND(&SKIPIT *EQ 'Y') THEN(DO)
+             GOTO       CMDLBL(SKIP)
+             ENDDO
+
+ S11944:     IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('TF Revenue Close STF'))
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT('Revenue Close - +
+                          Invoicing complete') MSG('Distribution +
+                          List: TF Revenue Close STF')
+
+             MONMSG     MSGID(CPF0000)
+
+ SKIP:       IF         COND(&TSTPRDFL *EQ 'P') THEN(DO)
+             DUPSPLF    FILE(PRINT198) OUTQ(TFPRTDUP) SPLNBR(*LAST) +
+                          HOLD(*NO)
+             MONMSG     MSGID(CPF0000)
+             ENDDO
+
+             ENDDO                                              /* If Final */
+
+ /*R12011*/  ENDSUBR
+
+
+             ENDPGM

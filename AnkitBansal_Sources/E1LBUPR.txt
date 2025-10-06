@@ -1,0 +1,103 @@
+/***************************************************************** */
+/*                                                                 */
+/*  ENVIRONMENT:     PORK DIVISION                                 */
+/*  SYSTEM:          E1 9.2 INTERFACE                            */
+/*  PROGRAM NUMBER:  E1LBUPR                                       */
+/*  PROGRAM NAME:    PUSH E1 STAGED BATCH TO E1 Z FILE SERVER    */
+/*  PROGRAMMER:      ROSE CENTONZE                                 */
+/*  CREATE DATE:     06/25/2020                                    */
+/*                                                                 */
+/*  FUNCTION:        THIS CL CALLS THE PROGRAMS TO PUSH AN         */
+/*                   E1 STAGED BATCH FROM :                        */
+/*                     1) E10011 TO F0011 ON E1 SERVER             */
+/*                     2) E10411 TO E10411Z1 ON E1 SERVER          */
+/*                     3) E10911 TO E10911Z1 ON E1 SERVER          */
+/*                   THE Z-PROCESSOR ON THE E1 SERVER IS THEN     */
+/*                   CALLED THROUGH API: E1LFUPR, API RUNBCH      */
+/*                   TO PROCESS THE BATCH TO F0411 AND F0911      */
+/*                   POST TYPE 5 - CALLS THE G/L PROCESSOR        */
+/*                             6 - CALLS THE A/P PROCESSOR         */
+/*******************************************************************/
+/* MODIFIED:                                                       */
+ /*   2021-10-19    R Centonze    SDN440   Get User Reserved Reference field  */
+ /*     ‚    From F55CONFIG3,now holds the Version to be sent to E1.     */
+ /*     ‚    Some users want to Autopost their batches so instead of the */
+ /*     ‚    default Version SF0001 they will use version SF0003        */
+/***************************************************************** */
+
+             PGM  (&RTNCDE &BATNO &BATUSR &BATTYP &BATALPH)
+
+             DCL        VAR(&RTNCDE)  TYPE(*CHAR)  LEN(7)
+             DCL        VAR(&BATUSR)  TYPE(*CHAR) LEN(10)
+             DCL        VAR(&BATTYP) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&BATNO) TYPE(*DEC) LEN(8)
+             DCL        VAR(&BATALPH) TYPE(*CHAR) LEN(15)
+             DCL        VAR(&PSTTYP) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&PSTVER) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&version) TYPE(*CHAR) LEN(15)
+             DCL        VAR(&UBE   ) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&BSSV  ) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&MESSAGE) TYPE(*CHAR) LEN(100)
+
+ /*          ADDLIBLE   LIB(RDB40) POSITION(*LAST)              +
+             MONMSG     MSGID(CPF2103)                           */
+  /*GOTO RUNIT              */
+   /* PUSH E10011 TO E1 SERVER F0011                                  */
+
+             CALL       PGM(E1K6UPR) PARM(&BATTYP &BATNO)
+
+   /* PUSH E10411 TO E1 SERVER F0411                                 */
+
+             CALL       PGM(E1K7UPR) PARM(&BATUSR &BATALPH)
+
+   /* PUSH E10911 TO E1 SERVER F0911                                 */
+
+             CALL       PGM(E1K8UPR) PARM(&BATUSR &BATALPH)
+
+   /* CALL API TO RUN THE Z PROCESSOR                                 */
+
+/*   GOTO END           */
+ RUNIT:
+
+ ERRTYP:     IF         COND(&BATTYP *NE 'V ' *AND &BATTYP *NE 'G ') THEN(DO)
+            CHGVAR     VAR(&MESSAGE) VALUE('E1 Batch ' |> &BATALPH |> 'Type is +
+                          Blank or Invalid. Batch type: ' |> +
+                          &BATTYP)
+             GOTO       CMDLBL(ERROR)
+             ENDDO
+
+   /* SET VERSION TO RUN THE Z PROCESSOR - 0411 -VOUCHER BATCH        */
+             IF         COND(&BATTYP *EQ 'V ') THEN(DO)
+             CHGVAR     VAR(&PSTVER) VALUE('SF0001')
+             CHGVAR     VAR(&PSTTYP) VALUE('6')
+             ENDDO
+
+   /* SET VERSION TO  RUN THE Z PROCESSOR - 0911 - GL BATCH           */
+   IF COND(&BATTYP *EQ 'G ') THEN(DO)
+             CHGVAR     VAR(&PSTVER) VALUE('SF0001')
+             CHGVAR     VAR(&PSTTYP) VALUE('5')
+             ENDDO
+
+   /* GET USER'S F55CONFIG3 LETTER FOR PARM UBE               */
+   /* 10/19/21    AND PARM S2URRF -> VERSION --  IF BLANK USE DEFAULT SF0001  */
+             CHGVAR     VAR(&UBE   ) VALUE(' ')       /* DEFAULT    */
+             CALL       PGM(E1LGUPR) PARM(&UBE &BATUSR &VERSION)
+
+             IF         COND(&UBE = ' ') THEN(GOTO CMDLBL(ERRUBE))
+
+             IF         COND(&VERSION > '     ') THEN(CHGVAR +
+                          VAR(&PSTVER) VALUE(&VERSION))
+
+             CHGVAR     VAR(&BSSV  ) VALUE(' ')
+
+             CALL       PGM(E1LFUPR) PARM(&PSTTYP &BATALPH &PSTVER &UBE &BSSV)
+
+             GOTO END
+
+ ERRUBE:     CHGVAR     VAR(&MESSAGE) VALUE('E1 Batch' |> &BATALPH +
+                          |> 'not posted to E1 JDE.  User' |> +
+                          &BATUSR |> 'not in F55CONFIG.')
+ ERROR:      ESNDMAIL   RECIPIENT('e1 batch error') SUBJECT('E1 +
+                          Batch not posted') MSG(&MESSAGE)
+END:
+             ENDPGM

@@ -1,0 +1,906 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP284 - Safedata/WEB: Edit/Write BGF Weekly Wean Projections to HPS
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     07/12/04
+      *
+      *
+      * FUNCTION:     !!!!!!!  This program processes WEB data as well as SAFEDATA data. !!!
+      *
+      *              The 'data source' code in each record identifies whether the record
+      *              got into the file via:
+      *                   1) a Safedata upload, or
+      *                   2) the WEB
+      *
+      *
+      *              This program reads each record from the Editing file.
+      *              It writes the error-free records to the HPS database file.
+      *              It generates a listing of the records in error.
+      *
+      *              This program also writes ALL the records (both those with and without
+      *              errors to a History file for I.S. debugging purposes). It populates a
+      *              'y/n error flag' in this record.
+      *
+      *
+      *              QPRINT is used for the output file since the command 'CLPRINTA'
+      *              prints to QPRINT.  QPRINT is overridden in the submission CLP
+      *              to 'SHARE = YES' to allows both this RPG program and the CLP
+      *              UT80046A to write to the same print file.
+      *
+      *              Since the 'CLPRINTA' command logic in UT80046A is not being used
+      *              to print headings, count lines or page break, these functions are
+      *              controlled from this RPG program by counting the lines.
+      *
+      *              This program page-breaks when the line count reaches 62 lines
+      *              because this listing is designed to run on paper that is 68 lines
+      *              long.  Therefore, if the users generate this report on various
+      *              laser printers with different page lengths, the page breaks may
+      *              be goofy.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+      *
+     Fhsp018    if   e           k disk
+      *  Farm site
+      *
+      *
+     Fhsl086a   uf a e           k disk    rename(pwrec:pwreca) prefix(p1)
+      *  BGF weekly wean projections
+      *
+      *
+     Fhsp284    uf   e           k disk
+      *  Safedata/WEB: BGF weekly wean projections editing
+      *
+      *
+     Fhsp986    o    e           k disk    rename(pwrec:pwrec986) prefix(p2)
+      *  Safedata/WEB: BGF weekly wean projections history
+      *
+      *
+     Fqprint    o    f  132        printer oflind(*inof)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D title           c                   'BGF WEEKLY WEAN PROJECTION SAFEDATA-
+     D                                     /WEB ERROR LISTING'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      *
+      * Standard fields
+      *
+     d dash            s            132    inz(*all'-')
+     d rtime           s              6  0
+     D maxmsg          s              2  0  inz(20)
+     D msgfl           s             10
+      *
+      *
+      * Control fields
+      *
+     D errorfl         s              1    inz('N')
+     D yrwkerrfl       s              1    inz('N')
+     D first           s              1    inz('Y')
+     D x               s              1  0
+      *
+      *
+      * Work fields for counting lines
+      *
+     d wkovfl          s              3  0 inz(62)
+     d wkcurl          s              3  0
+     d wkdifl          s              3  0
+      *
+      *
+      * Save fields for populating database records
+      *
+     d svfsbo          s                   like(fsfsbo)
+      *
+     d svrpwedt        s                   like(pwrpwedt)
+      *
+     d svpwwedt1       s                   like(pwrpwedt)
+     d svpwcdwk1       s                   like(pwrpcdwk)
+     d svpwcdyr1       s                   like(pwrpcdyr)
+      *
+     d svpwwedt2       s                   like(pwrpwedt)
+     d svpwcdwk2       s                   like(pwrpcdwk)
+     d svpwcdyr2       s                   like(pwrpcdyr)
+      *
+      *
+      *
+      * Work fields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+     D wkcrdt          s              8  0
+      *
+      *
+      * Parm fields
+      *
+     D xxalphfscd      s              5a
+     D xxcdyr          s                   like(pwrpcdyr)
+     D xxcdwk          s                   like(pwrpcdwk)
+     D xxwbdt          s                   like(pwrpwedt)
+     D xxwedt          s                   like(pwrpwedt)
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Print the headings the first time through
+      *
+     C                   exsr      $prthdr
+      *
+      * Process each record in the Editing file.
+      *
+     C     *loval        setll     hsp284
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsp284                                 90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   move      no            first
+      * Edit record
+     C                   exsr      $edit
+      *
+      * Always write the editing record to the history file
+      *
+     C                   exsr      $write986
+      *
+      * If there were no errors, write the record to the HPS database;
+      * otherwise, print the record followed by any error messages
+      *
+     C                   select
+     C                   when      error = 0
+     C                   exsr      $write086
+     C                   other
+     C                   exsr      $prtrec
+     C                   exsr      $prtmsg
+     C                   endsl
+      *
+      * Always delete the record from the editing file.
+      *
+     C                   delete    pwrec
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *---------------------------------------------------------------
+      * EOF processing
+      *---------------------------------------------------------------
+      *
+     C                   select
+     C                   when      first = yes
+     C                   except    nodata
+      *
+     C                   when      errorfl = no
+     C                   except    noerror
+     C                   endsl
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Edit record
+      *---------------------------------------------------------------
+      *
+     C     $edit         begsr
+      *
+      * Initialize fields used to hold calculated/retrieved values that will
+      * be used in writing the HPS database record.
+      *
+     C                   move      *blank        svfsbo
+      *
+     C                   z-add     0             svrpwedt
+      *
+     C                   z-add     0             svpwwedt1
+     C                   z-add     0             svpwcdyr1
+     C                   z-add     0             svpwcdwk1
+      *
+     C                   z-add     0             svpwwedt2
+     C                   z-add     0             svpwcdyr2
+     C                   z-add     0             svpwcdwk2
+      *
+      * Validate:
+      *  1) farm site
+      *  2) report calendar year/week
+      *  3) negative values
+      *
+     C                   exsr      $fscd
+     C                   exsr      $rpcdyrwk
+     C                   exsr      $negative
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Validate farm site
+      *-----------------------------------------------------------------------------------------
+      *
+      * Validations:
+      *    1) required
+      *    2) must be valid in the Farm Site master
+      *    3) must be a BGF farm
+      *
+     C     $fscd         begsr
+      *
+     C                   select
+     C                   when      pwfscd = 0
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00837'     mgid(e)
+     C                   endif
+      *
+     C                   when      pwfscd < 0
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00838'     mgid(e)
+     C                   endif
+     C                   other
+      *
+     C     pwfscd        chain     hsp018                             92
+     C                   if        *in92 = *on                                  If bad farm
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00131'     mgid(e)
+     C                   clear                   mgw
+     C                   move      pwfscd        xxalphfscd
+     C                   movea     xxalphfscd    mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   else
+      *
+     C                   move      fsfsbo        svfsbo
+      *
+      *
+      * Must be a BGF farm
+      *
+     C                   if        fsppcd <> 'BGF'                              If not BGF
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09137'     mgid(e)
+     C                   endif
+     C                   endif                                                  If not BGF
+      *
+      * Must be a Active farm
+      *
+     C                   if        fsaist = 'I'                                 If inactive
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS04760'     mgid(e)
+     C                   clear                   mgw
+     C                   move      fsfscd        xxalphfscd
+     C                   movea     xxalphfscd    mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If inactive
+      *
+     C                   endif                                                  If bad farm
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Check numbers for negative values. No number can be negative.
+      *---------------------------------------------------------------
+      *
+     C     $negative     begsr
+      *
+     C                   if        pwsupwhd < 0 or                              If anything neg
+     C                             pwmopwhd < 0 or
+     C                             pwtupwhd < 0 or
+     C                             pwwepwhd < 0 or
+     C                             pwthpwhd < 0 or
+     C                             pwfrpwhd < 0 or
+     C                             pwsapwhd < 0 or
+     C                             pwpwsohd1 < 0 or
+     C                             pwsocuhd1 < 0 or
+     C                             pwbocuhd1 < 0 or
+     C                             pwtopwhd2 < 0 or
+     C                             pwpwsohd2 < 0
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09167'     mgid(e)
+     C                   endif
+      *
+     C                   endif                                                  If anything neg
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate report calendar year and week
+      *---------------------------------------------------------------
+      *
+     C     $rpcdyrwk     begsr
+      *
+     C                   move      no            yrwkerrfl
+      *  Week
+     C                   select
+     C                   when      pwrpcdwk = 0
+     C                   move      yes           yrwkerrfl
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+      *
+     C                   when      pwrpcdwk < 0
+     C                   move      yes           yrwkerrfl
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+     C                   endsl
+      *
+      * Year
+     C                   select
+     C                   when      pwrpcdyr = 0
+     C                   move      yes           yrwkerrfl
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+      *
+     C                   when      pwrpcdyr < 0
+     C                   move      yes           yrwkerrfl
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+     C                   endsl
+      *
+      * If year/week are OK, get date stuff for:
+      *   Report week
+      *   Week 1 out
+      *   Week 2 out
+      *
+     C                   if        yrwkerrfl = no                               If year/week OK
+     C                   exsr      $wedt
+      *
+     C                   if        svrpwedt = 0
+     C                   move      yes           yrwkerrfl
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09222'
+     C                   endif
+     C                   else
+     C                   exsr      $week1
+     C                   exsr      $week2
+     C                   endif
+     C                   endif                                                  If year/week OK
+      *
+      * If farm/year/week are valid, check that no Weekly Wean Projection
+      * record already exists for this date.
+      *
+     C                   if        yrwkerrfl = no                               If all good
+     C     key01         chain(n)  hsl086a                            92
+     C                   if        *in92 = *off                                 If already exists
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS01214'
+     C                   endif
+     C                   endif                                                  If already exists
+     C                   endif                                                  If all good
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Retrieve week-ending date associated with year/week
+      *----------------------------------------------------------------
+      *
+     C     $wedt         begsr
+      *
+     C                   call      'HP8016'
+     C                   parm      pwrpcdyr      xxcdyr
+     C                   parm      pwrpcdwk      xxcdwk
+     C                   parm      0             xxwbdt
+     C     svrpwedt      parm      0             xxwedt
+      *
+     C     *iso          test(d)                 svrpwedt               92
+     C                   if        *in92 = *on                                  If bad date
+     C                   z-add     0             svrpwedt
+     C                   endif                                                  If bad date
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Get Week 1 date
+      *----------------------------------------------------------------
+      *
+     C     $week1        begsr
+      *
+      *
+      * Add 7 days to the Report Week-ending date.
+      *
+     C                   movel     svrpwedt      wkisodate
+     C                   adddur    7:*days       wkisodate
+     C                   move      wkisodate     svpwwedt1
+      *
+      *
+      * Retrieve the Calendar Year/Week that go with this date.
+      *
+     C                   z-add     svpwwedt1     xxwedt
+     C                   exsr      $rtvyrwk
+      *
+      * Issue an error message if the OMS Calendar file did not have a
+      * record for the date.
+      *
+     C                   if        xxcdwk <> 0 and xxcdyr <> 0                  If good
+     C                   z-add     xxcdwk        svpwcdwk1
+     C                   z-add     xxcdyr        svpwcdyr1
+     C                   else
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09223'
+     C                   endif
+     C                   endif                                                  If good
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Get Week 2 date
+      *----------------------------------------------------------------
+      *
+     C     $week2        begsr
+      *
+      * Add 14 days to the Report Week-ending date.
+      *
+     C                   movel     svrpwedt      wkisodate
+     C                   adddur    14:*days      wkisodate
+     C                   move      wkisodate     svpwwedt2
+      *
+      * Retrieve the Calendar Year/Week that go with this date.
+      *
+     C                   z-add     svpwwedt2     xxwedt
+     C                   exsr      $rtvyrwk
+      *
+      *
+      * Issue an error message if the OMS Calendar file did not have a
+      * record for the date.
+      *
+     C                   if        xxcdwk <> 0 and xxcdyr <> 0                  If good
+     C                   z-add     xxcdwk        svpwcdwk2
+     C                   z-add     xxcdyr        svpwcdyr2
+     C                   else
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09224'
+     C                   endif
+      *
+     C                   endif                                                  If good
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------
+      * Retrieve from OMS Calendar file the Calendar Year/Week for a Date
+      *-------------------------------------------------------------------
+      *
+     C     $rtvyrwk      begsr
+      *
+     C                   call      'HP8010'
+     C                   parm                    xxwedt
+     C                   parm      0             xxcdyr
+     C                   parm      0             xxcdwk
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write records to the HPS database file
+      *---------------------------------------------------------------
+      *
+     C     $write086     begsr
+      *
+      * Delete the 2 records that may already exist for this farm/week-ending date.
+      * Then, write new records.
+      *
+     C     key01         setll     hsl086a
+      *
+     C                   do        2             x
+     C     key01         reade     hsl086a                                92
+     C                   if        *in92 = *off
+     C                   delete    pwrec
+     C                   endif
+     C                   enddo
+      *
+      * Populate database fields
+      *
+     C                   do        2             x
+     C                   exsr      $moveflds
+     C                   write     pwreca
+     C                   enddo
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Populate record fields with screen values
+      *---------------------------------------------------------------
+      *
+     C     $moveflds     begsr
+      *
+      * For both the first and second record.
+      *
+     C                   clear                   pwreca
+     C                   z-add     pwfscd        p1pwfscd
+     C                   z-add     pwrpcdyr      p1pwrpcdyr
+     C                   z-add     pwrpcdwk      p1pwrpcdwk
+     C                   z-add     svrpwedt      p1pwrpwedt
+     C                   z-add     wkcrdt        p1pwcrdt
+      *
+     C                   move      svfsbo        p1pwfsbo
+      *
+     C                   select
+     C                   when      pwdscd = 'S'
+     C                   eval      p1pwcrusr = 'Safedata'
+     C                   z-add     pwsdino       p1pwsdino
+      *
+     C                   when      pwdscd = 'W'
+     C                   eval      p1pwcrusr = 'WEB'
+     C                   other
+      *
+     C                   eval      p1pwcrusr = 'Unknown'
+     C                   endsl
+      *
+      * First record--Week 1
+      *
+     C                   select
+     C                   when      x = 1
+      *
+     C                   z-add     svpwwedt1     p1pwpwwedt
+     C                   z-add     svpwcdyr1     p1pwpwcdyr
+     C                   z-add     svpwcdwk1     p1pwpwcdwk
+      * Sunday
+     C                   z-add     pwsupwhd      p1pwsupwhd
+     C                   z-add     pwsupwhd      p1pwtopwhd
+      * Monday
+     C                   z-add     pwmopwhd      p1pwmopwhd
+     C                   add       pwmopwhd      p1pwtopwhd
+      * Tuesday
+     C                   z-add     pwtupwhd      p1pwtupwhd
+     C                   add       pwtupwhd      p1pwtopwhd
+      * Wednesday
+     C                   z-add     pwwepwhd      p1pwwepwhd
+     C                   add       pwwepwhd      p1pwtopwhd
+      * Thursday
+     C                   z-add     pwthpwhd      p1pwthpwhd
+     C                   add       pwthpwhd      p1pwtopwhd
+      * Friday
+     C                   z-add     pwfrpwhd      p1pwfrpwhd
+     C                   add       pwfrpwhd      p1pwtopwhd
+      * Saturday
+     C                   z-add     pwsapwhd      p1pwsapwhd
+     C                   add       pwsapwhd      p1pwtopwhd
+      * Weaned sows
+     C                   z-add     pwpwsohd1     p1pwpwsohd
+      * Sow culls
+     C                   z-add     pwsocuhd1     p1pwsocuhd
+      * Boar culls
+     C                   z-add     pwbocuhd1     p1pwbocuhd
+      *
+      *
+      * Second record--Week 2
+      *
+     C                   when      x = 2
+      *
+     C                   z-add     svpwwedt2     p1pwpwwedt
+     C                   z-add     svpwcdyr2     p1pwpwcdyr
+     C                   z-add     svpwcdwk2     p1pwpwcdwk
+      *
+      * Total piglets weaned
+     C                   z-add     pwtopwhd2     p1pwtopwhd
+      * Weaned sows
+     C                   z-add     pwpwsohd2     p1pwpwsohd
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write the edit record to the history file
+      *---------------------------------------------------------------
+      *
+     C     $write986     begsr
+      *
+     C                   if        error > 0
+     C                   move      yes           p2pwerfl
+     C                   else
+     C                   move      no            p2pwerfl
+     C                   endif
+      *
+      * Populate database fields
+      *
+     C                   z-add     wkcrdt        p2pwcrdt
+      *
+     C                   move      pwdscd        p2pwdscd
+     C                   z-add     pwsdino       p2pwsdino
+      *
+     C                   z-add     pwfscd        p2pwfscd
+     C                   z-add     pwrpcdwk      p2pwrpcdwk
+     C                   z-add     pwrpcdyr      p2pwrpcdyr
+      *
+      * Week 1
+     C                   z-add     pwsupwhd      p2pwsupwhd
+     C                   z-add     pwmopwhd      p2pwmopwhd
+     C                   z-add     pwtupwhd      p2pwtupwhd
+     C                   z-add     pwwepwhd      p2pwwepwhd
+     C                   z-add     pwthpwhd      p2pwthpwhd
+     C                   z-add     pwfrpwhd      p2pwfrpwhd
+     C                   z-add     pwsapwhd      p2pwsapwhd
+     C                   z-add     pwpwsohd1     p2pwpwsohd1
+     C                   z-add     pwsocuhd1     p2pwsocuhd1
+     C                   z-add     pwbocuhd1     p2pwbocuhd1
+      * Week 2
+     C                   z-add     pwtopwhd2     p2pwtopwhd2
+     C                   z-add     pwpwsohd2     p2pwpwsohd2
+      *
+     C                   write     pwrec986
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print report headings
+      *---------------------------------------------------------------
+      *
+     C     $prthdr       begsr
+      *
+     C                   z-add     0             wkcurl
+     C                   except    h1hdr
+     C                   add       8             wkcurl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print record
+      *---------------------------------------------------------------
+      *
+     C     $prtrec       begsr
+      *
+     C                   move      yes           errorfl
+      *
+     C                   if        wkcurl > wkovfl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Program UT80046A does not print headings or check for page breaks.
+      * Before calling  UT80046A, determine if all 8 lines required for the
+      * record will fit on the current page. Calculate the remaining lines
+      * on the page using the overflow line and the current line.
+      *
+     C     wkovfl        sub       wkcurl        wkdifl
+      *
+      * If you have more messages than will fit on the page, then page break
+      * and print headings.
+      *
+     C                   if        wkdifl < 8
+     C                   exsr      $prthdr
+     C                   endif
+      *
+     C                   except    l1dtl
+     C                   add       1             wkcurl
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------
+      * Print error messages
+      *-------------------------------------------------------------------
+      *
+     C     $prtmsg       begsr
+      *
+     C                   if        error <> 0
+     C                   exsr      $wrmsg
+     C                   z-add     0             error
+     C                   exsr      $clmsg
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+      * If overflow, print headings.
+      *
+     C                   if        wkcurl > wkovfl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Program UT80046A does not print headings or check for page breaks.
+      * Before calling  UT80046A, determine if all the error messages can be
+      * printed on the current page.  Calculate the remaining print lines
+      * on the page using the overflow line and the current line.
+      *
+     C     wkovfl        sub       wkcurl        wkdifl
+      *
+      * If you have more messages than will fit on the page, then page break
+      * and print headings.
+      *
+     C                   if        error > wkdifl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Increment the current line by the number of error messages you will be
+      * printing in UT80046A plus one for the space after.  This sets the current
+      * line number properly for when you return from UT80046A.
+      *
+     C     wkcurl        add       error         wkcurl
+     C                   add       1             wkcurl
+      *
+     C                   call      'UT80046A'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      msgfil        msgfl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80046A'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      msgfil        msgfl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    pwfscd
+     C                   kfld                    svrpwedt
+      *
+      * Save date for record stamp
+      *
+     C     *mdy          move      udate         wkisodate
+     C                   move      wkisodate     wkcrdt
+      *
+     C                   time                    rtime
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oqprint    e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           78 'HOG PRODUCTION SYSTEM'
+     O                                          122 'DATE'
+     O                       udate         y    132
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                       title               94
+     O                                          122 'TIME'
+     O                       rtime              132 '  :  :  '
+      *
+     O          e            h1hdr          2
+     O                                          122 'PAGE'
+     O                       page          z    132
+      *
+     O          e            h1hdr          1
+     O                                            5 'FARM'
+     O                                           19 '---REPORT--'
+      *
+     O          e            h1hdr          1
+     O                                            5 'SITE'
+     O                                           12 'WEEK'
+     O                                           18 'YEAR'
+      *
+     O          e            h1hdr          1
+     O                       dash               132
+      *
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       1
+     O                       pwfscd        m      6
+     O                       pwrpcdwk      z     11
+     O                       pwrpcdyr      z     18
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata      1
+     O                                           24 'There was no BGF weekly '
+     O                                           48 'wean projection data to '
+     O                                           53 'edit.'
+      *-------------------------------------------------------------
+      * There were no errors
+      *-------------------------------------------------------------
+      *
+     O          e            noerror     1
+     O                                           21 'There were no errors.'
+      /eject

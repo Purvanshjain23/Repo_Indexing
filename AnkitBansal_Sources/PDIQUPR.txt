@@ -1,0 +1,137 @@
+/*********************************************************************/
+/*     Program: PDIQUPR                                              */
+/*       Title: Retrieve & Process Lockbox Transmission File         */
+/*        Date: 02/09/98                                             */
+/* Description: - Called by PC Auto Scheduler after it retrieves     */
+/*                the lockbox file from the NationsBank bulletin bd  */
+/*              - Validates the incoming date for accuracy and       */
+/*                successful transmission.                           */
+/*              - Breaks down the different record types and writes  */
+/*                the data into its appropriate file.                */
+/*              - Create write off and charge back transations in    */
+/*                A/R lockbox files.                                 */
+/*********************************************************************/
+/* Modifications:                                                    */
+/*                                                                   */
+/*   Date     Pgmr     Description                                   */
+/* -------- ---------- --------------------------------------------  */
+/* 02/09/99 ISBLAWS    Copied from the poultry Lock Box Program      */
+/*                     ARS204CL.                                     */
+/*                                                                   */
+/* 09/14/00 ISPPATE    REMOVED SETTING OF THE LIBRARY LIST.  THIS    */
+/*                     WILL BE CALLED FROM A PROMPT NOW.  ANOTHER    */
+/*                     CL HAS BEEN CREATED FOR VALIDATING THE        */
+/*                     UPLOAD FILE.  ALSO REMOVED THE PUSH LIBL AND  */
+/*                     POP LIBL COMMANDS.                            */
+/*                     ADDED DEPOSIT DATE AS A PARM AND ADDED        */
+/*                     PROCESSING BY DATE.                           */
+/*                                                                   */
+/* 08/15/02 ISRCENT    USE SNDPGRMSG A LIEU SNDDST                */
+/*                                                                   */
+/*********************************************************************/
+             PGM        PARM(&DATE)
+
+/*-------------------------------------------------------------------*/
+/* Declare Variables                                                 */
+/*-------------------------------------------------------------------*/
+
+/* INPUT */
+             DCL  VAR(&DATE) TYPE(*DEC) LEN(7 0)
+
+/* WORKING VARIABLES */
+             DCL  VAR(&SUCCESS) TYPE(*CHAR) LEN(1)
+             DCL  VAR(&RETURN)  TYPE(*CHAR) LEN(7)
+             DCL  VAR(&COMPANY) TYPE(*CHAR) LEN(3)
+             DCL  VAR(&LCKBOX)  TYPE(*CHAR) LEN(7)
+             DCL  VAR(&DDATE)   TYPE(*CHAR) LEN(7)
+             DCL  VAR(&CYYMMDD) TYPE(*CHAR) LEN(7)
+             DCL  VAR(&MBR)     TYPE(*CHAR) LEN(10)
+             DCL  VAR(&MSG)     TYPE(*CHAR) LEN(132)
+
+/*-------------------------------------------------------------------*/
+/* INITIALIZATION                                                    */
+/*-------------------------------------------------------------------*/
+             CHGVAR VAR(&SUCCESS) VALUE('N')
+
+             CHGVAR VAR(&CYYMMDD) VALUE(&DATE)
+             CHGVAR VAR(&MBR)  VALUE('Z' *CAT &CYYMMDD)
+             CPYF       FROMFILE(NBLCKBOX) TOFILE(NBLCKBOX) +
+                          FROMMBR(&MBR) TOMBR(*FIRST) MBROPT(*REPLACE)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CPYF1))
+
+             CPYF FROMFILE(NBLBTODAY) TOFILE(NBLBYESTER) +
+                  MBROPT(*REPLACE)
+             CPYF FROMFILE(NBLCKBOX) TOFILE(NBLBTODAY) +
+                  MBROPT(*REPLACE)
+
+/*-------------------------------------------------------------------*/
+/* MAIN PROCESSING                                                   */
+/*-------------------------------------------------------------------*/
+/*------------------------------------------*/
+/* Distribute the Transmission file records */
+/* into the appropriate Lock Box work file. */
+/*------------------------------------------*/
+
+             CALL PGM(PDIRUPR) +
+                  PARM(&SUCCESS +
+                       &COMPANY +
+                       &LCKBOX +
+                       &DDATE)
+
+             IF COND(&SUCCESS *EQ 'Y') THEN(DO)
+
+                /*---------------------------------------------*/
+                /* Process deposit and create system generated */
+                /* write offs and charge backs.                */
+                /*---------------------------------------------*/
+                CALL PGM(PDI9XFR) +
+                     PARM(&RETURN +
+                          &COMPANY +
+                          &LCKBOX +
+                          &DDATE)
+
+                /*-----------------------------------*/
+                /* Execute purge and delete process. */
+                /*-----------------------------------*/
+                CALL PGM(PDJLXFR) PARM('')
+
+/*              SNDDST TYPE(*MSG) TOUSRID((PRKLCKBX BIGBYTE)) +
+                       DSTD('Pork A/R Lockbox Trans. Completion') +
+                       MSG('The NationsBank lockbox transmission +
+                            has completed, you may now run a proof +
+                            list.')                               */
+
+             SNDPGRMSG  TOPGR(PRKLCKBX) MSG('The NationsBank lockbox +
+                          transmission has completed, you may now +
+                          run a proof list.') CONFMSG(*NO)
+                RMVM       FILE(NBLCKBOX) MBR(&MBR)
+             ENDDO
+             ELSE CMD(DO)
+/*           SNDDST     TYPE(*MSG) TOUSRID((PRKERRAR BIGBYTE)) +
+                          DSTD('Pork A/R Lockbox Trans. Error') +
+                          MSG('The NationsBank lockbox transmission +
+                          has failed--check error report.')      */
+             SNDPGRMSG  TOPGR(PRKERRAR) MSG('The NationsBank lockbox +
+                          transmission has failed--check error +
+                          report.') CONFMSG(*NO)
+             ENDDO
+
+             GOTO       CMDLBL(END)
+
+/*-------------------------------------------------------------------*/
+/* ERROR PROCESSING                                                  */
+/*-------------------------------------------------------------------*/
+CPYF1:
+             CHGVAR     VAR(&MSG) VALUE('Nations Bank Lock Box:  +
+                          Deposit Date ' *CAT &CYYMMDD *BCAT 'not +
+                          found.')
+/*           SNDDST     TYPE(*MSG) TOUSRID((PRKLCKBX BIGBYTE)) +
+                          DSTD('Pork Error:  AR') MSG(&MSG)      */
+             SNDPGRMSG  TOPGR(PRKLCKBX) MSG(&MSG) CONFMSG(*NO)
+             GOTO       CMDLBL(END)
+
+/*-------------------------------------------------------------------*/
+/* END PROGRAM                                                       */
+/*-------------------------------------------------------------------*/
+ END:
+             ENDPGM

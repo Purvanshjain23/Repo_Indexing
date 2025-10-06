@@ -1,0 +1,553 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  HPBLDBGF                                      */
+/*  PROGRAM NAME:    BUILD BGF DATAMART FILES AND SEND TO NIBBLE   */
+/*  PROGRAMMER:      LEANNE FEDOR                                  */
+/*  CREATE DATE:     06/12/00                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS SUBMITTED NIGHTLY FROM THE JOB     */
+/*                   SCHEDULER ON BIGBYTE.                         */
+/*                                                                 */
+/*                                                                 */
+/*  THE RUN TIME ON THE JOB GOT TO BE TOO LONG. WE CREATED THE     */
+/*  DATA AREA 'DABGF' TO CONTROL/DEFINE "CURRENT" AND HISTORY      */
+/*  PROCESSING                                                     */
+/*                                                                 */
+/*  FOR THE 'WEEKLY' PRODUCTION, THE DATA AREA HOLDS BEGINNING/    */
+/*  ENDING DATES FOR THE FIRST WEEK TO BE PROCESSED FOR A HISTORY  */
+/*  RUN.                                                           */
+/*                                                                 */
+/*  FOR THE 'DAILY' PRODUCTION, THE DATA AREA HOLDS THE BEGINNING  */
+/*  YEAR TO START THE HISTORY PROCESSING.                          */
+/*                                                                 */
+/*  THE 'CURRENT' PROCESSING USES THE SAME BEGINNING WEEK FOR BOTH */
+/*  THE 'WEEKLY' AND THE 'DAILY' DATA.                             */
+/*                                                                 */
+/*******************************************************************/
+/* DATE                                                            */
+/* 08/22/02  BARB GUTIERREZ                                        */
+/*           NO LONGER SENDING RECORDS TO NIBBLE.  WE'LL RUN ON    */
+/*           BIGBYTE.                                              */
+/*                                                                 */
+/* 12/26/02  LEANNE FEDOR                                          */
+/*           WE WENT TO HISTORY/CURRENT LOGIC...LIKE THE FINISHER  */
+/*           BUILD. SO, I ADDED:                                   */
+/*            1) THE NEW HISTORY/CURRENT PARM AS AN INCOMING PARM  */
+/*            2) PROGRAM TO CALCULATE CURRENT DATES AND UPDATE     */
+/*               THE NEW DATA AREA                                 */
+/*            3) PROGRAMS TO DELETE OUT THE 'CURRENT' RECORDS FOR  */
+/*               A PARTIAL BUILD                                   */
+/*            4) OPEN QUERIES TO SELECT HISTORY/CURRENT RECORDS    */
+/*               FROM THE HPS FILES.                               */
+/*                                                                 */
+/* 01/30/03  LEANNE FEDOR                                          */
+/*           ADDED NEW FILE: FARM BUILDINGS.                       */
+/*                                                                 */
+/* 10/11/04  LEANNE FEDOR                                          */
+/*           ADDED LOGIC TO RESET/CLEAR THE NEW 'SUBMITTED FLAG'   */
+/*           IN THE DATA AREA. THIS FLAG WILL KEEP THE USERS FROM  */
+/*           STEPPING ON THEMSELVES WHEN THEY SUBMIT THE FUNCTION  */
+/*           FROM THE NEW SUBMISSION SCREENS. THE FLAG LOGIC WAS   */
+/*           NOT ADDED TO THE JOB SCHEDULER SUBMISSION.            */
+/*                                                                 */
+/*                                                                 */
+/* 04/12/06  LEANNE FEDOR                                          */
+/*           ADDED A COPY OF HSP098-SIRE LINES TO PRKDMFLIB.       */
+/*                                                                 */
+/* 04/24/06  LEANNE FEDOR                                          */
+/*           REMOVED THE COPY OF HSP098-SIRE LINES.                */
+/*                                                                 */
+/* 10/13/08  LEANNE RAMSEY                                         */
+/*           WE ARE ANTICPATING THAT WE WILL BEGIN TO "PURGE" HPS. */
+/*           THEREFORE, WE WILL NO LONGER WANT TO DO "HISTORY"     */
+/*           RUNS SINCE WE COULD BE DELETING DATAMART DATA THAT    */
+/*           WE CANNOT REBUILD---HAVING PURGED HPS.                */
+/*           BUT, I HATE TO REMOVE ALL THE "HISTORY" LOGIC.        */
+/*           SO, WE WILL, FOR NOW, SET THE INCOMING "PROC" PARM    */
+/*           TO BLANK TO FORCE A "CURRENT" RUN.                    */
+/*           WE WILL REMOVE THE "SEND" PARM--IT IS OBSOLETE.       */
+
+/*           SEND PARM:   1) Y=YES, SEND TO NIBBLE FOR COGNOS      */
+/*                        2) N=NO, COPY TO PRKDMFLIB FOR COGNOS    */
+/*                        3) BLANK= BUILD ONLY; DON'T SEND OR COPY */
+/*                                                                 */
+/* 08/31/09  ALICE BROWNFIELD                                      */
+/*           E00472 - Data Mart Build changes for DR Test          */
+/*           Change CPYF from PRKFLIB to PRKDMFLIB TO be CRTDUPOBJ */
+/*           ----  this works better for MIMIX                     */
+/*                                                                 */
+/* 04/28/10  LeAnne Ramsey                                         */
+/*           We now allocate/deallocate the files that are         */
+/*           deleted/created in PRKDMFLIB.                         */
+/*           Also, we now use ESEND instead of MPLUS/MPLUS.        */
+/*           Note: Leave the MONMSG on the CRTDUPOBJ of the LFs    */
+/*           monitoring for CPF0000 without setting the error flag.*/
+/*                                                                 */
+/* 01/03/13  LeAnne Ramsey                                         */
+/*           Stephanie Allen wanted Sami Wilson added to the email */
+/*           distribution list for the build completion. I cloned  */
+/*           distribution list 'prk cognos' making a new list      */
+/*           called 'prk cognos BGF'. I put Sami on that list and  */
+/*           changed the logic in this CL to use the new 'BGF' list*/
+/*                                                                 */
+/* 07/01/20  Brad Baden   WHD# 66046  TFS# 16673                   */
+/*           Send WRKOBJLCK report to user when any ALCOBJ fails.  */
+/*                                                                 */
+/*******************************************************************/
+
+/*  THE PROC PARM WILL BE     1) BLANK FOR "CURRENT" PROCESSING, OR    */
+/*                            2) 'H' FOR "HISTORY" PROCESSING          */
+/*  NOTE: AS OF DECEMBER 2008, WE WILL OVERLAY THE INCOMING VALUE      */
+/*  WITH A BLANK TO FORCE A "CURRENT" RUN.                             */
+
+
+             PGM        PARM(&PROCFL)
+
+             DCL        VAR(&PROCFL)     TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&HSTWKBEGDT) TYPE(*DEC) LEN(8)
+             DCL        VAR(&HSTDYBEGYR) TYPE(*DEC) LEN(4)
+             DCL        VAR(&CURBEGDT)   TYPE(*DEC) LEN(8)
+
+             DCL        VAR(&QDATA)    TYPE(*CHAR) LEN(20)
+             DCL        VAR(&ERR)      TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&USER)     TYPE(*CHAR) LEN(10)
+             DCL        VAR(&EMAIL)    TYPE(*CHAR) LEN(42)
+             DCL        VAR(&TSTPRDFL) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(64) +
+                          VALUE('HPBLDBGF-Datamart BGF: Build +
+                          Files....DIST LIST: prk cognos BGF')
+
+/* OVERRIDE INCOMING PARM TO BE "CURRENT" PROCESSING                 */
+
+             CHGVAR     VAR(&PROCFL) VALUE(' ')
+
+/*------------------------------------------------------------------*/
+/* Set up the Email Recipient (either Test or Production)           */
+/*------------------------------------------------------------------*/
+
+/* Retrieve the Data Area that lets us know whether we are in TEST  */
+/* or PRODUCTION. (Always default to the 'TEST' Distribution List.) */
+
+             CHGVAR     VAR(&EMAIL) VALUE('prk cognos test')
+             RTVDTAARA  DTAARA(DATSTPRD (1 1)) RTNVAR(&TSTPRDFL)
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('prk cognos BGF'))
+
+/*------------------------------------------------------------------*/
+/* Retrieve the User for sending the AS400 messages                 */
+/*------------------------------------------------------------------*/
+
+             RTVJOBA    USER(&USER)
+
+/*-----------------------------------------------------------------*/
+/* Allocate all files that will be deleted/recreated in PRKDMFLIB  */
+/*-----------------------------------------------------------------*/
+
+/* Farm Site                                                       */
+             ALCOBJ     OBJ((PRKDMFLIB/HPPB018 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000) EXEC(DO)
+             CHGVAR     VAR(&ERR) VALUE('Y')
+
+             /* WHD66046 - Send WRKOBJLCK report to &EMAIL           */
+             WRKOBJLCK  OBJ(PRKDMFLIB/HPPB018) OBJTYPE(*FILE) +
+                          OUTPUT(*PRINT)
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) MSG('No +
+                          Datamart files were rebuilt because the +
+                          program was unable to allocate file +
+                          HPPB018. Check the physical (and logical +
+                          files over it) to see who has the file(s) +
+                          locked. The user has been sent an AS400 +
+                          message to resubmit the job later. See +
+                          attached report.') IMPORTANCE(*HIGH) +
+                          ATTLIST((* *DFT *N QPDSPOLK * *LAST 1))
+
+             DLTSPLF    FILE(QPDSPOLK)
+
+             SNDMSG     MSG('***** Your build of BGF Data for COGNOS +
+                          did not run because file HPPB018-Farm +
+                          Sites was in use. No one can be using +
+                          this file during the build. Resubmit your +
+                          build later. *****') TOUSR(&USER)
+                        ENDDO
+
+/* Farm Buildings                                                         */
+             ALCOBJ     OBJ((PRKDMFLIB/HPPB019 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000) EXEC(DO)
+             CHGVAR     VAR(&ERR) VALUE('Y')
+
+             /* WHD66046 - Send WRKOBJLCK report to &EMAIL           */
+             WRKOBJLCK  OBJ(PRKDMFLIB/HPPB019) OBJTYPE(*FILE) +
+                          OUTPUT(*PRINT)
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) MSG('No +
+                          Datamart files were rebuilt because the +
+                          program was unable to allocate file +
+                          HPPB019. Check the physical (and logical +
+                          files over it) to see who has the file(s) +
+                          locked. The user has been sent an AS400 +
+                          message to resubmit the job later. See +
+                          attached report.') IMPORTANCE(*HIGH) +
+                          ATTLIST((* *DFT *N QPDSPOLK * *LAST 1))
+
+             DLTSPLF    FILE(QPDSPOLK)
+
+             SNDMSG     MSG('***** Your build of BGF Data for COGNOS +
+                          did not run because file HPPB019-Farm +
+                          Buildings was in use. No one can be using +
+                          this file during the build. Resubmit your +
+                          build later. *****') TOUSR(&USER)
+                        ENDDO
+
+/* Daily Production                                                           */
+             ALCOBJ     OBJ((PRKDMFLIB/HPPB082 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000) EXEC(DO)
+             CHGVAR     VAR(&ERR) VALUE('Y')
+
+             /* WHD66046 - Send WRKOBJLCK report to &EMAIL           */
+             WRKOBJLCK  OBJ(PRKDMFLIB/HPPB082) OBJTYPE(*FILE) +
+                          OUTPUT(*PRINT)
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) MSG('No +
+                          Datamart files were rebuilt because the +
+                          program was unable to allocate file +
+                          HPPB082. Check the physical (and logical +
+                          files over it) to see who has the file(s) +
+                          locked. The user has been sent an AS400 +
+                          message to resubmit the job later.') +
+                          IMPORTANCE(*HIGH) +
+                          ATTLIST((* *DFT *N QPDSPOLK * *LAST 1))
+
+             DLTSPLF    FILE(QPDSPOLK)
+
+             SNDMSG     MSG('***** Your build of BGF Data for COGNOS +
+                          did not run because file HPPB082-Daily +
+                          Production was in use. No one can be using +
+                          this file during the build. Resubmit your +
+                          build later. *****') TOUSR(&USER)
+                        ENDDO
+
+/* Weekly Production                                                         */
+             ALCOBJ     OBJ((PRKDMFLIB/HPPB092 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000) EXEC(DO)
+             CHGVAR     VAR(&ERR) VALUE('Y')
+
+             /* WHD66046 - Send WRKOBJLCK report to &EMAIL           */
+             WRKOBJLCK  OBJ(PRKDMFLIB/HPPB092) OBJTYPE(*FILE) +
+                          OUTPUT(*PRINT)
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) MSG('No +
+                          Datamart files were rebuilt because the +
+                          program was unable to allocate file +
+                          HPPB092. Check the physical (and logical +
+                          files over it) to see who has the file(s) +
+                          locked. The user has been sent an AS400 +
+                          message to resubmit the job later. See +
+                          attached report.') IMPORTANCE(*HIGH) +
+                          ATTLIST((* *DFT *N QPDSPOLK * *LAST 1))
+
+             DLTSPLF    FILE(QPDSPOLK)
+
+             SNDMSG     MSG('***** Your build of BGF Data for COGNOS +
+                          did not run because file HPPB092-Weekly +
+                          Production was in use. No one can be using +
+                          this file during the build. Resubmit your +
+                          build later. *****') TOUSR(&USER)
+                        ENDDO
+
+/* Wean Pig Projections                                                     */
+             ALCOBJ     OBJ((PRKDMFLIB/HPPB192 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000) EXEC(DO)
+             CHGVAR     VAR(&ERR) VALUE('Y')
+
+             /* WHD66046 - Send WRKOBJLCK report to &EMAIL           */
+             WRKOBJLCK  OBJ(PRKDMFLIB/HPPB192) OBJTYPE(*FILE) +
+                          OUTPUT(*PRINT)
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) MSG('No +
+                          Datamart files were rebuilt because the +
+                          program was unable to allocate file +
+                          HPPB192. Check the physical (and logical +
+                          files over it) to see who has the file(s) +
+                          locked. The user has been sent an AS400 +
+                          message to resubmit the job later. See +
+                          attached report.') IMPORTANCE(*HIGH) +
+                          ATTLIST((* *DFT *N QPDSPOLK * *LAST 1))
+
+             DLTSPLF    FILE(QPDSPOLK)
+
+             SNDMSG     MSG('***** Your build of BGF Data for COGNOS +
+                          did not run because file HPPB192-Wean Pig +
+                          Projections was in use. No one can be using +
+                          this file during the build. Resubmit your +
+                          build later. *****') TOUSR(&USER)
+                        ENDDO
+
+/* If you were unable to allocate any file, just get on out.         */
+
+             IF         COND(&ERR = 'Y') THEN(GOTO CMDLBL(EXIT))
+
+/*-------------------------------------------------------------------*/
+/* CALCULATE 'CURRENT' BEGINNING/ENDING DATES AND UPDATE DATA AREA.  */
+/* ALSO, RETRIEVE 'HISTORY' DATES FOR SUBSEQUENT PROCESSING:         */
+/*      1) BEGINNING DATE FOR WEEKLY PRODUCTION                      */
+/*      2) BEGINNING YEAR FOR DAILY PRODUCTION                       */
+/*-------------------------------------------------------------------*/
+
+             CALL       PGM(HP208) PARM(&HSTWKBEGDT &HSTDYBEGYR +
+                          &CURBEGDT)
+
+/*-----------------------------------------------------------------*/
+/* ALWAYS CLEAR THE FOLLOWING DATAMART FILES...REGARDLESS OF       */
+/* WHETHER THIS RUN IS A HISTORY RUN OR A CURRENT RUN              */
+/*-----------------------------------------------------------------*/
+
+             CLRPFM     FILE(*LIBL/HPPB018) /* Farms          */
+             CLRPFM     FILE(*LIBL/HPPB019) /* Farm Buildings */
+
+
+/*-----------------------------------------------------------------*/
+/* CLEAR THE FOLLOWING DATAMART FILES FOR A 'HISTORY' RUN OR       */
+/* DELETE RECORDS OUT OF THEM FOR A 'CURRENT' RUN.                 */
+/*-----------------------------------------------------------------*/
+
+             IF         COND(&PROCFL *EQ 'H') THEN(DO)
+             CLRPFM     FILE(*LIBL/HPPB082)          /* Daily Production  */
+             CLRPFM     FILE(*LIBL/HPPB092)          /* Weekly Production */
+             ENDDO
+
+             IF         COND(&PROCFL *EQ ' ') THEN(DO)
+             CALL       PGM(HP207)
+             ENDDO
+
+/*******************************************************************/
+/* POPULATE DATAMART FILES ON BIGBYTE                              */
+/*******************************************************************/
+
+/*-----------------------------------------------------------------*/
+/* BUILD THE FARM FILES                                            */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(HP200) /* Farm Sites  */
+             CALL       PGM(HP206) /* Farm Buildings */
+
+/*------------------------------------------------------------------*/
+/* BEFORE CALLING THE PROGRAMS TO BUILD DAILY AND WEEKLY PRODUCTION */
+/* OVERRIDE THE KEY FIELDS ON THE TRANSFER MOVEMENT HEADER FILE     */
+/* MAKING RECEIVED DATE THE KEY FIELD INSTEAD OF SHIPPED DATE       */
+/*------------------------------------------------------------------*/
+
+             OVRDBF     FILE(HSL074H) SHARE(*YES)
+             OPNQRYF    FILE((HSL074H)) KEYFLD((MHORFS) (MHRCDT)) +
+                          SEQONLY(*YES)
+
+/*-----------------------------------------------------------------*/
+/* BUILD DAILY PRODUCTION                                          */
+/*-----------------------------------------------------------------*/
+
+/* RUN A QUERY OVER THE HPS DAILY PRODUCTION FILE SELECTING OUT     */
+/* EITHER A) HISTORY OR B) CURRENT RECORDS                          */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+
+             IF         COND(&PROCFL *EQ 'H') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BDCDYR *GE')
+             CHGVAR     VAR(%SST(&QDATA 12 4)) VALUE(&HSTDYBEGYR)
+             ENDDO
+
+             IF         COND(&PROCFL *EQ ' ') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BDWEDT *GE')
+             CHGVAR     VAR(%SST(&QDATA 12 8)) VALUE(&CURBEGDT)
+             ENDDO
+
+             OVRDBF     FILE(HSL082C) SHARE(*YES)
+             OPNQRYF    FILE((HSL082C)) QRYSLT(&QDATA)
+
+             CALL       PGM(HP203)                          /* Daily */
+
+             CLOF       OPNID(HSL082C)
+             DLTOVR     FILE(HSL082C)
+
+/*-----------------------------------------------------------------*/
+/* BUILD WEEKLY PRODUCTION                                          */
+/*-----------------------------------------------------------------*/
+
+/* RUN A QUERY OVER THE HPS WEEKLY PRODUCTION FILE SELECTING OUT    */
+/* EITHER A) HISTORY OR B) CURRENT RECORDS                          */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+
+             IF         COND(&PROCFL *EQ 'H') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BPWEDT *GE')
+             CHGVAR     VAR(%SST(&QDATA 12 8)) VALUE(&HSTWKBEGDT)
+             ENDDO
+
+             IF         COND(&PROCFL *EQ ' ') THEN(DO)
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BPWEDT *GE')
+             CHGVAR     VAR(%SST(&QDATA 12 8)) VALUE(&CURBEGDT)
+             ENDDO
+
+             OVRDBF     FILE(HSL092C) SHARE(*YES)
+             OPNQRYF    FILE((HSL092C)) QRYSLT(&QDATA)
+
+             CALL       PGM(HP201)                         /* Weekly */
+
+             CLOF       OPNID(HSL092C)
+             DLTOVR     FILE(HSL092C)
+
+/*-------------------------------------------------------------------*/
+/* REMOVE OVERRIDE USED IN BOTH THE DAILY AND WEEKLY BUILD PROGRAMS  */
+/*-------------------------------------------------------------------*/
+
+             CLOF       OPNID(HSL074H)
+             DLTOVR     FILE(HSL074H)
+
+/*-----------------------------------------------------------------*/
+/* UPDATE WEEKLY PRODUCTION WITH MP2 MILK SUPPLEMATE INFO          */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(HP205) PARM(&PROCFL &HSTWKBEGDT &CURBEGDT)
+
+/*-------------------------------------------------------------------*/
+/* BUILD WEAN PIG PREDICTIONS                                        */
+/*-------------------------------------------------------------------*/
+
+             CLRPFM     FILE(*LIBL/HSP314)    /* Rolling Averages */
+             CALL       PGM(HP314)
+
+             CALL       PGM(HP300)            /* Quarterly Averages */
+
+             CALL       PGM(HP202)            /* Wean Pig Predictions*/
+
+             RGZPFM     *LIBL/HPPB192
+             MONMSG     MSGID(CPF0000)
+
+/*------------------------------------------------------------------------*/
+/* IF YOU ARE PERFORMING "CURRENT" PROCESSING, THEN REORG THE DAILY AND   */
+/* WEEKLY FILES.                                                          */
+/*------------------------------------------------------------------------*/
+
+             IF         COND(&PROCFL *EQ ' ') THEN(DO)
+
+             RGZPFM     *LIBL/HPPB082
+             MONMSG     MSGID(CPF0000)
+
+             RGZPFM     *LIBL/HPPB092
+             MONMSG     MSGID(CPF0000)
+
+             ENDDO
+
+/*-----------------------------------------------------------------*/
+/* DELETE DATAMART FILES in PRKDMFLIB                              */
+/*-----------------------------------------------------------------*/
+
+/* LOGICALS                                                        */
+             DLTF       FILE(PRKDMFLIB/HPLB018*)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(PRKDMFLIB/HPLB082*)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(PRKDMFLIB/HPLB092*)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(PRKDMFLIB/HPLB192*)
+             MONMSG     MSGID(CPF0000)
+
+/* PHYSICALS                                                         */
+             DLTF       FILE(PRKDMFLIB/HPPB018)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(PRKDMFLIB/HPPB019)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(PRKDMFLIB/HPPB082)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(PRKDMFLIB/HPPB092)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(PRKDMFLIB/HPPB192)
+             MONMSG     MSGID(CPF0000)
+
+/*********************************************************************/
+/* CREATE THE FILES INTO PRKDMFLIB FROM PRKFLIB                      */
+/*********************************************************************/
+
+             CRTDUPOBJ  OBJ(HPPB018) FROMLIB(PRKFLIB) +
+                          OBJTYPE(*FILE) TOLIB(PRKDMFLIB) DATA(*YES)
+             MONMSG     MSGID(CPF2100) EXEC(CHGVAR VAR(&ERR) +
+                          VALUE('Y'))
+
+             CRTDUPOBJ  OBJ(HPPB019) FROMLIB(PRKFLIB) OBJTYPE(*FILE) +
+                          TOLIB(PRKDMFLIB) DATA(*YES)
+             MONMSG     MSGID(CPF2100) EXEC(CHGVAR VAR(&ERR) +
+                          VALUE('Y'))
+
+             CRTDUPOBJ  OBJ(HPPB082) FROMLIB(PRKFLIB) OBJTYPE(*FILE) +
+                          TOLIB(PRKDMFLIB) DATA(*YES)
+             MONMSG     MSGID(CPF2100) EXEC(CHGVAR VAR(&ERR) +
+                          VALUE('Y'))
+
+             CRTDUPOBJ  OBJ(HPPB092) FROMLIB(PRKFLIB) OBJTYPE(*FILE) +
+                          TOLIB(PRKDMFLIB) DATA(*YES)
+             MONMSG     MSGID(CPF2100) EXEC(CHGVAR VAR(&ERR) +
+                          VALUE('Y'))
+
+             CRTDUPOBJ  OBJ(HPPB192) FROMLIB(PRKFLIB) OBJTYPE(*FILE) +
+                          TOLIB(PRKDMFLIB) DATA(*YES)
+             MONMSG     MSGID(CPF2100) EXEC(CHGVAR VAR(&ERR) +
+                          VALUE('Y'))
+
+/* LOGICALS                                                          */
+             CRTDUPOBJ  OBJ(HPLB018*) FROMLIB(PRKFLIB) +
+                          OBJTYPE(*FILE) TOLIB(PRKDMFLIB) DATA(*NO)
+             MONMSG     MSGID(CPF0000)
+
+             CRTDUPOBJ  OBJ(HPLB019*) FROMLIB(PRKFLIB) +
+                          OBJTYPE(*FILE) TOLIB(PRKDMFLIB) DATA(*NO)
+             MONMSG     MSGID(CPF0000)
+
+             CRTDUPOBJ  OBJ(HPLB082*) FROMLIB(PRKFLIB) +
+                          OBJTYPE(*FILE) TOLIB(PRKDMFLIB) DATA(*NO)
+             MONMSG     MSGID(CPF0000)
+
+             CRTDUPOBJ  OBJ(HPLB092*) FROMLIB(PRKFLIB) +
+                          OBJTYPE(*FILE) TOLIB(PRKDMFLIB) DATA(*NO)
+             MONMSG     MSGID(CPF0000)
+
+             CRTDUPOBJ  OBJ(HPLB192*) FROMLIB(PRKFLIB) +
+                          OBJTYPE(*FILE) TOLIB(PRKDMFLIB) DATA(*NO)
+             MONMSG     MSGID(CPF0000)
+
+/*---------------------------------------------------------------------*/
+/* SEND COMPLETION MESSAGE TO I.S. FOLKS                               */
+/*---------------------------------------------------------------------*/
+
+             IF         COND(&ERR = 'Y') THEN(ESNDMAIL +
+                          RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG('Some HPPBxxx or HPLBxxx files did +
+                          not get recreated in PRKDMFLIB. If the +
+                          preceeding DELETEs were successful, you +
+                          may be missing files in PRKDMFLIB. +
+                          Investigate and rerun the build.') +
+                          IMPORTANCE(*HIGH))
+
+             IF         COND(&ERR = 'N') THEN(ESNDMAIL +
+                          RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG('All BGF files were successfully +
+                          created in PRKDMFLIB; the build completed +
+                          normally.') IMPORTANCE(*HIGH))
+
+/*----------------------------------------------------------------------*/
+/* RESET THE CONTROLLING DATA AREA TO INDICATE THAT THE JOB IS FINISHED */
+/*----------------------------------------------------------------------*/
+
+ EXIT:       CHGDTAARA  DTAARA(DABGF (94 1)) VALUE(' ')
+
+             DLCOBJ     OBJ((PRKDMFLIB/HPPB018 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000)
+             DLCOBJ     OBJ((PRKDMFLIB/HPPB019 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000)
+             DLCOBJ     OBJ((PRKDMFLIB/HPPB082 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000)
+             DLCOBJ     OBJ((PRKDMFLIB/HPPB092 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000)
+             DLCOBJ     OBJ((PRKDMFLIB/HPPB192 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000)
+
+             ENDPGM

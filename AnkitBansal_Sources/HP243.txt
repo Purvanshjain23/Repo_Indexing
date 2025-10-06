@@ -1,0 +1,308 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP243 - Build Workfiles for Kill Data Copy From HPE to HPS
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     06/01/04
+      *
+      *           Back in 1999 we added logic to split HPE records into multiple records--
+      *           one for each group on the HPS movement.
+      *
+      *           This program simply pulls the 1999 logic out of HP252 and puts it in
+      *           this separate program.
+      *
+      *           This program is called from program HP453CL.
+      *
+      /EJECT
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 12/14/17  Brad Baden    E11947
+      *           Replace file pka1cpl4 with file HSL3101A. Retrieve the
+      *           Business Office from Hog Group file HSL034D record and
+      *           populate it in the Groups on Movement file HSP310.
+      * 11/02/20  ISE           H16853
+      *           Recompile only. Buy Order Number field length is increased from 5 to 7.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     F*pka1cpl4  if   e           k disk
+      *  Tattoo header
+      *  (records selected by open query)
+      *
+      *
+     Fhsl3101a  if   e           k disk
+      *  Kill Data for Business office
+      *
+      *
+     Fpkcdcpl1  if   e           k disk
+      *  Tattoo deduction/add-on
+      *
+      *
+     Fhsl034d   if   e           k disk
+      *    Hog group
+      *
+      *
+     Fhsp085    if   e           k disk
+      *   Sales movement detail
+      *
+      *
+     Fhsp310    uf a e           k disk
+      *    Workfile: Groups on Movements
+      *
+      *
+     FHSP312    UF A E           K DISK
+      *    Workfile: Tattoo Detail
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *---------------------------------------------------------------
+      * STANDALONE FIELDS
+      *---------------------------------------------------------------
+      *
+      * Control fields
+      *
+     D count           s              3  0
+     D y               s              3  0
+      *
+      * Work fields
+      *
+     D wkshhd          s                   like(sgshhd)
+     D wkpr            s              3  2
+     D wkkldt          s                   like(cdb0dt)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *****************************************************************************************
+      * MAINLINE
+      *****************************************************************************************
+      *
+      * The purpose of this program is to build 2 workfiles that will be used in
+      * splitting single HPE records into multiple HPS records.
+      *
+      * Workfile 1: HSP312 - Tattoo Deduction/Additions
+      *    The logic to build this workfile will simply write each HPE record to the workfile.
+      *    The 'amount' field in the workfile is labeled 'remaining' amount and will be
+      *    used during splitting of the deduction/addon records to determine how much of the
+      *    original amount remains to be distributed.
+      *
+      * Workfile 2: HSP310 - Groups on Movements
+      *    The logic for this workfile will 1) accumulate the total shipped head per
+      *    movement in HPS and then 2) calculate and store the 'percent' of this total
+      *    represented by each detail line on the HPS movement. These values
+      *    will be used to 'split' a single HPE tattoo header record into
+      *    multiple records--one for each group that is actually on the movement.
+      *
+      *
+      * First, process each record in the HPE 'Tattoo Header' file.
+      * (Records were selected by using open query.)
+      *
+     C**** *loval        setll     pka1cpl4
+     C     *loval        setll     hsl3101a
+      *
+     C                   dou       *in90 = *on                                  Do build
+     C*****************  read      pka1cpl4                               90
+     C                   read      hsl3101a                               90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   eval      wkkldt = %dec(%char(%date(w1kldt:*iso):
+     C                                      *cymd0):7:0)
+      *
+      * Write tattoo deduction/addition workfile records.
+      *
+     C                   exsr      $tatdedadd
+      *
+      * If you do not already have this movement in the group workfile,
+      * add it to the file.
+      *
+     C     w1mvsn        chain     hsp310                             92
+     C                   if        *in92 = *on                                  If new movement
+     C                   exsr      $groupmove
+     C                   endif                                                  If new movement
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do build
+      *
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------------------
+      * Build Workfile of Groups on HPS Movements
+      *---------------------------------------------------------------------------
+      *
+     C     $groupmove    begsr
+      *
+      * Read all HPS sales movement detail records for this movement,
+      * a) accumulating shipped head and b) counting the number of detail records.
+      * (You will need these values in the next step to calculate the percent of total
+      * head represented by each detail record (group) on the movement.)
+      *
+     C                   z-add     0             wkshhd
+     C                   z-add     0             count
+      *
+     C     w1mvsn        setll     hsp085
+     C                   dou       *in91 = *on                                  Do count loop
+     C     w1mvsn        reade     hsp085                                 91
+     C                   if        *in91 = *off                                 If not EOF
+     C                   add       sgshhd        wkshhd
+     C                   add       1             count
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do count loop
+      *
+      * Now, if you had any shipped head, reprocess the movement detail
+      * file calculating the percent of total shipped head represented
+      * by each record.
+      *
+     C                   if        wkshhd > 0                                   If total head
+     C                   z-add     0             wkpr
+     C     w1mvsn        setll     hsp085
+      *
+     C                   do        count         y                              Do write loop
+     C     w1mvsn        reade     hsp085                                 91
+     C                   if        *in91 = *off                                 If more
+      *
+     C                   clear                   wgrec
+      *
+      * For the last detail record on the movement, set the percent as
+      * the difference between 100 percent and percent distributed so far.
+      *
+     C                   select
+     C                   when      count = y
+     C     1.00          sub       wkpr          wgpr
+     C                   other
+      *
+      * Calculate percent as:
+      *  shipped head on detail record / total shipped head on movement
+      *
+     C     sgshhd        div       wkshhd        wgpr
+     C                   add       wgpr          wkpr
+     C                   endsl
+      *
+     C                   z-add     count         wgcount
+     C                   z-add     sgmvsn        wgmvsn
+     C                   z-add     sghgsn        wghgsn
+      *
+      * Retrieve hog group code
+      *
+     C     wghgsn        chain     hsl034d                            92
+     C                   if        *in92 = *off
+     C                   move      hghgcd        wghgcd
+     C                   move      hgblcd        wgblcd
+     C                   move      hgrmcd        wgrmcd
+     C                   move      hgfsbo        wgfsbo
+     C                   endif
+      *
+      * Write a workfile record
+      *
+     C                   write     wgrec
+     C                   endif                                                  If more
+     C                   enddo                                                  Do write loop
+     C                   endif                                                  If total head
+      *
+     C                   endsr
+      /EJECT
+      *-----------------------------------------------------------------------------
+      * Write tattoo deduction/addition workfile for calculating splits
+      *-----------------------------------------------------------------------------
+      *
+      * This work file is used in splitting deduction/add-on values.
+      *
+     C     $tatdedadd    begsr
+      *
+      * Clear workfile record. Then set up fields that are populated from the
+      * tattoo header record.
+      *     a) company number
+      *     b) buy order number
+      *     c) load number
+      *     d) tattoo number
+      *     e) kill date
+      *
+     C                   clear                   wtrec
+     C                   z-add     w1comp#       wthmnb
+     C                   z-add     w1bono        wtbnnb
+     C                   z-add     w1boldno      wtbonb
+     C                   z-add     w1tattoo      wtcvnb
+     C                   z-add     wkkldt        wtb0dt
+      *
+      *  Process each record in the HPE 'Tattoo Deduction/Addition' file for
+      *  this:  company
+      *         buy order number
+      *         load number
+      *         tattoo number
+      *         kill date
+      *
+     C     key01         setll     pkcdcpl1
+      *
+     C                   dou       *in91 = *on                                  Do ded/add
+     C     key01         reade     pkcdcpl1                               91
+     C                   if        *in91 = *off                                 If more
+      *
+      * Deduction/add-on code
+      *
+     C                   movel     cdbqcd        wtbqcd
+      *
+      * The amount is in one field and the 'sign' is in a different
+      * field!!
+     C                   select
+     C                   when      cdjbst = '+'
+     C                   z-add     cda0va        wta0va
+     C                   other
+     C                   z-sub     cda0va        wta0va
+     C                   endsl
+      *
+     C                   write     wtrec
+      *
+     C                   endif                                                  If more
+     C                   enddo                                                  Do ded/add
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    w1comp#
+     C                   kfld                    w1bono
+     C                   kfld                    w1boldno
+     C                   kfld                    w1tattoo
+     C                   kfld                    wkkldt
+      *
+     C                   endsr
+      /EJECT

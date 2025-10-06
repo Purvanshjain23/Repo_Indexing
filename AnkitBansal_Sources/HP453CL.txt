@@ -1,0 +1,403 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  HP453CL                                       */
+/*  PROGRAM NAME:    COPY KILL DATA TO HOG PRODUCTION SYSTEM       */
+/*  PROGRAMMER:      LEANNE FEDOR                                  */
+/*  CREATE DATE:     09/06/95                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS SUBMITTED WITH QCMDEXC FROM        */
+/*                   HP453-SPECIFY KILL DATA TO COPY FROM THE      */
+/*                   HOG PROCUREMENT AND EVALUATION SYSTEM TO      */
+/*                   THE HOG PRODUCTION SYSTEM.                    */
+/*                                                                 */
+/*                   OPTIONS ARE PASSED THROUGH THE LDA.           */
+/*                                                                 */
+/*                   AN OPNQRY STATEMENT IS USED TO SELECT         */
+/*                   RECORDS FOR THE PROPER KILL DATE FROM THE     */
+/*                   HOG PROCUREMENT AND EVALUATION SYSTEM.        */
+/*                                                                 */
+/*******************************************************************/
+/*  MODIFICATIONS                                                  */
+/*  07/03/96  LEANNE FEDOR                                         */
+/*            MARGIE ALLEN REQUESTED THAT, FOR HOLDOVERS, NO       */
+/*            RECORDS BE COPIED TO HPS FROM HPES UNTIL ALL THE     */
+/*            HOLDOVERS ARE COMPLETE. SO, I ADDED ADDITIONAL       */
+/*            LOGIC TO COMPARE THE 'HELD OVER COMPLETED DATE' TO   */
+/*            THE USER'S SELECTED KILL DATE.                       */
+/*                                                                 */
+/*  06/19/97  LEANNE FEDOR                                         */
+/*            CHANGED OUT QUEUE LOGIC.                             */
+/*                                                                 */
+/*  02/04/98  LEANNE FEDOR                                         */
+/*            CHANGED OPEN QUERY STATEMENT TO OMIT RECORDS         */
+/*            WHERE BOTH RECEIVED HEAD AND DOA HEAD ARE ZERO.      */
+/*                                                                 */
+/*  12/09/99  LEANNE FEDOR                                         */
+/*            ADDED WORKFILES USED IN SPLITTING GROUPS.            */
+/*                                                                 */
+/*  05/27/04  LEANNE FEDOR                                         */
+/*            ADDED LOGICAL VIEWS OR WORKFILES.                    */
+/*                                                                 */
+/*  12/12/17  BRAD BADEN   E010812  Mkt Hogs to OTC                */
+/*            1. Get Company Number from the LDA.                  */
+/*            2. Add PSHLIBL command to save the library list.     */
+/*            3. Retrieve the user's group profile and set the     */
+/*               library list based upon the group profile.        */
+/*            4. Change the OPNQRYF from PKA1CPL4 to PKA1CPQ2.     */
+/*            5. Create duplicate object of HSP3101 into QTEMP.    */
+/*            6. Call new program HP245 to create HSP3101 records. */
+/*            7. Make the data area DACOPY to now contain two      */
+/*               flags.  One Y/N flag is for Guymon, and the other */
+/*               flag is for Seaboard Triumph Foods.  Set the      */
+/*               appropriate flag based on the company number      */
+/*               being passed in to this process.                  */
+/*                                                                 */
+/*   6/19/20  BRAD BADEN   E16649 - Set job submitted flags        */
+/*            1. Remove logic to set flags in data area DACOPY     */
+/*               from the beginning of this program.  They are     */
+/*               now set in program HP453.                         */
+/*                                                                 */
+/*******************************************************************/
+
+             PGM
+
+/* DEFINE THE VARIABLE REQUIRED IN THE COMMAND TO OVERRIDE THE     */
+/* PRINT FILE TO A LASER PRINTER                                   */
+
+             DCL        VAR(&RETURN)  TYPE(*CHAR) LEN(7)
+             DCL        VAR(&CMD) TYPE(*CHAR) LEN(512)
+             DCL        VAR(&GRPPRFL) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&USER) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(100)
+             DCL        VAR(&ERRORTYPE) TYPE(*CHAR) LEN(1) VALUE(' ')
+             DCL        VAR(&EMAIL) TYPE(*CHAR) LEN(50)
+             DCL        VAR(&PROGRAM) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOB) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBUSER) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBNBR) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&ERRORS) TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&DAFLGUY) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&DAFLSTF) TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&LD0YMD) TYPE(*DEC) LEN(7)
+             DCL        VAR(&LDEFFL) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&LDCONO) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&LDCONON) TYPE(*DEC) LEN(3 0)
+
+             DCL        VAR(&HOLD) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&COPYS) TYPE(*DEC) LEN(2)
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+
+          /* This is only needed for testing             */
+          /* CHGJOB     LOG(4 99 *SECLVL) LOGCLPGM(*YES) */
+
+             CHGVAR     VAR(&LD0YMD) VALUE(%SST(*LDA 9 7))
+             CHGVAR     VAR(&LDEFFL) VALUE(%SST(*LDA 22 1))
+             CHGVAR     VAR(&LDCONO) VALUE(%SST(*LDA 33 35))
+
+/*********************************************************************/
+/*  Save the current library list                                    */
+/*********************************************************************/
+             PSHLIBL
+
+/*********************************************************************/
+/*  Retrieve the user's Group Profile.  Set the library list         */
+/*  based upon the combination of the group profile and plant.       */
+/*********************************************************************/
+
+             RTVUSRPRF  GRPPRF(&GRPPRFL)
+             SELECT
+             WHEN       COND(&GRPPRFL = 'SBDPGMR ') THEN(DO)
+             IF         COND(&LDCONO = '360') THEN(SETLIBL +
+                          JOBD(PRKTSTGUP))
+             IF         COND(&LDCONO = '440') THEN(SETLIBL +
+                          JOBD(PRKTSTSTP))
+        /*   IF         COND(&LDCONO = '440') THEN(SETLIBL +
+                          JOBD(PRKINTD))    */
+             ENDDO
+
+             OTHERWISE  CMD(DO)
+             IF         COND(&LDCONO = '360') THEN(SETLIBL +
+                          JOBD(PRKPRDGUY))
+             IF         COND(&LDCONO = '440') THEN(SETLIBL +
+                          JOBD(PRKPRDSTP))
+             ENDDO
+
+             ENDSELECT
+
+/*********************************************************************/
+/* ˆ  THIS LOGIC REMOVED AS PART OF E16649                           */
+/*  CHANGE DATA AREA "DACOPY" TO INDICATE THAT THE KILL DATA COPY    */
+/*  FUNCTION IS BEING RUN.  Position 6 in the Data Area is to        */
+/*  signify if the "Copy" is running for Guymon.  Position 14        */
+/*  is to signify if the "Copy" is running for Seaboard Triumph      */
+/*  Foods.                                                           */
+/*********************************************************************/
+
+/*           SELECT                                                  */
+/*           WHEN       COND(&LDCONO *EQ '360') THEN(DO)             */
+/*           RTVDTAARA  DTAARA(DACOPY (6 1)) RTNVAR(&DAFLGUY)        */
+
+/* If Guymon copy is in progress, exit this function                 */
+/*           IF         COND(DAFLGUY = 'Y') THEN(GOTO CMDLBL(EXIT))  */
+
+/* else set Guymom copy flag to 'Y'                                  */
+/*           CHGDTAARA  DTAARA(DACOPY (6 1)) VALUE('Y')              */
+/*           ENDDO                                                   */
+
+/*           WHEN       COND(&LDCONO *EQ '440') THEN(DO)             */
+/*           RTVDTAARA  DTAARA(DACOPY (14 1)) RTNVAR(&DAFLSTF)       */
+
+/* If Seaboard Triumph Foods copy is in progress, exit this function */
+/*           IF         COND(DAFLSTF = 'Y') THEN(GOTO CMDLBL(EXIT))  */
+
+/* else set Guymom copy flag to 'Y'                                  */
+/*           CHGDTAARA  DTAARA(DACOPY (14 1)) VALUE('Y')             */
+/*           ENDDO                                                   */
+
+/*           ENDSELECT                                               */
+
+/*********************************************************************/
+/*  SETUP OPNQRY STATEMENTS                                          */
+/*********************************************************************/
+
+/*  SETUP OPNQRY STATEMENT FOR TATTOO HEADER IN HOG PROCUREMENT      */
+/*  AND EVALUATION SYSTEM.                                           */
+
+/*  BOTH KILL DATE AND HELD OVER COMPLETED DATE MUST BE ON OR        */
+/*  BEFORE THE USER'S SELECTED DATE.                                 */
+
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('A1B0DT *LE')
+             CHGVAR     VAR(%SST(&QDATA 12 7)) VALUE(&LD0YMD)
+             CHGVAR     VAR(%SST(&QDATA 20 15)) VALUE('*AND A1BSDT +
+                          *LE')
+             CHGVAR     VAR(%SST(&QDATA 36 7)) VALUE(&LD0YMD)
+             CHGVAR     VAR(%SST(&QDATA 44 15)) VALUE('*AND A1HMNB +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 60 3)) VALUE(&LDCONO)
+
+/* EITHER RECEIVED HEAD OR DOA HEAD MUST HAVE A VALUE                 */
+
+             CHGVAR     VAR(%SST(&QDATA 64 16)) VALUE('*AND (A1CWNB +
+                          *NE')
+             CHGVAR     VAR(%SST(&QDATA 81 1)) VALUE(0)
+             CHGVAR     VAR(%SST(&QDATA 83 14)) VALUE('*OR A1CXNB +
+                          *NE')
+             CHGVAR     VAR(%SST(&QDATA 98 1)) VALUE(0)
+             CHGVAR     VAR(%SST(&QDATA 99 1)) VALUE(')')
+
+
+             OVRDBF     FILE(PKA1CPQ2) SHARE(*YES) SEQONLY(*NO)
+             OPNQRYF    FILE((PKA1CPQ2)) OPTION(*INP *UPD) +
+                          QRYSLT(&QDATA) KEYFLD(*FILE) SEQONLY(*NO)
+
+/*********************************************************************/
+/*  SET UP PRINT FILE OVERRIDES                                      */
+/*********************************************************************/
+
+
+ HOLD:       IF         COND(%SST(*LDA 411 1) = 'Y') THEN(CHGVAR +
+                          VAR(&HOLD) VALUE(*YES))
+             ELSE       CMD(CHGVAR VAR(&HOLD) VALUE(*NO))
+
+COPYS:       CHGVAR     VAR(&COPYS) VALUE(%SST(*LDA 412 1))
+             IF         COND(&COPYS = 0) THEN(CHGVAR VAR(&COPYS) +
+                          VALUE(1))
+
+OUTQ:        CHGVAR     VAR(&OUTQ) VALUE(%SST(*LDA 413 10))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(%SST(*LDA 401 10)))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(*JOB))
+
+/*------------------------------------------------------------------*/
+/* OVERRIDE PRINT FILE                                              */
+/*------------------------------------------------------------------*/
+
+/* USE THE CUSTOMIZED SEABOARD COMMAND TO OVERRIDE THE PRINT FILE.  */
+/* THIS COMMAND ALLOWS THE REPORT TO BE GENERATED ON A STANDARD LINE*/
+/* PRINTER OR A LASER PRINTER. TO USE THIS OVERRIDE YOU MUST DECLARE*/
+/* A COMMAND VARIABLE AND FOLLOW THE OVERRIDE WITH A CALL TO        */
+/* QCMDEXC.                                                         */
+
+             SBDPRTOVR  CMDVAR(&CMD) FILE(QPRINT) OUTQ(&OUTQ) +
+                          WIDTH(198) LANDSCAPE(*YES) DRAWER(2) +
+                          COPIES(&COPYS) HOLD(&HOLD) SHARE(*YES)
+
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+
+/*-------------------------------------------------------------------*/
+/* CREATE WORKFILES REQUIRED FOR SPLITTING SINGLE HPE RECORDS INTO   */
+/* MULTIPLE HPS RECORDS                                              */
+/*-------------------------------------------------------------------*/
+
+             CRTDUPOBJL OBJ(HSP310) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130) EXEC(CLRPFM +
+                          FILE(QTEMP/HSP310))
+
+             CRTDUPOBJL OBJ(HSP311) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130) EXEC(CLRPFM +
+                          FILE(QTEMP/HSP311))
+             CRTDUPOBJL OBJ(HSL311A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130)
+             CRTDUPOBJL OBJ(HSL311B) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130)
+
+             CRTDUPOBJL OBJ(HSP312) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130) EXEC(CLRPFM +
+                          FILE(QTEMP/HSP312))
+             CRTDUPOBJL OBJ(HSL312A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130)
+
+             CRTDUPOBJL OBJ(HSP313) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130) EXEC(CLRPFM +
+                          FILE(QTEMP/HSP313))
+             CRTDUPOBJL OBJ(HSL313A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130)
+             CRTDUPOBJL OBJ(HSL313B) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130)
+
+             CRTDUPOBJL OBJ(HSP3101) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130) EXEC(CLRPFM +
+                          FILE(QTEMP/HSP3101))
+             CRTDUPOBJL OBJ(HSL3101A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130)
+             CRTDUPOBJL OBJ(HSL3101B) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             MONMSG     MSGID(CPF9898 CPD2104 CPF2130)
+
+/*********************************************************************/
+/*  CALL PROGRAM TO CREATE KILL DATA FOR BUSINESS OFFICE - HSP3101   */
+/*********************************************************************/
+
+             CALL       PGM(HP245)
+
+/*********************************************************************/
+/*  IF COMPANY NUMBER IS 440, AND THE EDIT/FINAL FLAG IS FOR EDIT,   */
+/*  CALL PROGRAM TO SWITCH STATUS FROM SCHEDULED TO SHIPPED.         */
+/*********************************************************************/
+
+             IF         COND(&LDCONO *EQ '440') THEN(DO)
+             IF         COND(&LDEFFL *EQ 'E')   THEN(DO)
+             CALL       PGM(HP261) PARM(&ERRORS)
+             IF         COND(&ERRORS *NE ' ') THEN(GOTO CMDLBL(ERROR))
+             ENDDO
+             ENDDO
+
+/*********************************************************************/
+/*  CALL PROGRAM TO BUILD WORKFILES FOR SPLITTING HPE RECORDS        */
+/*********************************************************************/
+
+             CALL       PGM(HP243)
+
+/*********************************************************************/
+/*  CALL PROGRAM TO EDIT KILL DATA TO BE COPIED                      */
+/*  NOTE: IF THERE ARE NO ERRORS AND THE USER HAS SELECTED 'FINAL',  */
+/*        THE PROGRAM WILL CALL:                                     */
+/*                              HP255 TO COMBINE DATA AND            */
+/*                              HP253 TO COPY THE DATA TO HPS        */
+/*********************************************************************/
+
+             SELECT
+             WHEN       COND(&LDCONO *EQ '440') THEN(CHGVAR +
+                          VAR(&PROGRAM) VALUE('HP2521    '))
+
+             OTHERWISE  CMD(CHGVAR VAR(&PROGRAM) VALUE('HP252     '))
+
+             ENDSELECT
+
+             CALL       PGM(&PROGRAM) PARM(&ERRORTYPE)
+
+/*******************************************************************/
+/*  IF ERROR TYPE IS BLANK, CHANGE DATA AREA DAHPSEDIT.  THIS      */
+/*  DATA AREA SIGNIFIES IF AN EDIT HAS SUCCESSFULLY COMPLETED.     */
+/*  WHEN THE FLAG IN THE DATA AREA IS BLANK, THE USER WILL BE ABLE */
+/*  TO EXECUTE ANOTHER EDIT AFTER FIXING THE ERRORS.  IF THE FLAG  */
+/*  IS 'E', THEN THE USER MUST RUN A FINAL POSTING FIRST.          */
+/*******************************************************************/
+
+             IF         COND(&ERRORTYPE *EQ ' ') THEN(DO)
+
+             SELECT
+             WHEN       COND((&LDCONO *EQ '360') *AND (&LDEFFL *EQ +
+                          'E')) THEN(CHGDTAARA DTAARA(DAHPSEDIT (6 +
+                          1)) VALUE('E'))
+
+             WHEN       COND((&LDCONO *EQ '360') *AND (&LDEFFL *EQ +
+                          'F')) THEN(CHGDTAARA DTAARA(DAHPSEDIT (6 +
+                          1)) VALUE(' '))
+
+             WHEN       COND((&LDCONO *EQ '440') *AND (&LDEFFL *EQ +
+                          'E')) THEN(CHGDTAARA DTAARA(DAHPSEDIT (15 +
+                          1)) VALUE('E'))
+
+             WHEN       COND((&LDCONO *EQ '440') *AND (&LDEFFL *EQ +
+                          'F')) THEN(CHGDTAARA DTAARA(DAHPSEDIT (15 +
+                          1)) VALUE(' '))
+             ENDSELECT
+             ENDDO
+
+/*******************************************************************/
+/*  IF ERROR TYPE IS 'M' (Movement Error), send report in an email */
+/*******************************************************************/
+
+             IF         COND(&ERRORTYPE *EQ 'M') THEN(DO)
+
+/* Retrieve Distribution List from the Company Values file */
+             RTVJOBA    JOB(&JOB) USER(&JOBUSER) NBR(&JOBNBR)
+
+             CHGVAR     VAR(&LDCONON) VALUE(&LDCONO)
+
+             CALL       PGM(POMTXFR) PARM(&RETURN &LDCONON +
+                          'HPSMVERRDL' &EMAIL)
+             EXECUTE    VIEW(HPEMVMTERR) PCFMT(*XLSX) +
+                          RECIPIENT(&EMAIL) EMLMSG('See attached +
+                          spreadsheet.  Fix the movement number +
+                          errors and execute the Kill Data Copy +
+                          again.') TEXT('Sales Movement Number Errors')
+             MONMSG     MSGID(CPF0000)
+             ENDDO
+
+/*******************************************************************/
+/*  DELETE ALL FILE OVERRIDES                                      */
+/*******************************************************************/
+
+ ERROR:      CLOF       OPNID(PKA1CPQ2)
+             DLTOVR     FILE(PKA1CPQ2)
+             DLTOVR     FILE(QPRINT)
+
+/****************************************************************/
+/*  CHANGE DATA AREA "DACOPY" TO INDICATE THAT THE KILL DATA    */
+/*  COPY FUNCTION IS NO LONGER BEING RUN                        */
+/****************************************************************/
+
+/*********************************************************************/
+/*  Clear job submitted flag for company being processed             */
+/*********************************************************************/
+ EXIT:       SELECT
+             WHEN       COND(&LDCONO *EQ '360') THEN(CHGDTAARA +
+                          DTAARA(DACOPY (6 1)) VALUE(' '))
+
+             WHEN       COND(&LDCONO *EQ '440') THEN(CHGDTAARA +
+                          DTAARA(DACOPY (14 1)) VALUE(' '))
+             ENDSELECT
+
+/*********************************************************************/
+/*  Restore saved library list in case this CL called interactively  */
+/*********************************************************************/
+             POPLIBL
+
+             ENDPGM

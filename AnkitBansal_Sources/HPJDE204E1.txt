@@ -1,0 +1,678 @@
+     Z* CRTBNDRPG
+     Z* DFTACTGRP(*NO) BNDDIR(YBNDDIR) DBGVIEW(*SOURCE)
+     Z* CVTOPT(*DATETIME) ACTGRP(*CALLER) OPTIMIZE(*BASIC)
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      Hog Production / JD Edwards
+      * PROGRAM:     HPJDE204E1
+      * TITLE:       Upload HPS Values to JDE
+      * PROGRAMMER:  Brad baden
+      * CREATED:      5/28/2020
+      *
+      *  FUNCTION:   This program uploads period data from HPS to JDE.
+      *              This function must be run prior to the period close in HPS.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 02/05/13  LeAnne Ramsey (E2405)
+      *           MTech wants to be able to upload all of the data to JDE
+      *           in a single submission. So, in preparation for that, I
+      *           am changing this program to use LF HSL204B...which is
+      *           keyed to accomodate the all-at-once scenario.
+      *
+      * 02/27/16  Barb Gutierrez  (E005290)
+      *           Removed hard coding of company 350 because of Iowa Farms that
+      *           is company 340 and in subsequent companies we may add.
+      *           Company number is now in HSP204.
+      * 03/02/16  Barb Gutierrez  (E005290)
+      *           Added population of service tax date.
+      *
+      * 05/21/20  Brad Baden      (SDN465) JDE World to E1
+      *                           Replace: F0011 ---> E10011L0
+      *                                    F0901 ---> E10901
+      *                                    F0911 ---> E10911L0
+      *
+      * 06/12/20 Brad Baden       (SDN465) JDE World to E1
+      *                           Updated field values:
+      *                           movel     'B'           gleder
+      *                           movel     'D'           glcrrm
+      *                           movel     'USD'         glcrcd
+      *                           movel     gldoc         gledtn
+      *
+      * 06/18/20 Brad Baden       (SDN465) JDE World to E1
+      *                           Always set Document Company (GLKCO) to blanks
+      *                           Output amount to Gross Amount (GLAG), not Amount (GLAA)
+      *                           Always set Reconciled Flag (GLRCND) to blank
+      *                           Set GLPKCO, GLOKCO, and GLPSFX to blanks, not zeros
+      *
+      *  6/24/20 Brad Baden       (SDN465) JDE World to E1
+      *                           Increment document counter whenever Document Number
+      *                           value changes.  Move document counter to fields
+      *                           ICNDO and ICDOCN instead of batch number.
+      *
+      *  6/30/20 Brad Baden       (SDN465) JDE World to E1
+      *                           1. Make Input Total = work field WKBATVAL * 100.
+      *                              The World version still sets Input Total = 0.
+      *                           2.
+      *
+      /EJECT
+      ****************************************************************
+      * File specifications
+      ****************************************************************
+      *
+     Fhsl204b   if   e           k disk
+      *    HPS to JDE upload
+      *
+      *
+     F*f0011     uf a e           k disk
+     fe10011l0  uf a e           k disk
+      *   JDE Batch control record
+      *
+      *
+     F*f0901     if   e             disk
+     fe10901    if   e             disk
+      *   JDE Account master
+      *
+      *
+     F*f0911     uf a e             disk
+     fe10911l0  uf a e             disk
+      *   JDE Account ledger
+      *
+      /EJECT
+      ****************************************************************
+      * Definition specifications
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D userid          c                   'HPSUPL    '
+      *
+      *
+      *---------------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------------
+      *
+      * Control fields
+      *
+     d first           s              1    inz('Y')
+      *
+      *
+      * Workfields
+      *
+     d wkco            s              5
+     d wkbatcnt        s              5  0
+     d wkdoccnt        s              5  0
+     d wkaid           s              8
+     d wkani           s             29
+     d wkbatval        s             15  0
+      *
+     d wktime          s             12  0
+     d wkdate          s              6  0
+     d wkhhmmss        s                   like(glticu)
+      *
+     d wkmmddyy        s              6  0
+     d wkisodate       s               d   datfmt(*iso)
+     D wkcymdiso       s               d   datfmt(*iso)
+     D xxsyssyndt      s              7  0
+     D xxccyymmdd      s              8  0
+      *
+      *
+      * Parm fields
+      *
+      * For call to JDE date routine
+      *
+     d xxsidat         s              6
+     d*xxedat          s              8
+     d xxedat          s              6  0
+     d xxffmt          s              7
+     d xxtfmt          s              7
+     d xxsep           s              7
+     d xxertst         s              1
+     d xxctry          s              2
+      *
+      * For call to JDE account routine
+      *
+     d xxbatch         s                   like(glicu)
+     d xxsy            s              4
+     d xxidx           s              2
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxerrm          s              4
+      *
+     d xxani           s                   like(glani)
+     d xxicu           s                   like(glicu)
+     d xxdoc           s                   like(gldoc)
+      *
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+      *
+     d i0901ds         ds           500
+     d xxco                                like(gmco)
+     d xxaid                               like(gmaid)
+     d xxmcu                               like(gmmcu)
+     d xxobj                               like(gmobj)
+     d xxsub                               like(gmsub)
+     d xxans                               like(gmans)
+     d xxdl01                              like(gmdl01)
+     d xxlda                               like(gmlda)
+     d xxbpc                               like(gmbpc)
+     d xxpec                               like(gmpec)
+     d xxbill                              like(gmbill)
+     d xxcrcd                              like(gmcrcd)
+     d xxum                                like(gmum)
+     d xxr001                              like(gmr001)
+     d xxr002                              like(gmr002)
+     d xxr003                              like(gmr003)
+     d xxr004                              like(gmr004)
+     d xxr005                              like(gmr005)
+     d xxr006                              like(gmr006)
+     d xxr007                              like(gmr007)
+     d xxr008                              like(gmr008)
+     d xxr009                              like(gmr009)
+     d xxr010                              like(gmr010)
+     d xxr011                              like(gmr011)
+     d xxr012                              like(gmr012)
+     d xxr013                              like(gmr013)
+     d xxr014                              like(gmr014)
+     d xxr015                              like(gmr015)
+     d xxr016                              like(gmr016)
+     d xxr017                              like(gmr017)
+     d xxr018                              like(gmr018)
+     d xxr019                              like(gmr019)
+     d xxr020                              like(gmr020)
+     d xxr021                              like(gmr021)
+     d xxr022                              like(gmr022)
+     d xxr023                              like(gmr023)
+     d xxobja                              like(gmobja)
+     d xxsuba                              like(gmsuba)
+     d xxwcmp                              like(gmwcmp)
+     d xxcct                               like(gmcct)
+     d xxerc                               like(gmerc)
+     d xxhtc                               like(gmhtc)
+     d xxqlda                              like(gmqlda)
+     d xxccc                               like(gmccc)
+     d xxfmod                              like(gmfmod)
+     d xxuser                              like(gmuser)
+     d xxpid                               like(gmpid)
+     d xxjobn                              like(gmjobn)
+     d xxupmj                              like(gmupmj)
+     d xxupmt                              like(gmupmt)
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Break CCYY into CC and YY fields
+      *---------------------------------------------------------------
+      *
+     D wkyear          ds
+     D   wkccyy                       4  0
+     D   wkcc                         2  0 overlay(wkccyy:1)
+     D   wkyy                         2  0 overlay(wkccyy:3)
+      *
+      *----------------------------------------------------------------
+      * LDA - local data area
+      *----------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldacyr                 1      4  0
+     D  ldacpe                 5      6  0
+     D  ldbpdt                 7     14  0
+     D  ldepdt                15     22  0
+     D  ldhucd                23     23
+      *
+     D  ldhuds               100    129
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *----------------------------------------------------------------
+      * MAINLINE
+      *---------------------------------------------------------------
+      *
+      * Read each record in the HPS upload file. The 'offsetting' records have
+      * already been written in this upload file. So, just write ledger records
+      * for each upload record.
+      *
+     C     *loval        setll     hsl204b
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsl204b                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Control break logic
+      *
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+      *
+      ** SDN465 - First time, perform $docnbr after $batnbr
+      *
+     C***************    exsr      $docnbr
+     C                   exsr      $batnbr
+     c                   exsr      $docnbr
+      *
+     C                   other
+      *
+     C                   if        hjnewbat = yes                               If new batch
+     C                   exsr      $batwrt
+     C                   exsr      $batnbr
+     C                   z-add     0             wkbatcnt
+     C                   z-add     0             wkbatval
+     C                   z-add     0             xxibmln           7 3          next ibmi line no
+     C                   endif                                                  If new batch
+      *
+     C                   if        hjnewdoc = yes                               If new doc
+     C                   exsr      $docnbr
+      *
+      ** SDN465 - Do not clear document counter (comment out next line)
+     C*                  z-add     0             wkdoccnt
+     C                   endif                                                  If new doc
+      *
+     C                   endsl
+      *
+      *
+      * Detail processing: Write each record to the JDE ledger file.
+      *
+     C                   exsr      $detail
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *-----------------------------
+      * EOF processing
+      *-----------------------------
+      *
+      * Write out last batch record
+      *
+     C                   if        wkbatcnt <> 0
+     C                   exsr      $batwrt
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve a document number from JDE
+      *---------------------------------------------------------------
+      *
+     C     $docnbr       begsr
+      *
+     C*                  call      'X0010 '
+     C*                  parm      '09  '        xxsy
+     C*                  parm      '02'          xxidx
+     C*    gldoc         parm                    xxdoc
+      *
+     C                   call      'GET0010 '
+     C                   parm      '09  '        xxsy
+     C                   parm      '02'          xxidx
+     C                   parm                    spsnbr                            chg from xxdoc
+     C                   parm      ' '           bssv                              added parm
+     c                   z-add     spsnbr        gldoc                             added-was parm mv
+      *
+      ** SDN465 - Increment document counter only when new document number
+      *
+     c                   eval      wkdoccnt += 1
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve a batch number from JDE
+      *---------------------------------------------------------------
+      *
+     C     $batnbr       begsr
+      *
+     C*                  call      'X0010 '
+     C*                  parm      '00  '        xxsy
+     C*                  parm      '01'          xxidx
+     C*    glicu         parm                    xxbatch
+      *
+     C                   call      'GET0010 '                                   p16169
+     C                   parm      '00  '        xxsy
+     C                   parm      '01'          xxidx
+     C                   parm      0             spsnbr           15 0          chg from xxbatch
+     C                   parm      ' '           bssv              1            added parm
+     c                   z-add     spsnbr        glicu
+      *
+      ** SDN465 - Clear document count when batch number changes
+      *
+     c                   eval      wkdoccnt = 0
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Detail logic for each HPS upload record
+      *---------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+      * Move fields from HPS upload file to JDE Account ledger record
+      *
+     C                   move      hjexa         glexa
+     C                   move      hjdesc        glexr
+     C                   move      hjmcu         glmcu
+     C                   move      hjobj         globj
+     C                   move      hjre          glre
+     C                   move      *zeros        wkco
+     C                   move      hjcocd        wkco
+     C                   move      wkco          glco
+     C*                  move      wkco          glkco
+      *
+      * SDN465 - Always set Document Company to blanks
+     C                   move      *blanks       glkco
+      *
+     C*                  select
+     C*                  when      hjtype = 'AU'
+     C*                  z-add     hjjdeval      glu
+     C*                  z-add     0             glaa
+     C*                  when      hjtype = 'AA'
+     C*                  z-add     hjjdeval      glaa
+     C*                  z-add     0             glu
+     C*                  endsl
+      *
+      * SDN465 - Move amount to Gross Amount, not Amount
+     c                   select
+     c                   when      hjtype = 'AU'
+     c                   z-add     hjhpsval      glu
+     c                   z-add     0             glag
+     c                   when      hjtype = 'AA'
+     c                   z-add     hjhpsval      glag
+     c                   z-add     0             glu
+     c                   endsl
+      *
+      * Retrieve JDE account ID
+      *
+     C*                  call      'X0901'
+     c                   call      'E1I0901'
+     C                   parm                    xxsym
+     C                   parm      '1'           xxomod
+     C                   parm      '9'           xximod
+     C     wkaid         parm      *blank        xxani
+     C                   parm      hjmcu         xxmcu
+     C                   parm      hjobj         xxobj
+     C                   parm      hjsub         xxsub
+     C                   parm      *blank        xxerrm
+     c                   parm                    i0901ds
+      *
+     C                   if        xxerrm = *blank
+     C                   move      xxsub         glsub
+     C                   move      wkaid         glaid
+     C                   else
+     C                   move      *blank        glsub
+     C                   move      *blank        glaid
+     C                   endif
+      *
+      * Retrieve JDE unstructured account number
+      *
+     C*                  call      'X0901'
+     c                   call      'E1I0901'
+     C                   parm                    xxsym
+     C                   parm      '2'           xxomod
+     C                   parm      '1'           xximod
+     C     wkani         parm      wkaid         xxani
+     C                   parm                    xxmcu
+     C                   parm                    xxobj
+     C                   parm                    xxsub
+     C                   parm      *blank        xxerrm
+     c                   parm                    i0901ds
+      *
+     C                   if        xxerrm = *blank
+     C                   move      wkani         glani
+     C                   else
+     C                   move      *blank        glani
+     C                   endif
+      *
+      * Increment the counters of a) the batch and b) the document group
+      *
+     C                   add       1             wkbatcnt
+     C*                  add       1             wkdoccnt
+     C                   z-add     wkdoccnt      gljeln
+      *
+      * Accumulate the value for the batch header 'amount entered' field.
+      *
+     C                   add       hjbatval      wkbatval
+      *
+      *   Get IBMi Batch number - P16169
+      *
+     c                   call      'E1BEXFR'
+     C                   parm                    return            7
+     C                   parm      'IBM'         xxibm             3            batch no series
+     C                   parm      0             xxibmno           8 0          next ibmi no
+      *
+      *
+      * P16169 added for new fields in e10911
+      *
+     C                   movel     gluser        gledus                         edi user id
+     C                   movel     glicu         gledbt                         edi batch no
+     C*                  movel     xxibmno       gledtn                         edi trans-nxt ibmi n
+      *
+      * Added to update of e10911
+     C                   movel     'B'           gleder                         send/rec/both
+     C                   movel     'D'           glcrrm                         currency for/dom
+     C                   movel     'USD'         glcrcd                         currency code
+     C                   movel     gldoc         gledtn                         document#
+      *
+     C                   add       1             xxibmln                        edi trans-nxt ibmi n
+     C                   z-add     xxibmln       gledln                         edi line number
+     C                   z-add     xxibmln       gljeln                         journal entry line#
+     C                   movel     '0'           gledsp                         edi success procd
+     C                   movel     'A'           gledtc                         edi trans action
+     C                   movel     'J'           gledtr                         edi trans type
+     C                   move      xxsyssyndt    glabdt                         Date updated
+     C                   z-add     wkhhmmss      glabtm                         Time Last Updated
+     C                   movel     'HPJDE204E1'  glpid                          pgm  Last Updated
+     C                   movel     'HPJDE204E1'  glakvn                         pgm  Last Updated
+     C                   movel     gluser        glajvn                         user id created
+     C                   z-add     xxibmno       gldtnb                         next ibmi no
+     C                   z-add     xxibmln       gldunb                         next ibmi line no
+      *
+     C*                  write     i0911
+     C                   write     i0911l0
+      *
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a batch record
+      *---------------------------------------------------------------
+      *
+     C     $batwrt       begsr
+      *
+      * Write a batch header record to batch control file
+      *
+     C*    key01         chain     f0011                              92
+     c     key01         chain     e10011l0                           92
+     C                   if        *in92 = *on                                  If no hit
+      *
+      ** SDN465 - Add document counter to ICNDO and ICDOCN (not batch counter)
+      *
+     C*                  z-add     wkbatcnt      icndo
+     C*                  z-add     wkbatcnt      icdocn
+     c                   z-add     wkdoccnt      icndo
+     c                   z-add     wkdoccnt      icdocn
+      *
+      ** SDN465 - Change logic from World to populate Input Total = Amount Entered
+      *
+     C**************     z-add     0             icaicu
+     C                   z-add     wkbatval      icaicu
+     C**************     z-add     wkbatval      icame
+     c                   eval      icame = wkbatval * .01
+     C                   z-add     wkbatval      icaipt
+      *
+     C                   z-add     glicu         icicu
+     C                   move      *blank        icist
+     C                   movel     userid        icuser
+     C                   move      glicut        icicut
+     C                   move      gldicj        icdicj
+     C                   move      'A'           iciapp
+     C                   move      'Y'           icbal
+     C                   move      ' '           icbalj
+     C                   move      'N'           icpob
+     C                   move      'Y'           iciboi
+      *
+     C*                  write     i0011
+     c                   write     i0011l0
+      *
+      * Write Run Log Header workfile. Read in PDWAUPR to push batches to zprocessor
+      *
+     C                   call      'E1LCXFR'
+     c                   parm                    return
+     C                   parm                    icicut                         Batch type
+     C                   parm                    icicu                          Batch number
+     C                   parm                    icuser                         user
+     C                   parm                    wkco                           company
+     C                   endif                                                  If no hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Get dates into JDE format
+      *---------------------------------------------------------------
+      *
+     C     $date         begsr
+      *
+     C*                  call      'X0028'
+     c*                  call      'E1I0028'
+     C*                  parm                    xxsidat
+     C*                  parm      *blank        xxedat
+     C*                  parm                    xxffmt
+     C*                  parm      '*JUL   '     xxtfmt
+     C*                  parm      '*NONE'       xxsep
+     C*                  parm      *blank        xxertst
+     C*                  parm      *blank        xxctry
+      *
+     C                   call      'E10028A'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxedat
+      *
+     c                   move      xxedat        xxsidat
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    glicut
+     C                   kfld                    xxbatch
+      *
+      * Set up defaults for records in F0911-Account Ledger File
+      *
+      *
+      * Put system date into an 8,0 workfield for updating the MP2 Invoice Header
+      * records.
+      *
+     C     *mdy          movel     udate         wkcymdiso
+     C                   movel     wkcymdiso     xxccyymmdd
+      *
+      * Get system date into the format required by JDE by calling JDE's routine.
+      * Save the date for populating lots of fields. Also, put it in an 8,0 field
+      * for updating the MP2: Invoice Header file.
+      *
+      * Get system date into the format required by JDE by calling JDE's routine.
+      *
+     C                   time                    wktime
+     C                   move      wktime        wkdate
+     C                   move      wkdate        xxsidat
+     C*                  move      '*SYSVAL'     xxffmt
+      *
+     C                   exsr      $date
+     C                   move      xxsidat       glupmj
+     C                   move      xxsidat       gldsyj
+     C                   move      xxsidat       gldicj
+      *
+      *
+      * Get period end date in JDE format by calling JDE date routine.
+      *
+      * Put period end date into an 8,0 workfield for updating the MP2 Invoice Header
+      * records.
+      *
+     C                   move      ldepdt        xxccyymmdd
+     C*                  move      ldepdt        xxsidat
+     C*                  move      '*YMD   '     xxffmt
+     C                   exsr      $date
+     C                   move      xxsidat       gldgj
+     C                   move      xxsidat       gldsvj
+      *
+      *
+      * Set up some defaults
+      *
+     C**                 move      *zero         wkco
+     C**                 move      '350'         wkco
+     C**                 move      wkco          glco
+     C**                 move      wkco          glkco
+      *
+     C                   movel     sdjob         gljobn
+     C                   time                    glticu
+     C                   time                    glupmt
+      *
+     C                   z-add     ldacpe        glpn
+      *
+     C                   z-add     ldacyr        wkccyy
+     C                   z-add     wkcc          glctry
+     C                   z-add     wkyy          glfy
+      *
+      *
+     C                   move      userid        gluser
+     C                   move      sdusr         gltorg
+      *
+     C                   move      '2'           glam
+     C                   move      'AA'          gllt
+     C*                  move      '00000'       glpkco
+     C*                  move      '00000'       glokco
+     C*                  move      '000'         glpsfx
+      *
+      * SDN465 - Change zeros to blanks
+     c                   move      *blanks       glpkco
+     c                   move      *blanks       glokco
+     c                   move      *blanks       glpsfx
+      *
+     C                   move      'JE'          gldct
+     C                   move      'G '          glicut
+     C                   move      'R'           glrcnd
+      *
+      * SDN465 - Always set Reconciled Flag to blank
+     c                   move      *blank        glrcnd
+      *
+      *
+      * Put system date into an 7,0 workfield for updating the 911 / 411 rcds
+      *
+     C     *mdy          movel     udate         wkisodate
+     C                   movel     wkisodate     xxccyymmdd
+     C                   call      'HP8008'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxsyssyndt
+      *
+     C                   time                    wkhhmmss
+      *
+      * SDN465 - Populate new audit stamp values
+      *
+     c                   move      sdpgm         icpid
+     c                   move      sdjno         icjobn
+     c                   exsr      $date                                        ccyymmdd to yyyddd
+     c                   eval      icupmj = xxedat
+
+     c                   move      sdstm         icuptm
+      *
+     C                   endsr

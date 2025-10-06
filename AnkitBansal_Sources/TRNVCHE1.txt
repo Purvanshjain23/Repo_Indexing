@@ -1,0 +1,1282 @@
+     F*****************************************************************
+     H*
+      *  Program number:  TRNVCHE1 - copied from TRNVCH
+      *  Program name:    Create Vouchers in JD Edwards for payment.
+      *  Programmer:      Barb Gutierrez    /  Rose Centonze
+      *  Date created:    11/19/2008       / 4/07/2020
+      *  Program purpose: Create Vouchers for Truckers in JDE from transporation
+      *                   software.  (PowerPro)
+      *                   -This is a copy of STCVCH with some modifications.
+      *                   -STCVCH will go away when the last trucker payments are mde out
+      *                    of the PCS software.
+      *                   -The records will be written as Unposted.
+      *                   -This program is executed from a script written in Visual studio.
+      *                    Visual Studio then publish's to directory:
+      *                    \\corkcapp1dev\ClickOnce Deployments\PowerProAcctInterface\
+      *
+      *  Modified by:     Barb Gutierrez   10/26/2011
+      *                   Extract company number out of the cost center when writing the 911.  The
+      *                   truck payments need to get expensed out into a different company number.
+      *
+      * 04/07/20  Rose Centonze (P16169)  COPY FROM TRNVCH
+      *           Modified to use E1 files and programs
+      *           F0101LA ->  E10101la
+      *           F0911   ->  E10911
+      *           F0011  -->  E10011l0 --> write e1b9cpp workfile too   - call e1lcxfr
+      *           F0401  -->  E10401L0
+      *           F0411  -->  E10411         rename rp- fields to  el-  rppst-elpstc,rpurc1-elusrcd
+      *           F0901lb-->  E10901lb
+      *           X0028  -->  E1I0028   --> E10028A
+      *           X0901  -->  E1I0901
+      *           X09031 -->  E1I09031  --> GET09031  goes to bssv
+      *           0911/0411 -- set Invoice to LoadID||input date -->even if LoadID='0'
+      *           0911     -- will have 0411s document with mult lines per vendor/loadid/inputdate
+      *           0411     -- will have 1 rcd per vendor/loadid/inputdate --> 1 document ,sum amts
+      *                    -- write 0411 on vendor/loadId break -  write if 911 was even if amt=.00
+      *         1 set edi trans no to gldoc
+      *         2 GLKCO       - document company - leave blank
+      *         3 GLPKCO  GLOKCO  GLPSFX  - leave blank , not 000
+      *         4 glrcnd - reconciled-leave Blank
+      *         5 glaa - has the amount for 'V'oucher batches. "G" batches have only gross amount
+      *                    div 100 before updating
+      *         6 icndo, icodcn- increment when get document
+      * ‚E1 will resolve this in E1 - dont need to get it per Angie 7-28-2020 - commented:
+      *   Get the cost center/object/sub from the automatic accounting instructions file.
+      *         **F12KEY        CHAIN     I0012                              40          p16169
+      *   10/23/20 LOAD F0411.ELAN8 from F0101.ABAN8 and F0411.ELPYE from F0101.ABAN85.
+      *                     --> ALT PAYEE
+/*    *
+/*  M *   09/21/2021  Rose Centonze   WHD 84086
+/*    *               Change company 390 to 355
+      ****************************************************************
+      *
+     FSTC001L2  IF   E           K DISK
+      *   Transportation Interface File
+      *
+     F*F0101LA   IF   E           K DISK                                          P16169
+     FE10101LA  IF   E           K DISK
+      * JDE ADRESS BOOK
+      *
+     F*F0401LA   IF   E           K DISK                                         P16169
+     Fe10401LA  IF   E           K DISK
+     F* SUPPLIER MASTER
+      *
+     F*F0901LB   IF   E           K DISK                                          P16169
+     Fe10901LB  IF   E           K DISK
+     F* ACCOUNT MASTER
+      *
+     F*F0012     IF   E           K DISK                                           P16169
+     F*e10012l0  IF   E           K DISK     ‚DONT NEED TO DO HERE -E1 WILL HANDLE IT
+     F* AUTOMATIC ACCOUNTING INSTRUCTIONS MASTER
+      *
+     F*F0011     UF A E           K DISK                                           P16169
+     Fe10011l0  UF A E           K DISK
+      * JDE BATCH HEADER FILE
+      *
+     F*F0411     O    E             DISK                                             P16169
+     Fe10411    O    E             DISK
+     F* JDE A/P LEDGER FILE
+      *
+     F*F0911     O    E             DISK
+     Fe10911    O    E             DISK                                              P16169
+      * JDE G/L LEDGER FILE
+      *
+      *
+      * For call to JDE account routine
+      *
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxerrm          s              4
+      *
+     d xxani           s                   like(glani)
+     d wkani           s                   like(glani)
+     d wkmcu           s                   like(glmcu)
+     d wkobj           s                   like(globj)
+     d wksub           s                   like(glsub)
+     d wkacct          s                   like(glani)
+     d xxbatch         s              8
+     d wkcen           s              2  0
+      *
+      * Workfields
+      *
+     D NET             S             15  0 DIM(14)
+     D JARB            S              1    DIM(8)                               NEW
+     D VIDAR           S              1    DIM(8)                               @NUM
+     d start           s              2  0
+     d wk3co           s              3
+     d wkmmddyy        s              6  0
+     d wkisodate       s               D   datfmt(*iso)
+     D xxsyssyndt      s              7  0
+     D xxccyymmdd      s              8  0
+     d xxedln          s                   like(gledln)                          edi line  number
+     d xxed411         s                   like(gledln)                          edi line nbr 411
+     d wrt911          s              1    inz('N')                              was 911 written/key
+      *
+      *    G/L DATE  CCYYMMDD
+      *
+     D                 DS
+     D  GLDATE                 1      7  0
+     D  GLCENT                 1      1  0
+     D  GLYR                   2      3  0
+     D  GLMO                   4      5  0
+     D  GLDA                   6      7  0
+      *
+      *    G/L DATE FROM VOUCHER HEADER  MMDDYY
+      *
+     D                 DS
+     D  GLMDY                  1      6  0
+     D  MOGL                   1      2  0
+     D  DAGL                   3      4  0
+     D  YRGL                   5      6  0
+      *
+      *    CHECK DATE  CCYYMMDD
+      *
+     D                 DS
+     D  CKCYMD                 1      7  0
+     D  CKCC                   1      1  0
+     D  CKYR                   2      3  0
+     D  CKMO                   4      5  0
+     D  CKDA                   6      7  0
+      *
+      *    CHECK DATE  MMDDYY
+      *
+     D                 DS
+     D  CKMDY                  1      6  0
+     D  MOCK                   1      2  0
+     D  DACK                   3      4  0
+     D  YRCK                   5      6  0
+      *
+      *    INPUT DATE MMDDCCYY
+      *
+     D                 DS
+     D  INPDTE                 1      8
+     D  INMM                   1      2  0
+     D  INDD                   3      4  0
+     D  INMD                   1      4  0
+     D  INCC                   5      6  0
+     D  INYY                   7      8  0
+      *    INPUT DATE YYMMDD
+      *
+     D                 DS
+     D  INPDT                  1      6  0
+     D  INPYY                  1      2  0
+     D  INPMD                  3      6  0
+      *
+      *    INPUT DATE ccYYMMDD                       p16169 - new
+      *
+     D                 DS
+     D  INPCCD                 1      8  0
+     D  INPCCC                 1      2  0
+     D  INPCYY                 3      4  0
+     D  INPCMD                 5      8  0
+      *
+      *
+      *    TRANSACTION DATE MMDDCCYY
+      *
+     D                 DS
+     D  TRNDTE                 1      8
+     D  TRMM                   1      2  0
+     D  TRDD                   3      4  0
+     D  TRMD                   1      4  0
+     D  TRCC                   5      6  0
+     D  TRYY                   7      8  0
+      *    TRANSACTION DATE YYMMDD
+      *
+     D                 DS
+     D  TRANDT                 1      6  0
+     D  TRANYY                 1      2  0
+     D  TRANMD                 3      6  0
+      *    TRANSACTION DATE CCYYMMDD                 p16169 - new
+      *
+     D                 DS
+     D  TRNCCD                 1      8  0
+     D  TRNCC                  1      2  0
+     D  TRNYY                  3      4  0
+     D  TRNMD                  5      8  0
+      *
+      *    UDATE MMDDYY
+      *
+     D                 DS
+     D  WKUDAT                 1      6  0
+     D  WKUMO                  1      2  0
+     D  WKUDA                  3      4  0
+     D  WKUYR                  5      6  0
+      *
+      *    UDATE CCYYMMDD
+      *
+     D                 DS
+     D  UDT                    1      8  0
+     D  UCC                    1      2  0
+     D  UYY                    3      4  0
+     D  UMM                    5      6  0
+     D  UDD                    7      8  0
+      *
+     D                 DS
+     D  WAMT2                  1     15  2
+     D  WAMT2D                 1     15  0
+     D                 DS
+     D  DBTAMT                 1     12  2
+     D  DBTAMD                 1     12  0
+     D                 DS
+     D  CRAMT                  1     12  2
+     D  CRAMD                  1     12  0
+     D                 DS
+     D  JDEVID                 1      8
+     D  VID8                   8      8
+     D  VID8#                  1      8  0
+     D  VID7                   7      7
+     D  VID7#                  1      7  0
+     D  VID6                   6      6
+     D  VID6#                  1      6  0
+     D  VID5                   5      5
+     D  VID5#                  1      5  0
+     D  VID4                   4      4
+     D  VID4#                  1      4  0
+     D  VID3                   3      3
+     D  VID3#                  1      3  0
+     D  VID2                   2      2
+     D  VID2#                  1      2  0
+     D  VID1                   1      1
+     D  VID1#                  1      1  0
+      *
+     d i0901ds         ds           500
+     d xxco                                like(gmco)
+     d xxaid                               like(gmaid)
+     d xxmcu                               like(gmmcu)
+     d xxobj                               like(gmobj)
+     d xxsub                               like(gmsub)
+     d xxans                               like(gmans)
+     d xxdl01                              like(gmdl01)
+     d xxlda                               like(gmlda)
+     d xxbpc                               like(gmbpc)
+     d xxpec                               like(gmpec)
+     d xxbill                              like(gmbill)
+     d xxcrcd                              like(gmcrcd)
+     d xxum                                like(gmum)
+     d xxr001                              like(gmr001)
+     d xxr002                              like(gmr002)
+     d xxr003                              like(gmr003)
+     d xxr004                              like(gmr004)
+     d xxr005                              like(gmr005)
+     d xxr006                              like(gmr006)
+     d xxr007                              like(gmr007)
+     d xxr008                              like(gmr008)
+     d xxr009                              like(gmr009)
+     d xxr010                              like(gmr010)
+     d xxr011                              like(gmr011)
+     d xxr012                              like(gmr012)
+     d xxr013                              like(gmr013)
+     d xxr014                              like(gmr014)
+     d xxr015                              like(gmr015)
+     d xxr016                              like(gmr016)
+     d xxr017                              like(gmr017)
+     d xxr018                              like(gmr018)
+     d xxr019                              like(gmr019)
+     d xxr020                              like(gmr020)
+     d xxr021                              like(gmr021)
+     d xxr022                              like(gmr022)
+     d xxr023                              like(gmr023)
+     d xxobja                              like(gmobja)
+     d xxsuba                              like(gmsuba)
+     d xxwcmp                              like(gmwcmp)
+     d xxcct                               like(gmcct)
+     d xxerc                               like(gmerc)
+     d xxhtc                               like(gmhtc)
+     d xxqlda                              like(gmqlda)
+     d xxccc                               like(gmccc)
+     d xxfmod                              like(gmfmod)
+     d xxuser                              like(gmuser)
+     d xxpid                               like(gmpid)
+     d xxjobn                              like(gmjobn)
+     d xxupmj                              like(gmupmj)
+     d xxupmt                              like(gmupmt)
+      *
+     D                SDS
+     D  PGMSGQ           *PROC
+     D  PGMID                  1     10
+     D  WRKSTN               244    253
+     D  USRNAM               254    263
+     D  JOB#                 264    269  0
+      *
+      *   INTIALIZE FIELDS THAT ARE DEFAULTED TO A PARTICULAR VALUE
+      *
+     D ACO             C                   CONST('355')
+     D GLAM            C                   CONST('2')
+     D PAYROL          C                   CONST('Payroll   ')
+     D BILDET          C                   CONST('BillDet  ')
+     D elAM            C                   CONST('2')
+     D WKUSER          C                   CONST('TRSSI     ')
+      *
+      *   Break fields
+      *
+     d xxag            s                   like(elag)
+     d xxvid           s                   like(jdevid)
+     d xxdid           s                   like(loadid)
+     d xxvinv          s                   like(elvinv)
+     d xxntyp          s                   like(TRNTYP)
+     d
+     C/EJECT
+      *----------------------------------------------------------------
+      * MAIN PROCESSING LOOP
+      *----------------------------------------------------------------
+      *
+     C                   READ      STC001L2                               50
+B1   C     *IN50         DOUEQ     *ON
+      *
+     C                   MOVE      *ON           *IN52                          PROCESS
+B2   C     *IN50         IFEQ      *OFF
+      *DO NOT PROCESS RECORDS WITH ZEROS AMOUNTS.
+     C     DBTAMT        ANDEQ     *ZEROS
+     C     CRAMT         ANDEQ     *ZEROS
+     C                   MOVE      *OFF          *IN52                          DON'T PROCESS
+     C                   ENDIF
+      *
+      *******************************************************************
+      * Break in vendor or load id -- write 0411
+      *******************************************************************
+      *
+     c     JDEVID        ifne      xxvid
+     c     LOADID        orne      xxdid
+     c**   XXag          ifne      0
+     c     wrt911        ifeq      'Y'                                         if 911 was written
+     c                   exsr      $411                                        want 411 for keys
+     c                   end
+      *
+      *      if record is to be processed
+      *
+     c     *in52         ifeq      *on                                           amt<>0
+      *
+B3   C     *IN53         IFEQ      *OFF
+     C                   MOVE      *ON           *IN53                         write 0011
+     C                   ENDIF
+      *
+      *      Get new document number
+      *
+     C                   exsr      $getdoc
+      *
+      *      RETRIEVE VENDOR NAME  - VENDOR BREAK
+      *
+     c     JDEVID        ifne      xxvid
+      *
+     C                   EXSR      $VID
+     C                   MOVE      JDEVIN        XXEVIN            8 0          SAVE FOR 411
+B3   C     JDEVIN        IFNE      *ZEROS                                       40 = OFF
+     C*    JDEVIN        CHAIN     F0101LA                            40         p16169
+     C     JDEVIN        CHAIN     e10101LA                           40
+B4   C     *IN40         IFEQ      *OFF                                         40 = OFF
+     C                   MOVEL     ABALPH        WKALPH           40            NAME
+     C                   MOVE      ABMCU         WKRPMC           12            BUSINESS UNT
+     C                   Z-ADD     ABAN85        XXPYE             8 0          ALT PAYEE 411
+X4   C                   ELSE                                                   40 = ON
+     C                   MOVE      *BLANKS       WKALPH                         NAME
+     C                   MOVE      *BLANKS       WKRPMC                         BUSINESS UNT
+     C                   Z-ADD     0             XXPYE                          ALT PAYEE 411
+E4   C                   ENDIF                                                  40 = OFF
+E3   C                   ENDIF
+E3   C                   ENDIF                                                  VENDOR BREAK
+      *
+      *   RETRIEVE JULIAN DATE FOR INPUT DATE BY USING JDE'S ROUTINE...
+      *
+     C                   TIME                    $TIME            12 0
+     C                   MOVE      $TIME         $DATE             6 0
+     C                   MOVE      INMD          INPMD
+     C                   MOVE      INYY          INPYY
+     C                   MOVE      INPDT         #SIDAT            6
+     C                   MOVE      *BLANK        #EDAT             8
+     C                   MOVEL     '*YMD   '     #FFMT             7
+     C                   MOVEL     '*JUL   '     #TFMT             7
+     C                   MOVEL     '*NONE'       #SEP              7
+     C                   MOVE      *BLANK        $ERTST            1
+     C*                  CALL      'X0028   '
+     C*                  PARM                    #SIDAT
+     C*                  PARM                    #EDAT
+     C*                  PARM                    #FFMT
+     C*                  PARM                    #TFMT
+     C*                  PARM                    #SEP
+     C*                  PARM                    $ERTST
+     C*                  PARM      *BLANKS       $CTRY
+     C*                  MOVE      #SIDAT        SVGLDT            6            INPUT DATE
+     C*  P16169
+      *
+     C                   MOVE      INcc          INPccc
+     C                   MOVE      INYY          INPcyy
+     C                   MOVE      INMD          INPcmd
+     C                   MOVE      INPCCD        xxccyymmdd
+     C                   call      'E10028A'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxedat            6 0
+     c                   move      xxedat        #sidat
+     C                   MOVE      #sidat        SVGLDT            6            INPUT DATE
+      *
+      * Reset Break Fields
+      *
+     c                   z-add     0             xxag
+     c                   move      jdevid        xxvid
+     c                   move      loadid        xxdid
+     c                   move      *blanks       xxvinv
+     c     loadid        cat       inpdte:0      xxvinv
+     c                   move      TRNTYP        xxntyp
+     C                   Z-ADD     0             GLJELN                         JE LINE CNT
+     c                   move      'N'           wrt911
+     c*
+     c                   end                                                    *IN52
+     c                   end                                                    endbreak
+      *
+      *      if record is to be processed
+      *
+     c     *in52         ifeq      *on                                           amt<>0
+      *
+      *
+      *   RETRIEVE JULIAN DATE FOR TRANS DATE BY USING JDE'S ROUTINE...
+      *
+     C                   TIME                    $TIME
+     C                   MOVE      $TIME         $DATE
+     C                   MOVE      TRMD          TRANMD
+     C                   MOVE      TRYY          TRANYY
+     C                   MOVE      TRANDT        #SIDAT
+     C                   MOVE      *BLANK        #EDAT
+     C                   MOVEL     '*YMD   '     #FFMT
+     C                   MOVEL     '*JUL   '     #TFMT
+     C                   MOVEL     '*NONE'       #SEP
+     C                   MOVE      *BLANK        $ERTST
+     C*  P16169          CALL      'X0028   '
+     C*                  PARM                    #SIDAT
+     C*                  PARM                    #EDAT
+     C*                  PARM                    #FFMT
+     C*                  PARM                    #TFMT
+     C*                  PARM                    #SEP
+     C*                  PARM                    $ERTST
+     C*                  PARM      *BLANKS       $CTRY
+     C*                  MOVE      #SIDAT        SVTRDT            6            TRANS DATE
+      *
+     C                   MOVE      TRCC          TRncc
+     C                   MOVE      TRYY          TRnyy
+     C                   MOVE      TRMD          TRnmd
+     C                   MOVE      trnccd        xxccyymmdd
+     C                   call      'E10028A'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxedat
+     c                   move      xxedat        #sidat
+     C                   MOVE      #sidat        svtrdt            6            INPUT DATE
+      *  CONVERT G/L DATE FROM YYMMDD TO MMDDYY
+      *
+     C                   Z-ADD     INPDT         GLDATE
+     C                   Z-ADD     GLYR          YRGL
+     C                   Z-ADD     GLMO          MOGL
+     C                   Z-ADD     GLDA          DAGL
+      *
+      *      CALCULATE PERIOD & FISCAL YEAR FROM G/L DATE
+      *
+     C*  P16169          CALL      'X09031'
+     C*                  CALL      'E1I09031   '
+     C*                  PARM      '1'           #CALC             1
+     C*                  PARM      WKCO          #CO               5
+     C*                  PARM      GLMDY         #DG               6 0
+     C*                  PARM                    #PN               2 0
+     C*                  PARM                    #FY               2 0
+     C*                  PARM                    #CTRY             2 0
+     C*                  PARM                    #EDT              1
+     C*                  PARM                    #DGSY             1
+      *
+     C*                  Z-ADD     #PN           WKPN              2 0
+     C*                  Z-ADD     #FY           WKFY              2 0
+     C*                  Z-ADD     #CTRY         WKCEN             2 0
+      *
+     C*-------------- Start of code to replace X09031 (E1I09031)
+JEU56 * Begin of Added code for GET09031                                    p16169
+JEU56 * Retrieve Acct. Period                                     copied from smlgen/qrpgsrc/edenupr
+JEU56C                   MOVE      SVTRDT        #DG
+     C                   move      wkco          #CO
+MN04 C                   move      0             #CTRY             2 0
+MN04 C                   move      0             #FY               2 0
+      *
+MN04 C                   CALL      'GET09031'
+MN04 C                   PARM                    #CO               5
+MN04 C                   PARM                    #DG               6 0
+MN04 C                   PARM      0             #PN               2 0
+MD   C                   PARM      0             #FY               2 0
+MD   C                   PARM      0             #CTRY             2 0
+     C                   parm      ' '           BSSV              1
+MN04  *
+MN04  *
+     C                   Z-ADD     #PN           WKPN              2 0          period
+JEU56C                   Z-ADD     #FY           WKFY              2 0          fiscal year
+JEU56C                   Z-ADD     #CTRY         WKCEN             2 0          fiscal century
+      *
+      ******* End of code added for GET09031                                     p16169
+     C*-------------- End of code to replace X09031 (E1I09031)
+      *
+      *----------------------------------------------------------------
+      *   CHECK DETAIL............
+      *----------------------------------------------------------------
+      *
+     C                   Z-ADD     DBTAMT        WKAMT            15 2
+     C     WKAMT         SUB       CRAMT         WKAMT
+     c                   ADD       wkamt         XXAG                           ACCUM FOR 411
+      *
+      *   WRITE RECORD TO G/L FILE
+      *
+B3   C     WKAMT         IFNE      *ZEROS
+     C                   EXSR      $911
+     c                   move      'Y'           wrt911            1
+E3   C                   ENDIF
+      *
+     C****               EXSR      $411        MOVED TO LEVEL BREAK ABOVE
+      *
+E2   C                   ENDIF
+      *
+     C                   READ      STC001L2                               50
+      *
+E1   C                   ENDDO                                                  DETAIL
+      *******************************************************************
+      * LAST record --                write 0411
+      *******************************************************************
+      *
+     c**   XXag          ifne      0
+     c     wrt911        ifeq      'Y'                                         if 911 was written
+     c                   exsr      $411                                        want 411 for keys
+     c                   end
+      *
+     C/EJECT
+      *----------------------------------------------------------------
+      * EOF PROCESSING:
+      *----------------------------------------------------------------
+      *
+      *   WRITE BATCH RECORD IF BATCH NUMBER GENERATED
+      *
+     C                   MOVE      PVICUT        WKICUT
+     C                   MOVE      PVICU         WKICU
+      *
+      *  CREATE BATCH HEADER RECORD
+      *
+B1   C     *IN53         IFEQ      *ON
+     C*    KEY11         CHAIN     I0011                              51          p16169
+     C     KEY11         CHAIN     I0011l0                            51
+B2   C     *IN51         IFEQ      *ON                                          51 = ON
+     C                   MOVE      PVICU         ICICU
+     C                   MOVEL     ' '           ICIST
+     C                   MOVE      PVAMT         ICAICU
+     C                   MOVE      PVCNT         ICNDO
+     C                   MOVE      PVAMT         ICAME
+     C                   MOVE      PVCNT         ICDOCN
+     C                   MOVE      PVICUT        ICICUT
+     C                   MOVE      'A'           ICIAPP
+     C                   MOVE      'Y'           ICBAL
+     C                   MOVE      ' '           ICBALJ
+     C                   MOVE      'N'           ICPOB
+     C                   MOVE      'Y'           ICIBOI
+      *
+     C*  p16169          WRITE     I0011
+     C                   WRITE     I0011l0
+     C*
+     C* WRITE RUN LOG HEADER WORKFILE - WILL BE READ IN CL trnvchcl TO PUSH BATCHES TO ZPROCESSOR
+     C*
+     C                   call      'E1LCXFR'
+     c                   parm                    RETURN            7
+     C                   parm                    icICUT                         BATCH TYPE
+     C                   parm                    icICU                          BATCH NUMBER
+     C                   parm                    icuser                         USER
+     C                   parm                    GLCO                           company 5A
+E2   C                   ENDIF                                                  51 = ON
+E1   C                   ENDIF                                                  53 = ON
+      *
+      *
+      * THIS WILL CLOSE ANY FILES THAT ARE LEFT OPEN FROM ANY CALLED
+      * PROGRAMS WITHIN THIS PROGRAM.
+      *
+     C                   CALL      'UTRCRSC'
+      *
+     C                   MOVE      *ON           *INLR
+      *
+      /EJECT
+      **************************************************************
+      *   CONVERT ALPHA VENDOR NUMBER TO NUMERIC VENDOR NUMBER
+      **************************************************************
+     C     $VID          BEGSR
+      *
+     C     VID1          IFEQ      *BLANK
+     C                   Z-ADD     *ZEROS        JDEVIN            8 0
+     C                   ELSE
+     C     VID2          IFEQ      *BLANK
+     C                   Z-ADD     VID1#         JDEVIN
+     C                   ELSE
+     C     VID3          IFEQ      *BLANK
+     C                   Z-ADD     VID2#         JDEVIN
+     C                   ELSE
+     C     VID4          IFEQ      *BLANK
+     C                   Z-ADD     VID3#         JDEVIN
+     C                   ELSE
+     C     VID5          IFEQ      *BLANK
+     C                   Z-ADD     VID4#         JDEVIN
+     C                   ELSE
+     C     VID6          IFEQ      *BLANK
+     C                   Z-ADD     VID5#         JDEVIN
+     C                   ELSE
+     C     VID7          IFEQ      *BLANK
+     C                   Z-ADD     VID6#         JDEVIN
+     C                   ELSE
+     C     VID8          IFEQ      *BLANK
+     C                   Z-ADD     VID7#         JDEVIN
+     C                   ELSE
+     C                   Z-ADD     VID8#         JDEVIN
+     C                   ENDIF
+     C                   ENDIF
+     C                   ENDIF
+     C                   ENDIF
+     C                   ENDIF
+     C                   ENDIF
+     C                   ENDIF
+     C                   ENDIF
+      *
+     C                   ENDSR
+      **************************************************************
+      *   RIGHT JUSTIFY AND ZERO FILL VENDOR NUMBER IN THE SUBLEDGER
+      *   FIELD.
+      **************************************************************
+     C     $VSBL         BEGSR
+      *
+     C                   Z-ADD     0             X                 1 0
+     C                   Z-ADD     8             Y                 1 0
+     C                   Z-ADD     8             Z                 1 0
+     C                   MOVE      *BLANKS       JARB
+     C                   MOVEA     JDEVID        VIDAR
+      *RIGHT JUSTIFY THE VENDOR NUMBER
+     C                   DO        8             X
+     C     VIDAR(Z)      IFNE      *BLANKS
+     C                   MOVE      VIDAR(Z)      JARB(Y)
+     C                   SUB       1             Y
+     C                   ENDIF
+     C                   SUB       1             Z
+     C                   ENDDO
+      *
+      *ZERO FILL THE BLANKS AFTER RIGHT JUSTIFING
+     C                   Z-ADD     0             X
+     C                   Z-ADD     1             Y
+     C                   DO        8             X
+     C     JARB(Y)       IFEQ      *BLANKS
+     C                   MOVE      *ZERO         JARB(Y)
+     C                   ADD       1             Y
+     C                   ELSE
+     C                   ADD       1             Y
+     C                   ENDIF
+     C                   ENDDO
+      *
+     C                   ENDSR
+      *
+      /EJECT
+      **************************************************************
+      *   Format the GLACCT number to Object and Subledger.
+      **************************************************************
+     C     $GLACT        BEGSR
+     C*
+     C                   MOVE      *BLANKS       wkacct
+     C                   MOVEL     GLACCT        wkacct
+     C*
+      * Call pgm to parse out account number that was passed in.
+     C*
+     C*  P16169          CALL      'X0901'
+     C                   CALL      'E1I0901'
+     C                   PARM                    xxsym
+     C                   PARM      '9'           xxomod
+     C                   PARM      '2'           xximod
+     C                   PARM      WKACCT        xxani
+     C     wkmcu         PARM                    xxmcu
+     C     wkobj         PARM                    xxobj
+     C     wksub         PARM                    xxsub
+     C                   PARM                    xxerrm
+     C                   PARM                    i0901ds
+     C*
+     C                   if        xxerrm = *blanks
+     C                   MOVEL     wkmcu         glmcu
+     C                   MOVEL     wkobj         globj
+     C                   MOVEL     wksub         glsub
+     C                   MOVEL     wkacct        GLANI
+     C                   ELSE
+     C                   MOVEL     *blanks       glmcu
+     C                   MOVEL     *blanks       globj
+     C                   MOVEL     *blanks       glsub
+     C                   MOVE      *BLANKS       GLANI
+     C                   ENDIF
+      *
+      *GET THE ACCOUNT ID
+      *
+     C     F09KEY        CHAIN     I0901LB                            40
+B3   C     *IN40         IFEQ      *OFF                                         40 = OFF
+     C                   MOVE      GMAID         GLAID
+X3   C                   ELSE
+     C                   MOVE      *BLANKS       GLAID
+E3   C                   ENDIF                                                  40 = OFF
+      *
+     C                   ENDSR
+      *
+      /EJECT
+      **************************************************************
+      *   WRITE VOUCHER ENTRY RECORD TO JD EDWARDS - E1 WHEN VENDOR/LOADID BREAKS
+      **************************************************************
+     C     $411          BEGSR
+      *GET PAYMENT INSTRUMENT
+     C*    JDEVIN        CHAIN     I0401                              40          p16169
+     C     XXEVIN        CHAIN     I0401la                            40
+B1   C     *IN40         IFEQ      *OFF                                         40 = OFF
+     C                   MOVE      A6PYIN        elPYIN                         PYMNT INSTRUMNT
+E1   C                   ELSE                                                   NOT FOUND
+     C                   MOVE      *BLANKS       elPYIN                         PYMNT INSTRUMNT
+E1   C                   ENDIF                                                  40 = OFF
+      *
+      * Move in the security cost center retrieved from the vendor master.
+      *
+B1   C     WKRPMC        IFEQ      *BLANKS
+     C                   MOVE      *BLANKS       elMCU
+X1   C                   ELSE
+     C                   MOVE      WKRPMC        elMCU
+E1   C                   ENDIF
+      *
+     C                   Z-ADD     SVDOC         elDOC                          DOCUMENT #
+     C                   MOVE      '  '          elDCT                          DOC TYPE
+B1   C**   CRAMT         IFNE      *ZEROS
+     C**                 MOVE      'PD'          elDCT                          DOC TYPE
+X1   C**                 ELSE
+B1   C**   DBTAMT        IFNE      *ZEROS
+     C**                 MOVE      'PV'          elDCT                          DOC TYPE
+X1   C**                 ENDIF
+E1   C**                 ENDIF
+B1   C     XXAG          IFGE      *ZEROS
+     C                   MOVE      'PV'          elDCT                          DOC TYPE
+     c                   else
+     c                   move      'PD'          eldct
+X1   C                   ENDIF
+     C                   MOVE      '001'         elSFX                          PAY ITEM
+     C                   MOVE      '001'         elSFXO                         ORDER SUFFIX
+     C                   MOVE      *ZEROS        elSFXE                         PAY ITM EXT#
+     C                   MOVE      *BLANKS       elDCTA                         ADJ.DOC TYPE
+     C                   Z-ADD     XXEVIN        elAN8                          VENDOR #
+     C***                Z-ADD     XXEVIN        elPYE                          PAYEE ADR #
+     C                   Z-ADD     XXPYE         elPYE                          ALT PAYEE 10-23-20
+     C                   MOVE      *ZEROS        elSNTO                         APROVER#
+     C                   MOVE      SVGLDT        elDIVJ                         INVOICE DATE
+     C                   MOVE      SVGLDT        elDSVJ                         SERV/TAX DATE
+     C                   MOVE      SVTRDT        elDDJ                          DUE DATE
+     C                   MOVE      *ZEROS        elDDNJ                         DISCOUNT DUE DATE
+     C                   MOVE      SVGLDT        elDGJ                          G/L DATE
+     C                   Z-ADD     WKFY          elFY                           FISCAL YR
+     C                   Z-ADD     WKCEN         elCTRY                         CENTURY
+     C                   Z-ADD     WKPN          elPN                           PERIOD #
+     C                   MOVE      PVICU         elICU                          BATCH #
+     C                   MOVE      PVICUT        elICUT                         BATCH TYPE
+     C                   MOVE      *BLANKS       elBALJ                         BAL. J.E'S
+     C                   MOVE      'A'           elPSTc                         PAY STATUS rppst
+      *
+     C**                 Z-ADD     DBTAMT        WAMT2
+     C**   WAMT2         SUB       CRAMT         WAMT2
+     C                   move      XXAG          WAMT2                          was zadd 9-17
+      *
+     C*                  Z-ADD     WAMT2D        elAG                           GROSS AMT
+     C*                  Z-ADD     WAMT2D        elAAP                          OPEN AMT
+     C                   Z-ADD     WAMT2         elAG                           GROSS AMT
+     C                   Z-ADD     WAMT2         elAAP                          OPEN AMT
+     C                   MOVE      *ZEROS        elADSC                         DISCOUNT AVAILABLE
+     C                   MOVE      *ZEROS        elADSA                         DISCOUNT TAKEN
+     C                   MOVE      *ZEROS        elATXA                         TAXABLE AMT
+     C                   MOVE      *ZEROS        elATXN                         NON-TAXABLE AMT
+     C                   MOVE      *ZEROS        elSTAM                         TAX
+     C                   MOVE      *BLANKS       elTXA1                         TAX RATE/AREA
+     C                   MOVE      *BLANKS       elEXR1                         TAX EMPL/CODE
+     C                   MOVE      *BLANKS       elCRRM                         MODE (F)
+     C**                 MOVE      *BLANKS       elCRCD                         CURRENCY CODE
+     C                   MOVE      *ZEROS        elCRR                          EXCHG RATE
+     C                   MOVE      *ZEROS        elACR                          CURRENCY AMT
+     C                   MOVE      *ZEROS        elFAP                          FOREIGN OPEN AMT
+     C                   MOVE      *ZEROS        elCDS                          FOREIGN DISCOUNT AVA
+     C                   MOVE      *ZEROS        elCDSA                         FOREIGN DISCOUNT TAK
+     C                   MOVE      *ZEROS        elCTXA                         FOREIGN TAXABLE AMT
+     C                   MOVE      *ZEROS        elCTXN                         FOREIGN NON-TAX AMT
+     C                   MOVE      *ZEROS        elCTAM                         FOREIGN TAX AMT
+     C                   MOVE      *BLANKS       elGLC                          G/L OFFSET
+     C                   MOVE      *BLANKS       elGLBA                         G/L BANK ACC
+      *
+      *
+      * New Fields for E10411  - P16169
+      *
+     C                   movel     eluser        eledus                         edi user id
+     C                   movel     glicu         eledbt                         edi batch no
+     C                   movel     eldoc         eledtn                         edi trans-eldoc
+     C                   add       1             xxed411                        edi line no
+     C                   z-add     xxed411       eledln                         edi line no
+     C                   movel     '0'           eledsp                         edi success procd
+     C                   movel     'A'           eledtc                         edi trans action
+     C                   movel     'V'           eledtr                         edi trans type -Vchr
+     C                   move      xxsyssyndt    elabdt                         Date updated
+     C                   z-add     elupmt        elabtm                         Time Last Updated
+     C                   movel     'TRNVCHE1'    elakvn                         pgm  Last Updated
+     C                   movel     eluser        elajvn                         user id created
+     C                   movel     'B'           eleder                          send/rec/both
+     C                   movel     'D'           elcrrm                          currency-For/Dom
+     C                   movel     'USD'         elcrcd                          currency-code from
+      *
+      *
+      *  Retrieve the GL Class to use in retrieving the bank account id.
+      *
+     C*    JDEVIN        CHAIN     I0401                              40         p16169
+     C     XXEVIN        CHAIN     I0401la                            40
+B1   C     *IN40         IFEQ      *OFF                                         40 = OFF
+     C                   MOVE      A6APC         elGLC                          G/L OFFSET
+     C**                 MOVE      'PB    '      F12KY1            6            p16169 -dont need
+     C**                 MOVE      A6APC         F12KY1                           "
+     C**                 MOVE      '00390'       F12KY2            5               "
+      *
+      * Get the cost center/object/sub from the automatic accounting instructions file.
+      * ‚E1 will resolve this in E1 - dont need to get it per Angie 7-28-2020
+     C*    F12KEY        CHAIN     I0012                              40          p16169
+     C**   F12KEY        CHAIN     I0012l0                            40
+B2   C**   *IN40         IFEQ      *OFF                                         40 = OFF
+      *
+      * Now get the account id for the bank account.
+      *
+     C**   F09KY2        CHAIN     I0901LB                            40
+B3   C**   *IN40         IFEQ      *OFF                                         40 = OFF
+     C**                 MOVE      GMAID         elGLBA
+E3   C**                 ENDIF                                                  40 = OFF
+E2   C**                 ENDIF                                                  40 = OFF
+E1   C                   ENDIF                                                  40 = OFF
+      *
+     C                   MOVE      *blanks       elGLBA                         E1 will get it
+     C                   MOVE      *BLANKS       elPOST                         G/L POSTED
+     C                   MOVE      *BLANKS       elAID2                         G/L CR ACCT
+     C                   MOVE      *BLANKS       elOBJ                          OBJECT
+     C                   MOVE      *BLANKS       elSUB                          SUBSIDIARY
+     C                   MOVE      *BLANKS       elSBLT                         SUBLEGER TYP
+     C                   MOVE      *BLANKS       elSBL                          SUBLEDGER
+     C                   MOVE      *BLANKS       elBAID                         BANK TRANS
+     C                   MOVE      *BLANKS       elPTC                          PAY TERMS
+     C                   MOVE      *BLANKS       elVOD                          VOID FLAG
+     C                   MOVE      *BLANKS       elOKCO                         ORIG ORD DOC
+     C                   MOVE      *BLANKS       elODCT                         ORIG DOC TYP
+     C                   MOVE      *ZEROS        elODOC                         ORIG DOC#   OUNT AVA
+     C                   MOVE      *BLANKS       elOSFX                         ORIG PAY ITM
+     C                   MOVE      *BLANKS       elCRC                          PAY HAND CDE
+     C                   MOVE      *BLANKS       elVINV                         INVOICE #
+     C****               MOVEL     LOADID        elVINV                         INVOICE #
+     C                   MOVEL     XXVINV        elVINV                         LOADID||INPUTDATE
+     C                   MOVE      *BLANKS       elPKCO                         PO DOC CDE
+     C                   MOVE      *BLANKS       elPO                           PO#
+     C                   MOVE      *BLANKS       elPDCT                         PO DOC TYPE
+     C                   MOVE      *ZEROS        elLNID                         LINE#
+     C                   MOVE      *BLANKS       elSFXO                         ORDER SFX
+     C                   MOVE      *ZEROS        elOPSQ                         OPERATONS#
+     C                   MOVE      *BLANKS       elVR01                         REFERENCE
+     C                   MOVE      *BLANKS       elUNIT                         UNIT NO
+     C                   MOVE      *BLANKS       elMCU2                         BUSINESS U
+      *
+      *IF THIS TRANSACTION IS BILL DETAIL, MOVE THE EXTREF TO THE REMRK
+      *FIELD SO THAT IT PRINTS ON THE CHECK. THE EXTREF FIELD IS THE
+      *INVOICE NUMBER AND NEEDS TO PRINT ON THE CHECK.
+      *
+     C**   TRNTYP        IFEQ      BILDET
+     C     xxNTYP        IFEQ      BILDET
+     C                   MOVEL     EXTREF        elRMK
+     C                   ELSE
+     C                   MOVE      *BLANKS       elRMK                          REMARK
+     C                   ENDIF
+      *
+     C                   MOVE      *BLANKS       elRF                           RECUR FREQ
+     C                   MOVE      *ZEROS        elDRF                          # OF PMTS
+     C                   MOVE      *BLANKS       elCTL                          STMT #
+     C                   MOVE      *BLANKS       elFNLP                         CLOSED ITEM
+     C                   MOVE      *ZEROS        elU                            UNITS
+     C                   MOVE      *BLANKS       elUM                           UNIT OF MEAS
+     C                   MOVE      *BLANKS       elTXA3                         TAXAREA 3
+     C                   MOVE      *BLANKS       elEXR3                         TAXEXPL 3
+     C                   MOVE      *BLANKS       elRP1                          MISC CDE 1
+     C                   MOVE      *BLANKS       elRP2                          MISC CDE 2
+     C                   MOVE      *BLANKS       elRP3                          CASH RECPT
+     C                   MOVE      *BLANKS       elAC07                         1099 RPTING
+     C                   MOVE      *BLANKS       elTNN                          FLG FOR 1099
+     C                   MOVE      *BLANKS       elDMCD                         DOMESTIC ENT
+     C                   MOVE      *ZEROS        elITM                          ITEM# SHORT
+     C                   MOVE      *ZEROS        elHCRR                         HIST EXCHG
+     C                   MOVE      *ZEROS        elHDGJ                         HIST DATE
+     C                   MOVE      *BLANKS       elURCd                         USR RSRV CDE-rpurc1
+     C                   MOVE      *ZEROS        elURDT                         USR RSRV DTE
+     C                   MOVE      *ZEROS        elURAT                         USR RSRV AMT
+     C                   MOVE      *ZEROS        elURAB                         USR RSRV NBR
+     C                   MOVE      *BLANKS       elURRF                         USR RSRV REF
+     C                   MOVEL     PGMID         elPID
+     C                   MOVEL     WRKSTN        elJOBN                         JOB
+     C****               ADD       1             PVCNT             5 0          BATCH COUNT
+     C                   ADD       WAMT2         PVAMT            15 2          BATCH AMT
+      *
+      *   WRITE RECORD TO JDE A/P LEDGER (F0411)
+      *
+     C                   WRITE     I0411
+      *
+     C                   ENDSR
+      /EJECT
+      **************************************************************
+      *   WRITE JOURNAL ENTRY RECORD TO JD EDWARDS SUBROUTINE
+      **************************************************************
+     C     $911          BEGSR
+      *
+     C                   MOVE      '  '          GLDCT                          DOC TYPE
+      *
+B1   C     CRAMT         IFNE      *ZEROS
+     C                   MOVE      'PD'          GLDCT                          DOC TYPE
+X1   C                   ELSE
+B1   C     DBTAMT        IFNE      *ZEROS
+     C                   MOVE      'PV'          GLDCT                          DOC TYPE
+X1   C                   ENDIF
+E1   C                   ENDIF
+      *
+     C                   Z-ADD     SVDOC         GLDOC                          DOCUMENT #
+     C                   MOVE      SVGLDT        GLDGJ                          G/L DATE
+     C                   ADD       1             GLJELN                         LINE NUMBER
+     C                   MOVE      *BLANKS       GLEXTL                         LINE EXT CDE
+     C                   MOVE      *BLANKS       GLPOST                         GL POSTEDCDE
+     C                   Z-ADD     PVICU         GLICU                          BATCH #
+     C                   MOVE      'V '          GLICUT                         BATCH TYPE
+     C                   MOVE      '00355'       GLCO                           COMPANY
+      *
+      * P16169 added for new fields in e10911
+     C                   movel     gluser        gledus                         edi user id
+     C                   movel     glicu         gledbt                         edi batch no
+     C                   movel     gldoc         gledtn                         edi trans ->gldoc
+     C                   add       1             xxedln                         edi line no
+     C                   z-add     xxedln        gledln                         edi line no
+     C                   movel     '0'           gledsp                         edi success procd
+     C                   movel     'A'           gledtc                         edi trans action
+     C                   movel     'V'           gledtr                         edi trans type
+     C                   move      xxsyssyndt    glabdt                         Date updated
+     C                   z-add     glupmt        glabtm                         Time Last Updated
+     C                   movel     'TRNVCHE1'    glakvn                         pgm  Last Updated
+     C                   movel     gluser        glajvn                         user id created
+     C                   movel     'B'           gleder                          send/rec/both
+     C                   movel     'D'           glcrrm                          currency-For/Dom
+     C                   movel     'USD'         glcrcd                          currency code from
+      *
+      *
+      * Extract company number out of the 1st 3 digits of the cost center.
+      *
+     C                   move      *zeros        wk3co
+     C     '.'           check     glacct        start
+     C                   if        start > 0
+     C                   if        start <= 12
+     C                   eval      wk3co = %subst(glacct:start:3)
+     C                   else
+     C                   eval      wk3co = %subst(glacct:start)
+     C                   endif
+     C                   endif
+     C                   move      *zeros        glco
+     C                   move      wk3co         glco
+      *
+      * FORMAT ACCOUNT NUMBER
+      *
+     C                   EXSR      $GLACT
+      *
+     C                   MOVEL     'AA'          GLLT                           LEDGER TYPE
+     C                   Z-ADD     WKPN          GLPN                           G/L PERIOD#
+     C                   Z-ADD     WKCEN         GLCTRY                         CENTURY
+     C                   Z-ADD     WKFY          GLFY                           FISCAL YEAR
+     C                   MOVE      *BLANKS       GLFQ                           FISCAL QTR
+     C                   MOVE      *BLANKS       GLCRR                          EXCHG RATE
+     C                   MOVE      *BLANKS       GLHCRR                         HIST EXCHG R
+     C                   MOVE      *BLANKS       GLHDGJ                         HIST EXCHG D
+      *
+     C                   Z-ADD     DBTAMt        xxwkamt          15 2          DTL AMT
+     C     xxwkamt       SUB       CRAMt         xxwkamt                        DTL AMT
+     c                   z-add     xxwkamt       glaa                           added 9-17-20
+     C**                 Z-ADD     DBTAMT        GLAG                           DTL AMT
+     C**   GLAG          SUB       CRAMT         GLAG                           DTL AMT
+      *
+     C                   MOVE      *ZEROS        GLU                            UNITS
+     C                   MOVE      *BLANKS       GLUM                           UNIT OF MEAS
+     C                   MOVE      *BLANKS       GLGLC                          GL OFFSET
+     C                   MOVE      *BLANKS       GLRE                           REVERSE OR V
+     C                   MOVEL     WKALPH        GLEXA                          ALPHA NAME
+     C                   MOVE      *BLANKS       GLEXR                          REMARK
+     C                   MOVE      *BLANKS       GLR1                           JE VOUCHER
+     C                   MOVE      *BLANKS       GLR2                           ADDRESS #
+     C                   MOVE      *BLANKS       GLR3                           ADDRESS REC
+     C                   MOVE      *BLANKS       GLSFX                          PAY ITEM
+     C                   MOVE      *ZEROS        GLODOC                         ORIG.DOC#
+     C                   MOVE      *BLANKS       GLODCT                         ORIG.DOCTYPE
+     C                   MOVE      *BLANKS       GLOSFX                         ORIG.PAYITEM
+     C                   MOVE      *BLANKS       GLPKCO                         PO DOC
+     C                   MOVE      *BLANKS       GLOKCO                         ORIG.ORD DOC
+     C                   MOVE      *BLANKS       GLPDCT                         PO DOC TYPE
+     C                   MOVE      ABAN8         GLAN8                          VENDOR NUMBER
+     C                   MOVE      *BLANKS       GLCN                           CHECK #
+     C                   MOVE      *ZEROS        GLDKJ                          CHECK DATE
+     C                   MOVE      *ZEROS        GLDKC                          CHL CLEARED
+     C                   MOVE      *BLANKS       GLASID                         SERIAL#
+     C                   MOVE      *BLANKS       GLBRE                          BATCH CDE
+     C                   MOVE      *BLANKS       GLRCND                         RECONCILED?
+     C                   MOVE      *BLANKS       GLSUMM                         SUMMARIZECDE
+     C                   MOVE      *BLANKS       GLPRGE                         PURGE CODE
+     C                   MOVE      *BLANKS       GLTNN                          FLAG 1099
+     C                   MOVE      *BLANKS       GLALT1                         ALT GL POST1
+     C                   MOVE      *BLANKS       GLALT2                         ALT GL POST2
+     C                   MOVE      *BLANKS       GLALT3                         ALT GL POST3
+     C                   MOVE      *BLANKS       GLALT4                         ALT GL POST4
+     C                   MOVE      *BLANKS       GLALT5                         MULT. CURR.
+     C                   MOVE      *BLANKS       GLALT6                         CASH BASIS
+     C                   MOVE      *BLANKS       GLALT7                         COMM RELFLG
+     C                   MOVE      *BLANKS       GLALT8                         BILLING CTL
+     C                   MOVE      *BLANKS       GLALT9                         CURRENCY UPD
+     C                   MOVE      *BLANKS       GLALT0                         LABOR COST
+     C                   MOVE      *BLANKS       GLALTT                         FUTURE USE
+     C                   MOVE      *BLANKS       GLALTV                         FUTURE USE
+     C                   MOVE      *BLANKS       GLALTU                         FUTURE USE
+     C                   MOVE      *BLANKS       GLALTW                         FUTURE USE
+     C                   MOVE      *BLANKS       GLALTX                         CONS TX XREF
+     C                   MOVE      *BLANKS       GLALTZ                         FUTURE USE
+     C                   MOVE      *BLANKS       GLDLNA                         DLT NOT ALLO
+     C                   MOVE      *BLANKS       GLCFF1                         FUTURE USE
+     C                   MOVE      *BLANKS       GLCFF2                         FUTURE USE
+     C                   MOVE      *BLANKS       GLASM                          LSE COST LED
+     C                   MOVE      *BLANKS       GLBC                           BILL CODE
+     C                   MOVE      *BLANKS       GLVINV                         INVOICE #
+     C*                  MOVEL     LOADID        GLVINV                         INVOICE #
+     C                   MOVEL     xxvinv        GLVINV                         loadid || input date
+     C**                 Z-ADD     INPDT         GLIVD                          INVOICE DTE
+     C                   move      svgldt        GLIVD                          INVOICE DTE
+     C                   MOVE      *BLANKS       GLWR01                         PHASE
+     C                   MOVE      *BLANKS       GLPO                           PO NUMBER
+     C                   MOVE      *BLANKS       GLPSFX                         PO SFX
+     C                   MOVE      *BLANKS       GLDCTO                         ORDER TYPE
+     C                   MOVE      *ZEROS        GLLNID                         LINE NUMBER
+     C                   MOVE      *ZEROS        GLWY                           FISCAL YR WE
+     C                   MOVE      *ZEROS        GLWN                           FISCAL PERIO
+     C                   MOVE      *BLANKS       GLFNLP                         CLOSED ITEM
+     C                   MOVE      *ZEROS        GLOPSQ                         OPER.SEQ#
+     C                   MOVE      *BLANKS       GLJBCD                         JOB TYPE
+     C                   MOVE      *BLANKS       GLJBST                         JOB STEP
+     C                   MOVE      *BLANKS       GLHMCU                         HOME BUS.UNI
+     C                   MOVE      *ZEROS        GLDOI                          DOI SUB
+     C                   MOVE      *BLANKS       GLALID                         OUTSIDER
+     C                   MOVE      *BLANKS       GLALTY                         ID TYPE
+     C                   MOVE      *ZEROS        GLDSVJ                         SERVIC DATE
+     C                   MOVE      *ZEROS        GLREG#                         REGIST. NBR
+     C                   MOVE      *ZEROS        GLPYID                         PAYMENT ID
+     C                   MOVEL     PGMID         GLPID                          PROGRAM ID
+     C                   MOVEL     WRKSTN        GLJOBN                         JOB
+     C                   MOVE      #SIDAT        GLUPMJ                         UPDATE DATE
+     C                   TIME                    GLUPMT                         TIME UPDATED
+      *
+     C                   MOVE      *BLANKS       GLSBL                          SUBLEDGER
+     C                   MOVE      *BLANKS       GLSBLT                         SUBLEDG TYPE
+      *
+      *IF PAYROLL PUT JDE VENDOR NUMBER IN THE SUBledger. HAS TO BE RIGHT
+      *JUSTIFIED AND ZERO FILLED.
+      *
+B1   C     TRNTYP        IFEQ      PAYROL
+      *
+     C                   EXSR      $VSBL
+     C                   MOVEA     JARB          GLSBL
+     C                   MOVE      'A'           GLSBLT
+      *
+X1   C                   ELSE                                                   NOT PAYROLL
+      *
+B2   C     TRNTYP        IFEQ      BILDET
+      *
+      *IF BILDET PUT LOAD ID INTO SUBLEDGER, LEFT JUSTIFIED.
+      *
+     C                   MOVEL     LOADID        GLSBL
+     C                   MOVE      'X'           GLSBLT
+E2   C                   ENDIF                                                  TRNTYP = BILLDT
+E1   C                   ENDIF                                                  Trntyp = payrol
+      *
+     C                   WRITE     I0911
+      *
+      *  UPDATE BALANCE FILE
+      *
+      *  IF THIS IS A ZERO AMOUNT CHECK, WRITE A REVERSAL ENTRY WITH A
+      *  DIFFERENT DOCUMENT TYPE...
+      *
+     C                   Z-ADD     DBTAMT        WAMT2
+     C     WAMT2         SUB       CRAMT         WAMT2
+B1   C     WAMT2         IFEQ      0                                            NET = 0
+     C                   MOVE      'PD'          GLDCT                          DOC TYPE
+     C                   MOVE      'V'           GLRE                           REVERSAL/VOID
+     C     WKAMT         MULT      -1            GLAA                           AMOUNT
+     C**   xxwkamt       div       100           GLAA                           AMOUNT
+     C**   WKAMT         MULT      -1            GLAG                           AMOUNT
+     C                   ADD       1             GLJELN                         J/E LINE CNT
+      *
+     C                   add       1             xxedln                         edi trans-
+     C                   z-add     xxedln        gledln                         edi transline
+      *
+      *   WRITE RECORD TO JDE G/L LEDGER (F0911)
+      *
+     C                   WRITE     I0911
+     C                   MOVE      *BLANKS       GLEXR
+      *
+      *  UPDATE BALANCE FILE
+      *
+E1   C                   ENDIF                                                  NET = 0
+      *
+      *  ONLY ACCUMULATE DEBIT AMOUNTS FOR BATCH HEADER
+      *
+B1   C     GLAA          IFGT      0                                            GLAA > 0
+     C                   ADD       GLAA          BATAMT           15 2
+B1   C**   GLAG          IFGT      0                                            GLAA > 0
+     C**                 ADD       GLAG          BATAMT           15 2          p16169
+     C                   ADD       1             BATNDO            5 0
+E1   C                   ENDIF                                                  GLAG > 0
+      *
+     C                   ENDSR
+      /EJECT
+      **************************************************************
+      *   GET DOCUMENT NUMBER -- BREAK ON VENDOR/LOADID
+      **************************************************************
+     C     $GETDOC       BEGSR
+      *
+      * CALL PGM TO GENERATE NEXT AVAILABLE DOCUMENT # FROM JDE
+      *
+     C*  P16169          CALL      'X0010'
+     C*                  PARM      '04  '        PSSY
+     C*                  PARM      '01'          PSIDX
+     C*                  PARM                    PSNBR
+     C*                  Z-ADD     PSNBR         SVDOC             8 0
+     C                   ADD       1             PVCNT             5 0          doc count
+      *
+     c     tryagain      tag
+     C                   call      'GET0010 '
+     C                   parm      '04  '        pssy              4
+     C                   parm      '01'          psidx             2
+     C                   parm                    spsnbr           15 0
+     C                   PARM      ' '           bssv              1
+     c                   if        spsnbr = svdoc
+     c                   goto      tryagain
+     c                   end
+     C                   z-add     spsnbr        svdoc             8 0          document
+      *
+     c                   z-add     0             xxedln                         reset line# 911
+     C                   Z-ADD     0             xxed411                        edi line no 411
+     C                   ENDSR
+      /EJECT
+      **************************************************************
+     C     *INZSR        BEGSR                                                          *
+      **************************************************************
+      * Parm list
+     C     *entry        plist
+     C                   parm                    xxbatch
+      *
+      * KEY LISTS
+      *
+      * KEY USED FOR VOUCHER HEADER
+      *
+     C     KEYHD         KLIST                                                  PKBKCPL0
+     C                   KFLD                    CO
+     C                   KFLD                    BATCH
+      *
+      *
+      * KEY USED FOR BATCH HEADER IN JDE
+      *
+     C     KEY11         KLIST                                                    F0011
+     C                   KFLD                    WKICUT            2
+     C                   KFLD                    WKICU             8 0
+      *
+      * KEY USED FOR BATCH HEADER IN JDE
+      *
+     C     F09KEY        KLIST                                                    F0901LB
+     C                   KFLD                    GLMCU
+     C                   KFLD                    GLOBJ
+     C                   KFLD                    GLSUB
+      *
+     C**   F09KY2        KLIST                                                    F0901LB
+     C**                 KFLD                    KGMCU
+     C**                 KFLD                    KGOBJ
+     C**                 KFLD                    KGSUB
+      *
+     C**   F12KEY        KLIST                                                    F0012
+     C**                 KFLD                    F12KY1                           ITEM#
+     C**                 KFLD                    F12KY2                           COMPANY
+      *
+      *   RETRIEVE JULIAN DATE FOR UDATE BY USING JDE'S ROUTINE...
+      *
+     C                   MOVEL     'PB    '      PB                6
+     C                   TIME                    $TIME            12 0
+     C                   MOVE      $TIME         $DATE             6 0
+     C                   MOVE      $DATE         #SIDAT            6
+     C                   MOVE      *BLANK        #EDAT             8
+     C                   MOVEL     '*SYSVAL'     #FFMT             7
+     C                   MOVEL     '*JUL   '     #TFMT             7
+     C                   MOVEL     '*NONE'       #SEP              7
+     C                   MOVE      *BLANK        $ERTST            1
+     C*  P16169          CALL      'X0028   '
+     C*                  PARM                    #SIDAT
+     C*                  PARM                    #EDAT
+     C*                  PARM                    #FFMT
+     C*                  PARM                    #TFMT
+     C*                  PARM                    #SEP
+     C*                  PARM                    $ERTST
+     C*                  PARM      *BLANKS       $CTRY             2
+      *
+     C     *mdy          movel     udate         wkisodate
+     C                   movel     wkisodate     xxccyymmdd
+      *
+     C                   call      'E10028A'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxedat
+     c                   move      xxedat        #sidat
+      *
+     C                   MOVE      #SIDAT        GLUPMJ                         UPDATE DATE
+     C                   MOVE      #SIDAT        elUPMJ                         UPDATE DATE
+     C                   MOVE      #SIDAT        GLDSYJ                         SYSTEM DATE
+     C                   MOVE      #SIDAT        GLDICJ                         BATCH DATE
+     C                   MOVE      #SIDAT        icdicj                         BATCH DATE
+      *
+     C                   TIME                    GLTICU                         TIME
+     C                   TIME                    GLUPMT                         TIME UPDATED
+     C                   TIME                    elUPMT                         TIME UPDATED
+     C                   MOVEL     WKUSER        ICUSER                         UPDATE USER F0011
+     C                   MOVEL     WKUSER        GLUSER                         UPDATE USER F0911
+     C                   MOVEL     WKUSER        elUSER                         UPDATE USER F0411
+     C                   MOVEL     WKUSER        elTORG                         TRANS ORIGINATOR 411
+     C                   MOVEL     WKUSER        GLTORG                         TRANS ORIGINATOR 911
+      *
+      *
+      * Put system date into an 7,0 workfield for updating the 911
+      *
+     C                   call      'HP8008'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxsyssyndt
+     C*
+     C                   MOVE      ACO           CO                3 0
+     C                   MOVE      *ZEROS        BATCH             5 0
+     C                   MOVE      *ZEROS        WKCO              5
+     C                   MOVE      *ZEROS        PVAMT
+     C                   MOVE      ACO           WKCO
+     C                   MOVE      '00355'       elCO
+     C**                 MOVE      '00390'       elKCO
+     C**                 MOVE      '00390'       GLKCO
+     C                   MOVEL     'AA'          GLLT
+      *
+     C                   MOVEL     WRKSTN        GLJOBN                         JOB
+     C                   MOVEL     WRKSTN        elJOBN                         JOB
+      *
+      *
+      * CALL PGM TO GENERATE NEXT AVAILABLE BATCH # FROM JDE FOR VOUCHER
+      *
+     C*  P16169          CALL      'X0010'
+     C*                  CALL      'E1I0010'
+     C*                  PARM      '00  '        PSSY              4
+     C*                  PARM      '01'          PSIDX             2
+     C*                  PARM                    PSNBR             8 0
+     C*                  Z-ADD     PSNBR         PVICU             8 0          BATCH NUM
+     C*                  MOVEL     'V'           PVICUT            2            BATCH TYPE
+     C*                  move      PSNBR         xxbatch                        BATCH NUM
+      *
+     C                   call      'GET0010 '
+     C                   parm      '00  '        pssy              4
+     C                   parm      '01'          psidx             2
+     C                   parm                    spsnbr           15 0
+     C                   PARM      ' '           bssv              1
+     C                   move      spsnbr        pvicu             8 0          batch number
+     C                   move      spsnbr        xxbatch                        BATCH NUM
+     C                   MOVEL     'V'           PVICUT            2            BATCH TYPE
+     C                   z-add     0             PVCNT                          doc count
+      *
+     C                   MOVE      *ON           *IN92
+     C                   MOVE      *OFF          *IN53
+     C                   ENDSR

@@ -1,0 +1,389 @@
+/***************************************************************** */
+/* êNOTE: PROGRAM CLONED FROM HP476CL.                             */
+/*                                                                 */
+/*  PROGRAM NUMBER --> HP4761CL                                    */
+/*  PROGRAM NAME ----> ACTUAL MOVEMENT LOG FOR AGVIEW              */
+/*  DATE:------------> 06/10/2021                                  */
+/*  PROGRAMMER ------> DANNY NGUYEN    (P2098)                     */
+/*  PURPOSE ---------> Generate workfile for NCSU to pick up from  */
+/*                     the IFS Directory & email XLS results to DL.*/
+/*                     TEST DIRECTORY:                             */
+/*                     /AGVIEW/TEST/                               */
+/*                                                                 */
+/*                     PROD DIRECTORY:                             */
+/*                     /AGVIEW/PROD/                               */
+/*                                                                 */
+/*  Job Schedule that will call this program:                      */
+/*                     TEST: HPSAGVIEWT                            */
+/*                     PROD: HPSAGVIEW                             */
+/*-----------------------------------------------------------------*/
+/*  MODIFICATIONS LOG:                                             */
+/*-----------------------------------------------------------------*/
+/*Ç06/11/24  Jagdish Mistry (JM-WI628),                            */
+/*ÇProject 628-RabApp Bypass to Agview                             */
+/*Ça. Program is now executed from HPSAGVIEWM                      */
+/*Çb. Deactivate ESND email notifications                          */
+/*Ç07/30/24  Jagdish Mistry (JM-WI628),                            */
+/*Ç          1)Changed .CSV to .XLSX to get back Header for user   */
+/*Ç          2)Send .CSV without header to IFS folder of /AGVIEW/  */
+/*Ç08/21/24  Jagdish Mistry (JM-S027448) Reactivate ESND           */
+/*Ç01/02/25  Jagdish Mistry (JM-S035200) Fix date logic            */
+/*                                                                 */
+/*******************************************************************/
+
+             PGM        PARM(&BUSOFF)
+
+             DCL        VAR(&BUSOFF) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&CURDTE)  TYPE(*CHAR) LEN(6)
+             DCL        VAR(&CURDTETME) TYPE(*CHAR) LEN(20)
+             DCL        VAR(&CURDTETME2) TYPE(*CHAR) LEN(14)
+             DCL        VAR(&CCYYMMDD) TYPE(*DEC) LEN(8 0)
+             DCL        VAR(&DTALIB) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&EMLSBJ) TYPE(*CHAR) LEN(80)
+             DCL        VAR(&EMLMSG) TYPE(*CHAR) LEN(200)
+             DCL        VAR(&EMAILDL) TYPE(*CHAR) LEN(50)
+             DCL        VAR(&IFSDIR) TYPE(*CHAR) LEN(48)
+             DCL        VAR(&FILENM) TYPE(*CHAR) LEN(29) +
+                          VALUE('MVMNTLOG')
+             DCL        VAR(&TOSTMF) TYPE(*CHAR) LEN(200)
+             DCL        VAR(&MSGTXT) TYPE(*CHAR) LEN(150)
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(250)
+/*ÇJM-WI628-Get previous day & count                               */
+             DCL        VAR(&JULDATC) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&JULDATC5) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&JULDAY)  TYPE(*DEC) LEN(3 0)
+             DCL        VAR(&JULYR)   TYPE(*DEC) LEN(2 0)
+             DCL        VAR(&JULDATE) TYPE(*DEC) LEN(6 0)
+             DCL        VAR(&PRVDTE)  TYPE(*CHAR) LEN(6)
+             DCL        VAR(&PRVDTE2) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&PRVDTE3) TYPE(*DEC) LEN(8 0)
+             DCL        VAR(&TOTALCNT) TYPE(*DEC) LEN(8 0)
+             DCL        VAR(&FILENAME) TYPE(*CHAR) LEN(30)
+/*ÇJM-S035200-START                                                */
+             DCL        VAR(&DAYCHAR) TYPE(*CHAR) LEN(3)
+/*ÇJM-S035200-END                                                  */
+
+/*ÇJM-WI628-START-Rewrite version as per WI628                     */
+/*ÇGet System Value For Data File Library to Determine Whether     */
+/*Ç       in PROD or TEST Environment                              */
+             CALL       PGM(PPJXXFR) PARM(' ' 'DTALIB' &DTALIB)
+
+/*ÇSet Constant Defaults                                           */
+             IF         COND(&DTALIB *NE 'PRKFLIB') THEN(DO)
+             CHGVAR     VAR(&EMAILDL) VALUE('dl agview test')
+             CHGVAR     VAR(&EMLSBJ) VALUE('HPS: HP4761CL-Actual +
+                          Movement Log Agview-TEST')
+
+             CHGVAR     VAR(&IFSDIR) VALUE('/AGVIEW/TEST/')
+             ENDDO
+             ELSE       CMD(DO)
+             CHGVAR     VAR(&EMAILDL) VALUE('dl agview')
+             CHGVAR     VAR(&EMLSBJ) VALUE('HPS: HP4761CL-Actual +
+                          Movement Log Agview')
+
+/*ÇMake IFS PROD Directory If Not Found                            */
+             CHGVAR     VAR(&IFSDIR) VALUE('/AGVIEW/PROD/')
+             ENDDO
+/*-------------------------------------------------------------------*/
+/*ÇCreate Work files                                               */
+/*-------------------------------------------------------------------*/
+             CRTDUPOBJL OBJ(HSP370) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             RTVSYSVAL  SYSVAL(QDATE) RTNVAR(&CURDTE)
+             RTVSYSVAL  SYSVAL(QDATETIME) RTNVAR(&CURDTETME)
+/*-------------------------------------------------------------------*/
+/*ÇGet previous day date                                             */
+/*-------------------------------------------------------------------*/
+             CALLSUBR   SUBR(GETPRVDAY)
+
+/*ÇSet &CURDTETME2 as CCYYMMDDHHMMSS Format                          */
+             CHGVAR     VAR(&CURDTETME2) VALUE(%SST(&CURDTETME 1 14))
+/*-------------------------------------------------------------------*/
+/*ÇSETUP QUERY OVER THE MOVEMENT EVENT FILE                          */
+/*ÇJM-WI628-START-Select all sales & transfer records of previous day*/
+/*-------------------------------------------------------------------*/
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('MEUPDT *EQ')
+             CHGVAR     VAR(%SST(&QDATA 12 8)) VALUE(&PRVDTE3)
+             CHGVAR     VAR(%SST(&QDATA 21 40)) VALUE('*AND (MEMTCD +
+                          *EQ "T" *OR MEMTCD *EQ "S")')
+             OVRDBF     FILE(HSP058) SHARE(*YES)
+             OPNQRYF    FILE((HSP058)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+/*-------------------------------------------------------------------*/
+/*ÇBuild the workfile                                                */
+/*ÇJM-WI628-START- Get Count of total new records                    */
+/*-------------------------------------------------------------------*/
+             CALL       PGM(HP370) PARM((&TOTALCNT))
+
+             CLOF       OPNID(HSP058)
+             DLTOVR     FILE(HSP058)
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+/*------------------------------------------------------------------*/
+/*ÇEMAIL SPREADSHEET & SAVE XLSX TO IFS DIRECTORY                   */
+/*------------------------------------------------------------------*/
+             IF         COND(&TOTALCNT *EQ 0) THEN(DO)
+             CHGVAR     VAR(&MSGTXT) VALUE('Actual Movement Log for +
+                          Agview did not extract any data for the +
+                          spreadsheet for Date :' *BCAT &PRVDTE2 +
+                          *BCAT 'for Bus. Office' *BCAT &BUSOFF)
+/*ÇJM-WI628-START  Deactivate notifications                              */
+/*ÇJM-S027448-START -Reactivate notifications                            */
+             ESNDMAIL   RECIPIENT(&EMAILDL) SUBJECT(&EMLSBJ) +
+                          MSG(&MSGTXT)
+             MONMSG     MSGID(CPF0000)
+/*ÇJM-S027448-END                                                        */
+/*ÇJM-WI628-END                                                          */
+             ENDDO
+
+             CHGVAR     VAR(&EMLMSG) VALUE('Date :' *BCAT &PRVDTE2 +
+                          *BCAT 'for Bus. Office' *BCAT &BUSOFF)
+
+             IF         COND(&TOTALCNT *GT 0) THEN(DO)
+/*ÇSet File Name to Save to IFS Directory                           */
+             IF         COND(&BUSOFF *EQ 'OKLIV') THEN(DO)
+             CHGVAR     VAR(&FILENAME) VALUE(&FILENM *TCAT 'OK' +
+                          *TCAT &CURDTETME2 *TCAT '.CSV')
+             ENDDO
+             ELSE       CMD(DO)
+             CHGVAR     VAR(&FILENAME) VALUE(&FILENM *TCAT 'IF' +
+                          *TCAT &CURDTETME2 *TCAT '.CSV')
+             ENDDO
+
+/*ÇSet IFS Stream File Path                                         */
+/*           CHGVAR     VAR(&TOSTMF) VALUE(&IFSDIR *TCAT &FILENM)   */
+/*ÇJM-WI628-Send XLSX to user with Header                           */
+             EXECUTE    SQL('SELECT * FROM HSP370') PCFMT(*XLSX) +
+                          REPLACE(*YES) RECIPIENT(&EMAILDL) +
+                          EMLMSG(&EMLMSG) TEXT(&EMLSBJ)
+             MONMSG     MSGID(CPF0000)
+
+/*ÇJM-WI628-Send CSV to AGVIEW without Header                      */
+             CHGVAR     VAR(&TOSTMF) VALUE(&IFSDIR *TCAT &FILENAME)
+             EXECUTE    SQL('SELECT * FROM HSP370') +
+                          PCFMT(*DELIMITED) TOSTMF(&TOSTMF) +
+                          REPLACE(*YES)
+             MONMSG     MSGID(CPF0000)
+             ENDDO
+
+             DLTF       FILE(QTEMP/HSP370)
+
+/*Ç--------------------------------------------------------------- */
+/*ÇGet previous day logic                                          */
+/*Ç--------------------------------------------------------------- */
+             SUBR       SUBR(GETPRVDAY)
+             CVTDAT     DATE(&CURDTE) TOVAR(&JULDATC) FROMFMT(*MDY) +
+                          TOFMT(*JUL)
+             CHGVAR     VAR(&JULYR)  VALUE(%SST(&JULDATC 1 2))
+             CHGVAR     VAR(&JULDAY) VALUE(%SST(&JULDATC 4 3))
+
+             SELECT
+             WHEN       COND(&JULDAY *GT 1) THEN(DO)
+             CHGVAR     VAR(&JULDAY) VALUE(&JULDAY - 1)
+/*ÇJM-S035200-START Fix leading zero                               */
+/*           CHGVAR     VAR(&JULDATC5) VALUE(%CHAR(&JULYR) *TCAT + */
+/*                        %CHAR(&JULDAY))                          */
+             CHGVAR     VAR(&DAYCHAR) VALUE(&JULDAY)
+             CHGVAR     VAR(&JULDATC5) VALUE(%CHAR(&JULYR) *TCAT +
+                          &DAYCHAR)
+/*ÇJM-S035200-END                                                  */
+             CVTDAT     DATE(&JULDATC5) TOVAR(&PRVDTE) FROMFMT(*JUL) +
+                          TOFMT(*MDY) TOSEP(*NONE)
+             ENDDO
+             WHEN       COND(&JULDAY *EQ 1) THEN(DO)
+             CHGVAR     VAR(&JULYR) VALUE(&JULYR - 1)
+             CHGVAR     VAR(&PRVDTE) VALUE('1231' *CAT %CHAR(&JULYR))
+             ENDDO
+             ENDSELECT
+
+             CVTDAT     DATE(&PRVDTE) TOVAR(&PRVDTE2) FROMFMT(*MDY) +
+                          TOFMT(*YYMD) TOSEP(*NONE)
+             CHGVAR     VAR(&PRVDTE3) VALUE(&PRVDTE2)
+
+             ENDSUBR
+/*Ç--------------------------------------------------------------- */
+             ENDPGM
+
+/*Ç--------------------------------------------------------------- */
+/*ÇJM-WI628-START-Commented old program as it is                   */
+/*Ç--------------------------------------------------------------- */
+/*           DCL        VAR(&ACYR) TYPE(*DEC) LEN(4 0)                   */
+/*           DCL        VAR(&ACPE) TYPE(*DEC) LEN(2 0)                   */
+/*           DCL        VAR(&ACQR) TYPE(*DEC) LEN(1 0)                   */
+/*           DCL        VAR(&ACWK) TYPE(*DEC) LEN(2 0)                   */
+/*           DCL        VAR(&PICDT) TYPE(*DEC) LEN(5 0)                  */
+/*           DCL        VAR(&CDYR) TYPE(*DEC) LEN(4 0)                   */
+/*           DCL        VAR(&CDWK) TYPE(*DEC) LEN(2 0)                   */
+/*           DCL        VAR(&CURDTE2) TYPE(*CHAR) LEN(8)                 */
+/*           DCL        VAR(&WBDTE) TYPE(*DEC) LEN(8 0)                  */
+/*           DCL        VAR(&WBDTEA) TYPE(*CHAR) LEN(8)                  */
+/*           DCL        VAR(&WEDTE) TYPE(*DEC) LEN(8 0)                  */
+/*           DCL        VAR(&WEDTEA) TYPE(*CHAR) LEN(8)                  */
+/*           DCL        VAR(&FLAG)    TYPE(*CHAR) LEN(1)                 */
+     /* Get System Value For Data File Library to Determine Whether +
+               in PROD or TEST Environment */
+/*           CALL       PGM(PPJXXFR) PARM(' ' 'DTALIB' &DTALIB)           */
+
+     /* Set Constant Defaults */
+/*           IF         COND(&DTALIB *NE 'PRKFLIB') THEN(DO)              */
+/*           CHGVAR     VAR(&EMAILDL) VALUE('dl agview test')             */
+/*           CHGVAR     VAR(&EMLSBJ) VALUE('HPS: HP4761CL-Actual +        */
+/*                        Movement Log Agview-TEST')                      */
+
+/*           CHGVAR     VAR(&IFSDIR) VALUE('/AGVIEW/TEST/')               */
+/*           ENDDO                                                        */
+/*           ELSE       CMD(DO)                                           */
+/*           CHGVAR     VAR(&EMAILDL) VALUE('dl agview')                  */
+/*           CHGVAR     VAR(&EMLSBJ) VALUE('HPS: HP4761CL-Actual +        */
+/*                        Movement Log Agview')                           */
+
+    /* Make IFS PROD Directory If Not Found */
+
+/*           CHGVAR     VAR(&IFSDIR) VALUE('/AGVIEW/PROD/')               */
+/*           ENDDO                                                        */
+
+/*-------------------------------------------------------------------*/
+/* CREATE WORKFILES                                                  */
+/*-------------------------------------------------------------------*/
+
+/*           CRTDUPOBJL OBJ(HSP370) FROMLIB(*LIBL) OBJTYPE(*FILE) +       */
+/*                        TOLIB(QTEMP)                                    */
+/*                                                                        */
+/*           CRTDUPOBJL OBJ(HSP374) FROMLIB(*LIBL) OBJTYPE(*FILE) +       */
+/*                        TOLIB(QTEMP) /* For Download */                 */
+
+/*-------------------------------------------------------------------*/
+/*  P2098 - GET CURRENT WEEKS BEGINNING & ENDING DATE                */
+/*-------------------------------------------------------------------*/
+
+/*           RTVSYSVAL  SYSVAL(QDATE) RTNVAR(&CURDTE)                     */
+/*           RTVSYSVAL  SYSVAL(QDATETIME) RTNVAR(&CURDTETME)              */
+
+    /* Set &CURDTETME2 as CCYYMMDDHHMMSS Format  */
+/*           CHGVAR     VAR(&CURDTETME2) VALUE(%SST(&CURDTETME 1 14))     */
+/*                                                                        */
+/*           CVTDAT     DATE(&CURDTE) TOVAR(&CURDTE2) FROMFMT(*MDY) +     */
+/*                        TOFMT(*YYMD) TOSEP(*NONE)                       */
+
+/*           CHGVAR     VAR(&CCYYMMDD) VALUE(&CURDTE2)                    */
+
+/*           CALL       PGM(HP8017) PARM(&CCYYMMDD &ACYR &ACPE &ACQR +    */
+/*                        &ACWK &PICDT &CDYR &CDWK)                       */
+
+/*           CALL       PGM(HP8016) PARM(&CDYR &CDWK &WBDTE &WEDTE)       */
+
+/*           CHGVAR     VAR(&WBDTEA) VALUE(&WBDTE)                        */
+/*           CHGVAR     VAR(&WEDTEA) VALUE(&WEDTE)                        */
+
+/*-------------------------------------------------------------------*/
+/*  SETUP QUERY OVER THE MOVEMENT EVENT FILE                         */
+/*-------------------------------------------------------------------*/
+/*  SELECT ALL SALES AND TRANSFER EVENT RECORDS FOR THE GIVEN        */
+/*  WEEK BEGINNING & ENDING DATE.                                    */
+
+/*           CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('MEMEDT *GE')        */
+/*           CHGVAR     VAR(%SST(&QDATA 12 8)) VALUE(&WBDTE)              */
+/*           CHGVAR     VAR(%SST(&QDATA 21 15)) VALUE('*AND MEMEDT +      */
+/*                        *LE')                                           */
+/*           CHGVAR     VAR(%SST(&QDATA 37 8)) VALUE(&WEDTE)              */
+/*           CHGVAR     VAR(%SST(&QDATA 46 40)) VALUE('*AND (MEMTCD +     */
+/*                        *EQ "T" *OR MEMTCD *EQ "S")')                   */
+
+/*           OVRDBF     FILE(HSP058) SHARE(*YES)                          */
+/*           OPNQRYF    FILE((HSP058)) QRYSLT(&QDATA) KEYFLD(*FILE) +     */
+/*                        SEQONLY(*YES)                                   */
+
+/*-------------------------------------------------------------------*/
+/*  BUILD THE WORKFILE                                               */
+/*-------------------------------------------------------------------*/
+
+/*           CALL PGM(HP370)                                              */
+
+/*           CLOF       OPNID(HSP058)                                     */
+/*           DLTOVR     FILE(HSP058)                                      */
+
+/*           CHGVAR     VAR(&QDATA) VALUE(' ')                            */
+
+/*-------------------------------------------------------------------*/
+/* ORIGIN REPORT - By Default, Process will pick up only 'OR' seq.   */
+/*                 Match Business Office to Parameter Bus. Office.   */
+/*-------------------------------------------------------------------*/
+
+/*           CHGVAR     VAR(%SST(&QDATA 1 12)) VALUE('WFORBO *EQ "')      */
+/*           CHGVAR     VAR(%SST(&QDATA 13 5)) VALUE(&BUSOFF)             */
+/*           CHGVAR     VAR(%SST(&QDATA 18 1)) VALUE('"')                 */
+
+/*  OPEN QUERY FILE FOR ORIGIN REPORT                            */
+
+/*           OVRDBF     FILE(HSP370) SHARE(*YES)                          */
+/*           OPNQRYF    FILE((HSP370)) QRYSLT(&QDATA) +                   */
+/*                        KEYFLD((WFORPP) (WFORFS) (WFRCDT) +             */
+/*                        (WFORHG)) SEQONLY(*YES)                         */
+
+/*------------------------------------------------------------------*/
+/* EMAIL SPREADSHEET & SAVE XLSX TO IFS DIRECTORY                   */
+/*------------------------------------------------------------------*/
+
+/*           CALL PGM(HP374) PARM(&FLAG)                                  */
+
+/*           IF         COND(&FLAG = 'Z')     THEN(DO)                    */
+/*           CHGVAR     VAR(&MSGTXT) VALUE('Actual Movement Log for +     */
+/*                        Agview did not extract any data for the +       */
+/*                        spreadsheet for Date Range:' *BCAT +            */
+/*                        &WBDTEA *BCAT 'to' *BCAT &WEDTEA *BCAT +        */
+/*                        'for Bus. Office' *BCAT &BUSOFF)                */
+/*           ESNDMAIL   RECIPIENT(&EMAILDL) SUBJECT(&EMLSBJ) +            */
+/*                        MSG(&MSGTXT)                                    */
+/*           MONMSG     MSGID(CPF0000)                                    */
+/*           ENDDO                                                        */
+
+/*           CHGVAR     VAR(&EMLMSG) VALUE('Date Range:' *BCAT +          */
+/*                        &WBDTEA *BCAT 'to' *BCAT &WEDTEA *BCAT +        */
+/*                        'for Bus. Office' *BCAT &BUSOFF)                */
+/*           IF         COND(&FLAG = 'T')     THEN(DO)                    */
+    /*êP2098 - We should never hit this since process will be build weekly +
+              êand will not have more than 7 days worth of data. */
+/*           ESNDMAIL   RECIPIENT(&EMAILDL) SUBJECT(&EMLSBJ) +            */
+/*                        MSG('Actual Movement Log for Agview +           */
+/*                        extracted over 66,000 records--which is +       */
+/*                        too many records for the spreadsheet to +       */
+/*                        handle. Please notify AS400 personnel to +      */
+/*                        fix this problem.')                             */
+/*           MONMSG     MSGID(CPF0000)                                    */
+/*           ENDDO                                                        */
+
+/*           IF         COND(&FLAG = ' ')     THEN(DO)                    */
+/*           CHGVAR     VAR(&EMLMSG) VALUE('Date Range:' *BCAT +          */
+/*                        &WBDTEA *BCAT 'to' *BCAT &WEDTEA *BCAT +        */
+/*                        'for Bus. Office' *BCAT &BUSOFF)                */
+
+    /* Set File Name to Save to IFS Directory */
+/*           IF         COND(&BUSOFF *EQ 'OKLIV') THEN(DO)                */
+/*           CHGVAR     VAR(&FILENM) VALUE(&FILENM *TCAT 'OK' *TCAT +     */
+/*                        &CURDTETME2 *TCAT '.XLSX')                      */
+/*           ENDDO                                                        */
+/*           ELSE       CMD(DO)                                           */
+/*           CHGVAR     VAR(&FILENM) VALUE(&FILENM *TCAT 'IF' *TCAT +     */
+/*                        &CURDTETME2 *TCAT '.XLSX')                      */
+/*           ENDDO                                                        */
+
+   /* Set IFS Stream File Path */
+/*           CHGVAR     VAR(&TOSTMF) VALUE(&IFSDIR *TCAT &FILENM)         */
+/*                                                                        */
+/*           EXECUTE    SQL('SELECT * FROM HSP374') PCFMT(*XLSX) +        */
+/*                        TOSTMF(&TOSTMF) REPLACE(*YES) +                 */
+/*                        RECIPIENT(&EMAILDL) EMLMSG(&EMLMSG) +           */
+/*                        TEXT(&EMLSBJ)                                   */
+
+/*           MONMSG     MSGID(CPF0000)                                    */
+/*           ENDDO                                                        */
+
+/*           CLOF       OPNID(HSP370)                                     */
+/*           DLTF       FILE(QTEMP/HSP370)                                */
+/*           DLTF       FILE(QTEMP/HSP374)                                */
+/*           DLTOVR     FILE(*ALL)                                        */
+
+
+/*           ENDPGM                                                       */
+

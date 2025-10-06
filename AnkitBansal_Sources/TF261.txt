@@ -1,0 +1,723 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      ****************************************************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF261 - Build file for AR Adj JDE Upload
+      * PROGRAMMER:  Alice Brownfield
+      * CREATED:     10/01/09
+      *
+      * Function:    This program creates the journal entry records that will be sent
+      *              to JDE for the Weekly AR Adjustment TF Share.
+      *
+      *              The program is called from the Revenue Week Ending Close
+      *              when the "Final" option is submitted.
+      *
+      *  Note: We exclude all records with a GL Post Method=None....which is the Exempt
+      *        Adjustments and the Bad Debt Adjustments. (Exempts are never shared and Jeff
+      *        Sherbondy/Triumph settle up the Bad Debts at 50/50 approximately 3 years
+      *        prior to creating an AR Adjustment to get them off the books. So, Alice says
+      *        there is no need to settle up on the Bad Debts...Jeff has already done it manually.)
+      *
+      *  Note: Although we process Post Method "C" records in this program (for sales
+      *        expense accumulations), we never write Post Method C records to TFP025.
+      *        Method C adjustments are the only ones that will have a Payout Amount.
+      *        Therefore, the net portion of these adjustments will be posted when the money
+      *        is paid out in the Daily Cash Distribution process. So, we don't create any
+      *        entry during the AR Adjustment post process for this Net amount.
+      *        We do post the accumulated Sales Expenses to the DTF accounts in this program.
+      *
+      *  Note: We do not use field AJARAPAM-AR Adj Payout Amount in this program.
+      *        The AR Adj Payout Amount field is ONLY populated in the TFP026 records where
+      *        it is Post Method=C.
+      *
+      *        We always use field AJTARANAM-TF AR Adj Net Amount for our entries in this program.
+      *        Alice B. and Mark Stewart came to the conclusion to use this Triumph value during
+      *        the AR/CD Recon.......but they were not sure if it was a correct conclusion. Maybe
+      *        once Jeff Sherbondy starts looking at our reports/batches, he will have some input.
+      *
+      *        The TF AR Adj Net Amount field is populated for all Post Method types.
+      *        Field AJTARANAM-TF AR Adj Net Amount holds the SAME absolute value as the Payout
+      *        Amount. But, the sign on the Payout Amount matches the sign on the original
+      *        Transaction Amount. The sign on AJTARANAM is the flip of the original Transaction
+      *        Amount; thus, it is the correct sign for our 'credit' entries....maybe...Alice B.
+      *        was not sure about all the signs. She was, again, waiting for Jeff Sherbondy to
+      *        validate.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 12/08/09  LeAnne Ramsey
+      *           Fixed bug. The Method B subroutine was not moving the saved
+      *           fields into the TFP025 record.
+      *           Also, changed from TFL026A to new LF TFL026B. The new file is
+      *           keyed the same as TFL026A except we removed "record exempt" from
+      *           the key list.
+      *
+      * 02/11/11  LeAnne Ramsey  (E1332)
+      *           Attempting to make our code match Jeff Sherbondy's notes from the
+      *           AR/CD Recon XLS.  We are still NOT turning on/implementing the creation/post
+      *           of JDE batches or the automatic Payout logic.
+      *
+      * 02/17/11  LeAnne Ramsey  (E1332)
+      *           Changed some Offset documentation and moved the saved cost center to the
+      *           record fields in $methoda for the Triumph logic.
+      *
+      * 05/30/17  Danny Nguyen   (T9996)
+      *           Recompile only. Added field to TFP026 - AR Adjustments file:
+      *             AJINSF - Invoice Suffix
+      *
+      *  7/28/21  Rose Centonze SDN440   CHANGE all refs of company 362 to 320
+      *
+      ********************************************************************************************
+      * FILE SPECIFICATIONS
+      ********************************************************************************************
+      *
+     Ff0901     if   e             disk
+      *   JDE Account master  (note: We just need this to get the Data Structure to pass as a parm)
+      *
+      *
+     Ftfl026b   if   e           k disk
+      *  AR Adjustments  (OPNQRY excludes records where PostMethod is N=None.)
+      *
+      *
+     Ftfp025    o    e           k disk
+      *  AR Adjustment G/L post
+      *
+      /eject
+      *******************************************************************************************
+      * DEFINITION SPECIFICATIONS
+      *******************************************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     d return          s              7
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D svcono          s                   like(ajcono)
+     D svpmcd          s                   like(ajpmcd)
+     D svcc            s                   like(ajcc)
+     D svobj           s                   like(ajobj)
+      *
+      *
+      * Work fields
+      *
+     d wktaranam       s                   like(ajtaranam)
+     d totAam          s                   like(ajtaranam)
+     d totBam          s                   like(ajtaranam)
+     d totCsxam        s                   like(ajtsxam)
+     d totafam         s                   like(ajtafam)
+     d totbcam         s                   like(ajtbcam)
+     d totoxam         s                   like(ajtoxam)
+     d totsxam         s                   like(ajtsxam)
+      *
+     d wkglcode        s                   like(apglcode)
+     d wkglacct        s                   like(apglacct)
+     d wkpcono         s                   like(ajcono)
+     d wkaid           s                   like(appaid)
+     D wkmcu           s                   like(ajcc)
+     D wkobj           s                   like(ajobj)
+     D wksub           s                   like(ajsub)
+      *
+      *
+      * Parms for call to PKTIXFR routine
+      *
+     D xxnumco         s              3  0
+     d xxglcode        s                   like(apglcode)
+     d xxsubtype       s              1
+     d xxbalsheet      s              1
+     D xxacctco        s              3  0
+      *
+      * Parms for call to JDE account routine
+      *
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxani           s             29
+     d xxerrm          s              4
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+     d i0901ds         ds           500
+     d xxco                                like(gmco)
+     d xxaid                               like(gmaid)
+     d xxmcu                               like(gmmcu)
+     d xxobj                               like(gmobj)
+     d xxsub                               like(gmsub)
+     d xxans                               like(gmans)
+     d xxdl01                              like(gmdl01)
+     d xxlda                               like(gmlda)
+     d xxbpc                               like(gmbpc)
+     d xxpec                               like(gmpec)
+     d xxbill                              like(gmbill)
+     d xxcrcd                              like(gmcrcd)
+     d xxum                                like(gmum)
+     d xxr001                              like(gmr001)
+     d xxr002                              like(gmr002)
+     d xxr003                              like(gmr003)
+     d xxr004                              like(gmr004)
+     d xxr005                              like(gmr005)
+     d xxr006                              like(gmr006)
+     d xxr007                              like(gmr007)
+     d xxr008                              like(gmr008)
+     d xxr009                              like(gmr009)
+     d xxr010                              like(gmr010)
+     d xxr011                              like(gmr011)
+     d xxr012                              like(gmr012)
+     d xxr013                              like(gmr013)
+     d xxr014                              like(gmr014)
+     d xxr015                              like(gmr015)
+     d xxr016                              like(gmr016)
+     d xxr017                              like(gmr017)
+     d xxr018                              like(gmr018)
+     d xxr019                              like(gmr019)
+     d xxr020                              like(gmr020)
+     d xxr021                              like(gmr021)
+     d xxr022                              like(gmr022)
+     d xxr023                              like(gmr023)
+     d xxobja                              like(gmobja)
+     d xxsuba                              like(gmsuba)
+     d xxwcmp                              like(gmwcmp)
+     d xxcct                               like(gmcct)
+     d xxerc                               like(gmerc)
+     d xxhtc                               like(gmhtc)
+     d xxqlda                              like(gmqlda)
+     d xxccc                               like(gmccc)
+     d xxfmod                              like(gmfmod)
+     d xxuser                              like(gmuser)
+     d xxpid                               like(gmpid)
+     d xxjobn                              like(gmjobn)
+     d xxupmj                              like(gmupmj)
+     d xxupmt                              like(gmupmt)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldyr                   1      4  0
+     D  ldwk                   5      6  0
+     D  ldwbdt                 7     14  0
+     D  ldwedt                22     29  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+      /eject
+      *************************************************************************************
+      * Mainline
+      *************************************************************************************
+      *
+      * Process selected AR Adjustment records for the Week-ending Date.
+      * (We exclude/omit all records where PostMethod=None...this will be the Exempt and
+      *  Bad Debt records....see OPNQRY.)
+      *
+     C     *loval        setll     tfl026b
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      tfl026b                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Control breaks
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   z-add     ajcono        svcono
+     C                   move      ajpmcd        svpmcd
+     C                   move      ajcc          svcc
+     C                   move      ajobj         svobj
+      *
+      * Break on Company/Post Method/Cost Center/Object
+      *    Note:  We only write TFP025 records for PostMethods A and B when we
+      *           have dollars in the TF AR Adj Net Amount field.
+      *
+     C                   when      svcono <> ajcono or
+     C                             svpmcd <> ajpmcd or
+     C                             svcc   <> ajcc  or
+     C                             svobj  <> ajobj
+      *
+     C                   select
+     C                   when      wktaranam = 0
+      *
+     C                   when      svpmcd = 'A'
+     C                   exsr      $methodA
+      *
+     C                   when      svpmcd = 'B'
+     C                   exsr      $methodB
+     C                   endsl
+      * Save/Clear
+     C                   exsr      $clear
+     C                   endsl
+      *
+      *
+      * Detail processing...accumulate
+      *
+     C                   exsr      $accum
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *-----------------
+      * EOF processing
+      *-----------------
+      *
+      * No adjustments
+     C                   if        first = yes                                  If first
+     C                   else
+      *
+      * Write last records
+     C                   select
+     C                   when      wktaranam = 0
+      *
+     C                   when      svpmcd = 'A'
+     C                   exsr      $methodA
+      *
+     C                   when      svpmcd = 'B'
+     C                   exsr      $methodB
+     C                   endsl
+      *
+      * Method A offsets.
+     C                   if        totAam <> 0
+     C                   exsr      $offsetA
+     C                   endif
+      *
+      * Method B offsets.
+     C                   if        totBam <> 0
+     C                   exsr      $offsetB
+     C                   endif
+      *
+      * Write all Sales Expense Records
+      *
+     C                   exsr      $expense
+     C                   endif                                                  If first
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Accumulate values
+      *---------------------------------------------------------------
+      *
+     C     $accum        begsr
+      *
+      * Accumulate Triumph Sales Expense for ALL Post Methods (A, B, and C).
+      * (Note: We will use these values when writing the Sales Expense records
+      *  at the end of the program.)
+      *
+     c                   add       ajtafam       totafam
+     c                   add       ajtbcam       totbcam
+     c                   add       ajtoxam       totoxam
+     c                   add       ajtsxam       totsxam
+      *
+      *  If Method A/B, accumulate AJTARANAM-TF AR Adj Net Amount. And, for the
+      *  Method A/B Offsets, accumulate both the Net and the Sales Expense into a
+      *  Gross Amount.
+      *  (Note: These fields have the opposite sign of the original AR Transaction
+      *   Amount.)
+     C                   if        ajpmcd = 'A'
+     c                   add       ajtaranam     wktaranam
+     c                   add       ajtaranam     totAam
+     c                   add       ajtsxam       totAam
+     C                   endif
+      *
+     C                   if        ajpmcd = 'B'
+     c                   add       ajtaranam     wktaranam
+     c                   add       ajtaranam     totBam
+     c                   add       ajtsxam       totBam
+     C                   endif
+      *
+      * I don't really know what to do with the "C" Sales Expenses...now that
+      * we are using separate DTF accounts for Methods A and B. So, for now,
+      * I will accumulate them and plop them into the Offset for Method B. If
+      * Jeff Sherbondy ever gets actively involved, maybe he will have some
+      * recommendation.
+     C                   if        ajpmcd = 'C'
+     c                   add       ajtsxam       totCsxam
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Clear save fields and accumulators
+      *---------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+      * Reset save fields
+     C                   z-add     ajcono        svcono
+     C                   move      ajpmcd        svpmcd
+     C                   move      ajcc          svcc
+     C                   move      ajobj         svobj
+      *
+      * Clear accumulator
+     c                   z-add     0             wktaranam
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Setup and write records for Post Method A
+      *-----------------------------------------------------------------------------------
+      *
+      * Post Method A:
+      *   1) This is used for WriteOffs.
+      *   2) There is no "payout".
+      *   3) We use the TF Net Amount for these entries (ie: after Sales Tax).
+      *   4) For the "posting" fields, use the same Object Account as the "original"
+      *      and replace the sub code with '600'
+      *
+     C     $methodA      begsr
+      *
+      * SBD Credit entry
+     c                   move      '360'         appcono
+     c                   move      '360'         appcc
+     c                   move      svobj         appobj
+     c                   movel     '600'         appsub
+     c                   z-add     wktaranam     appostam
+     c                   exsr      $wrt025
+      *
+      * TF Debit entry
+     c                   move      '960'         appcono
+     c                   move      '960'         appcc
+     c                   move      svobj         appobj
+     c                   movel     '600'         appsub
+     c                   z-sub     wktaranam     appostam
+     c                   exsr      $wrt025
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Setup and write records for Post Method B
+      *---------------------------------------------------------------
+      *
+      * Post Method B:
+      *   1) This is used for Fees and Sales.
+      *   2) There is no "payout".
+      *   3) We used the TF Net Amount for these entries (ie: after Sales Tax).
+      *
+      *
+     C     $methodB      begsr
+      *
+      * SBD Credit Entry
+      *      For the "posting" fields, use the same Cost Center as the "original",
+      *      replace the Object Account with "9171" (Shared Opts Reimbursement)
+      *
+     c                   move      '360'         appcono
+     c                   move      svcc          appcc
+     c                   movel     '9171'        appobj
+     c                   move      *blank        appsub
+     c                   z-add     wktaranam     appostam
+     C                   exsr      $wrt025
+      *
+      * TF Debit Entry
+     c                   move      '960'         appcono
+     c                   move      '     9608999'appcc
+     c                   movel     '8350'        appobj
+     c                   move      *blank        appsub
+     c                   z-sub     wktaranam     appostam
+     C                   exsr      $wrt025
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------------------------
+      * Write MethodA and MethodB records
+      *---------------------------------------------------------------------------------------------
+      *
+     C     $wrt025       begsr
+      *
+      * Set up Date fields
+      *
+     c                   z-add     ldwbdt        aprwbdt
+     c                   z-add     ldwedt        aprwedt
+     c                   z-add     ldyr          apyr
+     c                   z-add     ldwk          apwk
+      *
+      * Set up Posting Method and Original fields
+      *
+     c                   move      svpmcd        appmcd
+     c                   move      svcono        apocono
+     c                   move      svcc          apocc
+     c                   move      svobj         apoobj
+      *
+      * Retrieve Account ID associated with the Posting CC, Obj, Sub
+      * (1 = Short Act I.D., 9 = Individual cost center/object/sub.)
+      *
+     C                   move      *blank        wkaid
+      *
+     C                   call      'X0901'
+     C                   parm                    xxsym
+     C                   parm      '1'           xxomod
+     C                   parm      '9'           xximod
+     C     wkaid         parm      *blank        xxani
+     C                   parm      appcc         xxmcu
+     C                   parm      appobj        xxobj
+     C                   parm      appsub        xxsub
+     C                   parm      *blank        xxerrm
+     C                   parm                    i0901ds
+      *
+     c                   move      wkaid         appaid
+      *
+     C                   if        xxdl01 = *blank
+     C                   eval      appaidds = 'Error on Account ID Retrieval'
+     C                   else
+     C                   eval      appaidds = xxdl01
+     C                   endif
+      *
+      * Retrieve Structured GL Account
+      *
+     C                   exsr      $glacct
+      *
+      * Write record
+     c                   write     aprec
+     c                   clear                   aprec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------------------------
+      * Write Offsets to the Due To/Due From Accounts for Method A
+      *---------------------------------------------------------------------------------------------
+      *
+      * The entries use the TF Gross Amount (TF AR Adj Net Amount + TF Sales Expense Amt) from
+      * Method A.
+      *
+     C     $offsetA      begsr
+      *
+      * TF Credit to 960.1830.101-Due from SBF-Collection on Acc (account id 02502562)
+      *
+     C                   z-add     totAam        appostam
+     C                   move      'OFFAR960'    wkglcode
+     C                   exsr      $wrtoffset
+      *
+      * SBD Debit to 320.3830.101-Due to TF-Cash (account id 02506611)
+      *
+     C                   z-sub     totAam        appostam
+     C                   move      'OFFAR320'    wkglcode
+     C                   exsr      $wrtoffset
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------------------------
+      * Write Offsets to the Due To/Due From Accounts for Method B
+      *---------------------------------------------------------------------------------------------
+      *
+     C     $offsetB      begsr
+      *
+      * We will put the Sales Expenses from Method C into this offset....just because we
+      * don't know what to do with them....maybe Jeff Sherbondy will know at some point.
+      *
+     C                   add       totCsxam      totBam
+      *
+      * TF Credit to 960.1830.102-Due from SBF-Collection on Acc (account id 02530635)
+      *
+     C                   z-add     totBam        appostam
+     C                   move      'OFFBR960'    wkglcode
+     C                   exsr      $wrtoffset
+      *
+      * SBD Debit to 320.3830.102-Due to TF-Cash Adj (account id 02531729)
+      *
+     C                   z-sub     totBam        appostam
+     C                   move      'OFFBR320'    wkglcode
+     C                   exsr      $wrtoffset
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve Structured GL Account
+      *---------------------------------------------------------------
+      *
+     C     $glacct       begsr
+      *
+      * Retrieve the Structured Account Number
+      *
+     C                   move      *blank        wkglacct
+      *
+     C                   call      'X0901'
+     C                   parm                    xxsym
+     C                   parm      '2'           xxomod
+     C                   parm      '9'           xximod
+     C     wkglacct      parm                    xxani
+     C                   parm      appcc         xxmcu
+     C                   parm      appobj        xxobj
+     C                   parm      appsub        xxsub
+     C                   parm                    xxerrm
+     C                   parm                    i0901ds
+      *
+     C                   if        xxerrm = *blank
+     C                   movel     wkglacct      apglacct
+     C                   else
+     C                   move      *blank        apglacct
+     C                   endif
+      *
+      * GL Company
+     c                   move      xxco          apglcono
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------------
+      * Write all the Sales Expense records
+      *--------------------------------------------------------------------------------------------
+      *
+      * Note: All Sales Expense entries are written in this subroutine.
+      *       The Sales Expenses were accumulated from all 3 GL Post Methods (Methods A, B, C).
+      *
+     C     $expense      begsr
+      *
+      *------------------------------------------------------------
+      * Sales Expense: TF Absorbed Freight Cash Distributed Amount
+      *------------------------------------------------------------
+      *
+      *        TF Debit to 960.3830.990-Due to SBF-Abs Frt Payable (account id 02502558)
+      *
+     C                   if        totafam <> 0
+     C                   z-sub     totafam       appostam
+     C                   move      'OMFRTBAL'    wkglcode
+     C                   exsr      $wrtoffset
+      *
+      *        SBD Credit to 320.1830.990-Due from TF-Freight  (account id 02503041)
+      *
+     C                   z-add     totafam       appostam
+     C                   move      'OMFRT320'    wkglcode
+     C                   exsr      $wrtoffset
+     C                   endif
+      *
+      *------------------------------------------------------------
+      * Sales Expense: TF Broker Commission Cash Distributed Amount
+      *------------------------------------------------------------
+      *
+      *        TF Debit to 960.3830.082-Due to SBF-Comm Accrual    (account id 02502561)
+      *
+     C                   if        totbcam <> 0
+     C                   z-sub     totbcam       appostam
+     C                   move      'OMCOMBAL'    wkglcode
+     C                   exsr      $wrtoffset
+      *
+      *        SBD Credit to 320.1830.082-Due From TF-Broker Comm    (account id 02503042)
+      *
+     C                   z-add     totbcam       appostam
+     C                   move      'OMCOM320'    wkglcode
+     C                   exsr      $wrtoffset
+     C                   endif
+      *
+      *--------------------------------------------------------------
+      * Sales Expense: TF Other Sales Expense Cash Distributed Amount
+      *--------------------------------------------------------------
+      *
+      *        TF Debit to 960.3830.080-Due to SBF-Market Accrual  (account id 02502559)
+      *
+     C                   if        totoxam <> 0
+     C                   z-sub     totoxam       appostam
+     C                   move      'OMACRBAL'    wkglcode
+     C                   exsr      $wrtoffset
+      *
+      *        SBD Credit to 320.1830.080-Due from TF-Marketing &    (account id 02503043)
+      *
+     C                   z-add     totoxam       appostam
+     C                   move      'OMACR320'    wkglcode
+     C                   exsr      $wrtoffset
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Retrieve Account Info and Write an Offset Record
+      *----------------------------------------------------------------
+      *
+     C     $wrtoffset    begsr
+      *
+      * Clear workfields.
+      *
+     C                   move      *blank        wkaid                          Account ID
+     C                   move      *blank        wkmcu                          Cost Center
+     C                   move      *blank        wkobj                          Object
+     C                   move      *blank        wksub                          Sub Code
+     C                   z-add     0             wkpcono                        Post Company
+      *
+      * Retrieve Account I.D. for this "code" from the GL Master Codes file.
+      * We will use Company 960 for all of these retrievals.
+      *
+     C                   call      'PKTIXFR'
+     C                   parm                    return
+     C                   parm      960           xxnumco
+     C                   parm      wkglcode      xxglcode
+     C     wkaid         parm      *blank        xxaid
+     C                   parm      *blank        xxsubtype
+     C                   parm      *blank        xxbalsheet
+     C     wkpcono       parm      *zero         xxacctco
+      *
+      *
+      * Retrieve cost center/object/sub associated with Account ID just retrieved.
+      * (1 = Short Act I.D., 9 = Individual cost center/object/sub.)
+      *
+     C                   call      'X0901'
+     C                   parm                    xxsym
+     C                   parm      '9'           xxomod
+     C                   parm      '1'           xximod
+     C                   parm      wkaid         xxani
+     C     wkmcu         parm      *blank        xxmcu
+     C     wkobj         parm      *blank        xxobj
+     C     wksub         parm      *blank        xxsub
+     C                   parm      *blank        xxerrm
+     C                   parm                    i0901ds
+      *
+     C                   if        xxdl01 = *blank
+     C                   eval      appaidds = 'Error on CC/Obj/Sub Retrieval'
+     C                   else
+     C                   move      xxdl01        appaidds
+     C                   endif
+      *
+      * Set up fields
+     c                   move      'O'           appmcd
+     c                   z-add     ldwbdt        aprwbdt
+     c                   z-add     ldwedt        aprwedt
+     c                   z-add     ldyr          apyr
+     c                   z-add     ldwk          apwk
+      *
+     c                   move      wkglcode      apglcode
+     c                   move      wkaid         appaid
+     c                   move      wkpcono       appcono
+     c                   move      wkmcu         appcc
+     c                   move      wkobj         appobj
+     c                   move      wksub         appsub
+      *
+      * Retrieve GL Structured Account Number and GL Company
+      *
+     C                   exsr      $glacct
+      *
+     C                   write     aprec
+     C                   clear                   aprec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C                   endsr
+      *

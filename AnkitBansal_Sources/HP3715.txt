@@ -1,0 +1,874 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP3715-Error Listing: Upload of Item and Item Type Master
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     03/02/04
+      *
+      * Function:    This function edits the uploaded MP2 Item and Item Type Master files.
+      *
+      *              It prints an error listing. The upload is all-or-nothing.
+      *              All errors must be fixed on the P.C. side.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/13/04  LeAnne Fedor
+      *           Recompile only. Cost Per Unit Amount was changed from
+      *           9,2 to 9,4.
+      *
+      *           Two other fields (MP2 Cost Center and MP2 Account) were also
+      *           added to the Item Master and the Item Master Upload file. But, at this
+      *           time, there are no edits against these fields and we are out of room on
+      *           the listing. SO, I have not done anything with these two fields to date.
+      *
+      * 06/11/10  LeAnne Ramsey
+      *           The MP2 to HPS upload failed on the pc side. So, when the AS400/HPS side/piece of
+      *           the upload ran, the uploaded Item file was EMPTY.  The HPS update logic says "If
+      *           an existing Item (in HPS) is not in the upload file, set the Item to Inactive."
+      *           Then, as part of the cleanup logic, the program deletes all 'budgets' that have no
+      *           Active Items.  So, when the uploaded Item file was empty, ALL Items were set to
+      *           Inactive and, therefore, all the Budgets were deleted...since they had NO active
+      *           Items. Ultimately, Lee Christina had to restore the file from a backup tape.
+      *
+      *           We already had logic in this edit program to set the Error Flag to Yes if the
+      *           file was empty. But, we were using the same "First" flag field to check both the
+      *           Item and the Item Type upload files. I am changing to the code to have separate
+      *           "First" flag fields for the 2 upload files.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp220    if   e           k disk
+      *    Upload file: Item type
+      *
+      *
+     Fhsp221    if   e           k disk
+      *    Upload file: Items
+      *
+      *
+     Fhsl221a   if   e           k disk    rename(u2rec:u2reca)
+      *    Upload file: Items
+      *
+      *
+     Fhsl221b   if   e           k disk    rename(u2rec:u2recb) prefix(p1)
+      *    Upload file: Items
+      *
+      *
+     Fqprint    o    f  198        printer oflind(*inof)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *----------------------------------------------------------------
+      * CONSTANTS
+      *----------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+     D sec1            c                   const('Section 1: Item Errors')
+      *
+     D sec2            c                   const('Section 2: Budget Item Errors-
+     D                                     ')
+      *
+     D sec3            c                   const('Section 3: Item Type Errors')
+      *
+      *
+      *----------------------------------------------------------------
+      * ARRAYS AND TABLES
+      *----------------------------------------------------------------
+      *
+      * Define array for holding error message numbers
+      *
+     D err             s              2  0 dim(22)
+      *
+      * Define error message number/descriptions in compile-time arrays
+      *
+     D msg             s              2  0 dim(22) ctdata perrcd(1)
+     D dsc             s             91    dim(22) alt(msg)
+      *
+      *----------------------------------------------------------------
+      * STANDALONE FIELDS
+      *----------------------------------------------------------------
+      *
+      * Standard fields
+      *
+     D dash            s            198    inz(*all'-')
+     d rtime           s              6  0
+      *
+      *
+      * Control fields
+      *
+     D firstitem       s              1    inz('Y')
+     D firsttype       s              1    inz('Y')
+     D sec1fl          s              1    inz('N')
+     D sec2fl          s              1    inz('N')
+     D sec3fl          s              1    inz('N')
+      *
+      *
+      * Save fields
+      *
+     d svitcd          s                   like(u2itcd)
+     d svbgit          s                   like(u2bgit)
+     d svuom           s                   like(u2uom)
+     d svuow           s                   like(u2uow)
+     d svittycd        s                   like(u2ittycd)
+     d svbgfl          s                   like(u2bgfl)
+     d svcritfl        s                   like(u2critfl)
+      *
+      *
+      * Workfields
+      *
+     d wkmsg           s              2  0
+      *
+      *
+      * Print fields
+      *
+     D hrdesc          s             30
+     D m1msg           s             91
+      *
+      *
+      * Index
+      *
+     D x               s              2  0
+     D y               s              2  0
+     D z               s              2  0
+      *
+      *
+      * Parm fields
+      *
+     d xxerrorfl       s              1
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * The edits are printed in 3 sections:
+      *     Section 1: "Item" edits over the Item Master
+      *     Section 2: "Budget Item" edits over the Item Master
+      *     Section 3: "Item Type" edits over the Item Type Master
+      *
+      * Items
+     C                   exsr      $sec1
+      * Budget Items
+     C                   exsr      $sec2
+      * Item Types
+     C                   exsr      $sec3
+      *
+      * EOF processing
+     C                   if        firstitem = yes or firsttype = yes
+     C                   move      yes           xxerrorfl
+     C                   except    hrhdr
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Section 1: Perform Item Edits over the Item Master
+      *-----------------------------------------------------------------------------------
+      *
+     C     $sec1         begsr
+      *
+     C                   seton                                        of
+     C                   move      yes           sec1fl
+     C                   eval      hrdesc = sec1
+      *
+      * Process each uploaded record in the Item file.
+      *
+     C     *loval        setll     hsp221
+      *
+     C                   dou       *in91 = *on                                  Do items
+     C                   read      hsp221                                 91
+     C                   if        *in91 = *off                                 If not EOF
+     C                   move      no            firstitem
+      *
+      * Clear error array
+     C                   exsr      $clear
+      *
+      * Make validations
+     C                   exsr      $itcd
+     C                   exsr      $itds
+     C                   exsr      $uom
+     C                   exsr      $voluow
+     C                   exsr      $ittycd
+     C                   exsr      $critfl
+     C                   exsr      $bgfl
+     C                   exsr      $bgit
+     C                   exsr      $cpuam
+      *
+      * If array index Y is not zero, you have errors. So:
+      *   1) Print the Item record
+      *   2) Retrieve/print all messages in the error message array
+      *
+     C                   if        y > 0
+     C                   exsr      $prtrec
+     C                   exsr      $rtvmsg
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do items
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit Item Number
+      *---------------------------------------------------------------
+      *
+     C     $itcd         begsr
+      *
+     C                   select
+     C                   when      u2itcd = *blank
+     C                   z-add     1             wkmsg
+     C                   exsr      $addmsg
+      *
+     C                   when      svitcd = u2itcd
+     C                   z-add     2             wkmsg
+     C                   exsr      $addmsg
+     C                   endsl
+      *
+     C                   move      u2itcd        svitcd
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit Item Description
+      *---------------------------------------------------------------
+      *
+     C     $itds         begsr
+      *
+     C                   if        u2itds = *blank
+     C                   z-add     3             wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit UOM
+      *---------------------------------------------------------------
+      *
+     C     $uom          begsr
+      *
+     C                   if        u2uom = *blank
+     C                   z-add     4             wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit Volume and UOW
+      *---------------------------------------------------------------
+      *
+     C     $voluow       begsr
+      *
+     C                   if        u2vol < 0
+     C                   z-add     5             wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+      *
+     C                   select
+     C                   when      u2uow = *blank and u2vol <> 0
+     C                   z-add     6             wkmsg
+     C                   exsr      $addmsg
+      *
+     C                   when      u2uow <> *blank and u2vol = 0
+     C                   z-add     7             wkmsg
+     C                   exsr      $addmsg
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit Item Type Code
+      *---------------------------------------------------------------
+      *
+     C     $ittycd       begsr
+      *
+     C                   select
+     C                   when      u2ittycd = *blank
+     C                   z-add     8             wkmsg
+     C                   exsr      $addmsg
+     C                   other
+      *
+      * The value must exist in the companion Item Type upload file.
+      *
+     C     u2ittycd      chain     hsp220                             92
+     C                   if        *in92 = *on                                  If no hit
+     C                   z-add     9             wkmsg
+     C                   exsr      $addmsg
+     C                   endif                                                  If no hit
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit Critical Flag
+      *---------------------------------------------------------------
+      *
+     C     $critfl       begsr
+      *
+     C                   select
+     C                   when      u2critfl <> *blank and
+     C                             u2critfl <> yes and
+     C                             u2critfl <> no
+     C                   z-add     13            wkmsg
+     C                   exsr      $addmsg
+      *
+     C                   when      u2critfl = yes and u2bgfl = no
+     C                   z-add     19            wkmsg
+     C                   exsr      $addmsg
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit Budget Flag
+      *---------------------------------------------------------------
+      *
+     C     $bgfl         begsr
+      *
+     C                   if        u2bgfl = yes or u2bgfl = no
+     C                   else
+     C                   z-add     10            wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit Budget Item
+      *---------------------------------------------------------------
+      *
+     C     $bgit         begsr
+      *
+     C                   select
+     C                   when      u2bgfl = yes and u2bgit = *blank
+     C                   z-add     12            wkmsg
+     C                   exsr      $addmsg
+      *
+     C                   when      u2bgfl = no and u2bgit <> *blank
+     C                   z-add     11            wkmsg
+     C                   exsr      $addmsg
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit Cost per Unit Amount
+      *---------------------------------------------------------------
+      *
+     C     $cpuam        begsr
+      *
+     C                   if        u2cpuam < 0
+     C                   z-add     22            wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * Section 2: Perform Budget Item Edits over the Item Master
+      *------------------------------------------------------------------------------------
+      *
+     C     $sec2         begsr
+      *
+     C                   seton                                        of
+     C                   move      no            sec1fl
+     C                   move      yes           sec2fl
+     C                   eval      hrdesc = sec2
+     C                   exsr      $clear
+      *
+      * Process each uploaded record that has a Budget Item value.
+      *
+     C     *loval        setll     hsl221a
+      *
+     C                   dou       *in91 = *on                                  Do budget items
+     C                   read      hsl221a                                91
+     C                   if        *in91 = *off                                 If not EOF
+     C                   move      no            firstitem
+      *
+      * When Budget Item changes:
+      *  1) print ALL item records for the Budget Item in error
+      *  2) print ALL messages
+      *  3) clear message arrays for next Budget Item
+      *
+     C                   select
+     C                   when      u2bgit <> svbgit
+      *
+     C                   if        y > 0
+     C                   exsr      $rtvrec
+     C                   except    blank2
+     C                   exsr      $rtvmsg
+     C                   except    blank3
+     C                   exsr      $clear
+     C                   endif
+      *
+     C                   move      u2bgit        svbgit
+     C                   move      u2uom         svuom
+     C                   move      u2uow         svuow
+     C                   move      u2ittycd      svittycd
+     C                   move      u2critfl      svcritfl
+     C                   move      u2bgfl        svbgfl
+     C                   other
+      *
+      * Validate
+     C                   if        u2uom <> svuom
+     C                   z-add     14            wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+      *
+     C                   if        u2uow <> svuow
+     C                   z-add     15            wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+      *
+     C                   if        u2ittycd <> svittycd
+     C                   z-add     18            wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+      *
+     C                   if        u2critfl <> svcritfl
+     C                   z-add     16            wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+      *
+     C                   if        u2bgfl <> svbgfl
+     C                   z-add     17            wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+     C                   endsl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do budget items
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Perform Edits over the Item Type Master for Section 3 of the Listing
+      *-----------------------------------------------------------------------------------
+      *
+     C     $sec3         begsr
+      *
+     C                   seton                                        of
+     C                   seton                                        87
+     C                   move      no            sec2fl
+     C                   move      yes           sec3fl
+     C                   eval      hrdesc = sec3
+     C                   move      *blank        svittycd
+      *
+      * Process each uploaded Item Type record.
+      *
+     C     *loval        setll     hsp220
+      *
+     C                   dou       *in91 = *on                                  Do types
+     C                   read      hsp220                                 91
+     C                   if        *in91 = *off                                 If not EOF
+     C                   move      no            firsttype
+      *
+      * Clear error array
+     C                   exsr      $clear
+      *
+      * Validate Item Type Code
+      *
+     C                   select
+     C                   when      u1ittycd = *blank
+     C                   z-add     8             wkmsg
+     C                   exsr      $addmsg
+      *
+     C                   when      svittycd = u1ittycd
+     C                   z-add     20            wkmsg
+     C                   exsr      $addmsg
+     C                   endsl
+      *
+     C                   move      u1ittycd      svittycd
+      *
+      *
+      * Validate Item Type Code Description
+      *
+     C                   if        u1ittyds = *blank
+     C                   z-add     21            wkmsg
+     C                   exsr      $addmsg
+     C                   endif
+      *
+      * If array index Y is not zero, you have errors. So:
+      *   1) Print the Item Type record
+      *   2) Retrieve/print all messages in the error message array
+      *
+     C                   if        y > 0
+     C                   exsr      $prtrec
+     C                   exsr      $rtvmsg
+     C                   except    blank3
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do types
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Add a message to the array if it is not there already
+      *---------------------------------------------------------------
+      *
+     C     $addmsg       begsr
+      *
+     C                   z-add     1             x
+     C     wkmsg         lookup    err(x)                                 92
+     C                   if        *in92 = *off                                 If not there
+     C                   add       1             y
+     C                   z-add     wkmsg         err(y)
+     C                   endif                                                  If not there
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print an Item record
+      *---------------------------------------------------------------
+      *
+     C     $prtrec       begsr
+      *
+      * Print headings if necessary
+      *
+     C                   if        *inof = *on
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Print detail record
+      *
+     C                   select
+     C                   when      sec1fl = yes
+     C                   except    l1dtl
+      *
+     C                   when      sec2fl = yes
+     C                   except    l2dtl
+      *
+     C                   when      sec3fl = yes
+     C                   except    l3dtl
+     C                   endsl
+      *
+      * Set return parm that indicates there were errors
+      *
+     C                   move      yes           xxerrorfl
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------
+      * Retrieve/print all upload records for the specified Budget Item
+      *-----------------------------------------------------------------------
+      *
+     C     $rtvrec       begsr
+      *
+     C     svbgit        setll     hsl221b
+      *
+     C                   dou       *in93 = *on                                  Do loop
+     C     svbgit        reade     hsl221b                                93
+     C                   if        *in93 = *off                                 If read
+     C                   exsr      $prtrec
+     C                   endif                                                  If read
+     C                   enddo                                                  Do loop
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve error messages
+      *---------------------------------------------------------------
+      *
+     C     $rtvmsg       begsr
+      *
+     C                   z-add     0             x
+      *
+     C                   do        y                                            Do array
+     C                   add       1             x
+     c                   if        err(x) <> 0                                  If got a msg
+      *
+     C                   z-add     1             z
+     C     err(x)        lookup    msg(z)                                 92
+     C                   if        *in92 = *on                                  If hit
+     C                   eval      m1msg = dsc(z)
+     C                   exsr      $prtmsg
+     C                   endif                                                  If hit
+      *
+     C                   endif                                                  If got a msg
+     C                   enddo                                                  Do array
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print error messages
+      *---------------------------------------------------------------
+      *
+     C     $prtmsg       begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $prthdr
+     C                   except    blank3
+     C                   endif
+      *
+     C                   except    msgdtl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print headings
+      *---------------------------------------------------------------
+      *
+     C     $prthdr       begsr
+      *
+     C                   select
+     C                   when      sec1fl = yes
+     C                   except    hrhdr
+     C                   except    h1hdr
+      *
+     C                   when      sec2fl = yes
+     C                   except    hrhdr
+     C                   except    h2hdr
+      *
+     C                   when      sec3fl = yes
+     C                   except    hrhdr
+     C                   except    h3hdr
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Clear error message array and indexes
+      *---------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   z-add     0             err
+     C                   z-add     0             x
+     C                   z-add     0             y
+     C                   z-add     0             z
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *
+     C     *entry        plist
+     C                   parm                    xxerrorfl
+      *
+      *
+      * Set up heading info.
+      *
+     C                   time                    rtime
+      *
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oqprint    e            hrhdr          1 01
+     O                       sdpgm               10
+     O                                           90 'HOG PRODUCTION SYSTEM'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+     O          e            hrhdr          1
+     O                       sdusr               10
+     O                                           89 'UPLOAD OF ITEM AND ITEM'
+     O                                           94 ' TYPE'
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+     O          e            hrhdr          1
+     O                                           86 'ERROR LISTING'
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+     O          e            hrhdr       0  2
+     O                       hrdesc              30
+      *
+      *-------------------------------------------------------------
+      * Section 1: Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr       0  1
+     O                                          119 'Item'
+     O                                          127 'Crit'
+     O                                          133 'Bdgt'
+     O                                          174 'Stock'
+     O                                          198 'Cost per Unit'
+      *
+     O          e            h1hdr       0  1
+     O                                           11 'Item Number'
+     O                                           43 'Item Description'
+     O                                           83 'UOM'
+     O                                          103 'Volume'
+     O                                          110 'UOW'
+     O                                          119 'Type'
+     O                                          127 'Flag'
+     O                                          133 'Flag'
+     O                                          148 'Budget Item'
+     O                                          177 'Location'
+     O                                          198 'Amount'
+      *
+     O          e            h1hdr       0  0
+     O                       dash               198
+      *
+      *-------------------------------------------------------------
+      * Section 1: Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       3  2
+     O                       u2itcd              25
+     O                       u2itds              77
+     O                       u2uom               88
+     O                       u2vol         k    104
+     O                       u2uow              112
+     O                       u2ittycd           121
+     O                       u2critfl           125
+     O                       u2bgfl             132
+     O                       u2bgit             162
+     O                       u2stkloc           184
+     O                       u2cpuam       k    198
+      *
+      *-------------------------------------------------------------
+      * Section 2: Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            h2hdr       0  1
+     O                                          150 'Item'
+     O                                          167 'Critical'
+     O                                          175 'Budget'
+     O                                          188 'Stock'
+      *
+     O          e            h2hdr       0  1
+     O                                           11 'Budget Item'
+     O                                           38 'Item Number'
+     O                                           68 'Item Description'
+     O                                          107 'UOM'
+     O                                          129 'Volume'
+     O                                          137 'UOW'
+     O                                          150 'Type'
+     O                                          165 'Flag'
+     O                                          174 'Flag'
+     O                                          191 'Location'
+      *
+     O          e            h2hdr       0  2
+     O                       dash               198
+      *
+      *-------------------------------------------------------------
+      * Section 2: Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l2dtl          1
+     O                       p1u2bgit            25
+     O                       p1u2itcd            52
+     O                       p1u2itds           102
+     O                       p1u2uom            112
+     O                       p1u2vol       k    130
+     O                       p1u2uow            139
+     O                       p1u2ittycd         152
+     O                       p1u2critfl         164
+     O                       p1u2bgfl           172
+     O                       p1u2stkloc         198
+      *
+      *
+      *-------------------------------------------------------------
+      * Section 3: Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            h3hdr       0  1
+     O                                            4 'Item'
+      *
+     O          e            h3hdr       0  1
+     O                                            4 'Type'
+      *
+     O          e            h3hdr       0  1
+     O                                            4 'Code'
+     O                                           21 'Description'
+      *
+     O          e            h3hdr       0  2
+     O                       dash               198
+      *
+      *-------------------------------------------------------------
+      * Section 3: Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l3dtl          1
+     O                       u1ittycd             6
+     O                       u1ittyds            40
+      *
+      *-------------------------------------------------------------
+      * All Sections: Message line
+      *-------------------------------------------------------------
+      *
+     O          e            msgdtl         1
+     O              n87      m1msg              166
+     O               87      m1msg              131
+      *
+      *-------------------------------------------------------------
+      * All Sections: Blank lines
+      *-------------------------------------------------------------
+      *
+     O          e            blank2         2
+      *
+     O          e            blank3         3
+      *
+      *-------------------------------------------------------------
+      * There was nothing in the upload files
+      *-------------------------------------------------------------
+      *
+     O          e            nodata         2
+     O                                           19 'There was no data '
+     O                                           40 'in the upload files.'
+      /eject
+     ******************************************************************
+      * ARRAYS FOR EDITING
+     ******************************************************************
+** ERROR MESSAGE CODES AND DESCRITIONS
+01Item Number is blank.
+02There are duplicate Item records with this same Item Number.
+03Item Description is blank.
+04Unit of Measure is blank.
+05Volume is negative.
+06UOW is blank while Volume is not blank. Either both must be blank or both must have values.
+07Volume is blank while UOW is not blank. Either both must be blank or both must have values.
+08Item Type Code is blank.
+09The Item Type Code does not exist in the upload Item Type file.
+10Budget Flag must be either Y=Yes or N=No.
+11When Budget Flag is No, Budget Item must be blank.
+12When Budget Flag is Yes, Budget Item cannot be blank.
+13Critical Flag must be either Blank or Y=Yes or N=No.
+14The Unit of Measure is not the same for all Item records for this Budget Item.
+15The Unit of Weight is not the same for all Item records for this Budget Item.
+16The Critical Flag value is not the same for all Item records for this Budget Item.
+17The Budget Flag value is not the same for all Item records for this Budget Item.
+18The Item Type Code is not the same for all Item records for this Budget Item.
+19The Critical Flag value cannot be Yes when the Budget Flag is No.
+20There are duplicate Item Type records with this same Item Type Code.
+21Item Type Description is blank.
+22Cost per Unit Amount cannot be negative.

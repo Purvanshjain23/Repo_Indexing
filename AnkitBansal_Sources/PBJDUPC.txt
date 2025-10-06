@@ -1,0 +1,931 @@
+/********************************************************************/
+/*                                                                  */
+/*  SYNOPSIS -  RECEIVE PARAMETERS AND PASS TO SEQUEL VIEW          */
+/*              TO CREATE A SPREADSHEET TABLE OF ORDERS FOR         */
+/*              A SPECIFIC BROKER CODE.                             */
+/*                                                                  */
+/*  SYSTEM    - ORDER MANAGEMENT SYSTEM                             */
+/*  PROGRAM ID- PBJDUPC                                             */
+/*  PROGRAM   - CREATE AND EMAIL JAPANESE REPORTS-BROKER            */
+/*  DATE      - 07/01/2013                                          */
+/*  PROGRAMMER- LARA BUSER                                          */
+/*  PROCESS   - 1. CREATE PMD4CPP IN QTEMP                          */
+/*              2. RUN PMD4CPPVn TO COPY DISTINCT RECORDS TO GET    */
+/*                 THE ORDER NUMBERS FOR BILL TO CUSTOMER FOR       */
+/*                 EITHR ACTUAL OR REQUESTED SHIP DATES             */
+/*              3. RUN JCO_Vn AND SAVE RESULTS AS PMD4JCOn IN QTEMP */
+/*              4. RUN PMD4JCOVn TO CREATE A TABLE OF THE RECORDS   */
+/*                 WITH TOTALS BY ITEM AND TOTALS BY PO#            */
+/*              5. EMAIL RESULTING SPREADSHEET TO THE EMAIL         */
+/*                 ADDRESS PASSED IN.                               */
+/*              6. For category, run PMD4CPPV4 TO BUILD THE AS400   */
+/*                 WORK FILE, THE JCO_V4 TO BUILD THE SEQUEL        */
+/*                 TEMP FILE, RUN PMD4JCOT4 TO BUILD THE PIVOT      */
+/*                 TABLE FOR THE SUMMARY BY ITEM TABLE THEN         */
+/*                 RUN PMD4JCOS4T TO RUN THE CATEGORY TABLE         */
+/*              7. EMAIL RESULTING SPREADSHEET REPORTS TO THE       */
+/*                 EMAIL ADDRESS PASSED IN.                         */
+/*              8. BROKER CODE NOT EQUAL BLANKS                     */
+/*  COPY OF PMX7UPC WHICH CREATES SQLS FOR BROKER = BLANKS          */
+/*  NOTES: EXECUTE VIEW(*LIBL/JCO_V3) OUTFILE(QTEMP/PMD4JCO3)       */
+/*         EXECUTE VIEW(*LIBL/JCO_V4) OUTFILE(QTEMP/PMD4JCO4)       */
+/*         THESE TWO SEQUELS BUILD WORKFILES IN QTEMP THAT ARE      */
+/*         NOT A PART OF THE AS400.                                 */
+/*         CPYF NEEDED TO CREATE TEMP FILE FIRST TIME THROUGH,      */
+/*         COMMENT OUT AFTER THAT                                   */
+/*                                                                  */
+/*         CHANGES MADE TO THIS PROGRAM MUST ALSO BE MADE TO        */
+/*         PMX7UPC-CREATE AND EMAIL JAPANESE REPORTS-NO BROKER      */
+/*                                                                  */
+/*  PARAMETERS:                                                     */
+/*  I    &COMPN      - COMPANY NUMBER  15.5                         */
+/*  I    &CUSTN      - CUSTOMER NUMBER 15.5                         */
+/*  I    &FROMDTN    - SCHEDULED SHIP DATE BEGIN RANGE 15.5         */
+/*  I    &TODTN      - SCHEDULED SHIP DATE END RANGE 15.5           */
+/*  I    &FROMPRCDN  - FROM PRICE CODE                              */
+/*  I    &TOPRCDN    - TO PRICE CODE                                */
+/*  I    &EMAILADDR  - EMAIL ADDRESS                                */
+/*  I    &RTNCDE     - RETURN CODE                                  */
+/*  I    &SELECT     - SELECT REPORT TYPE - 1 THRU 8                */
+/*  I    &BROKER     - BROKER CODE                                  */
+/*  I    &WHSETYPE   - WAREHOUSE TYPE - FRESH OR FROZEN             */
+/*  I    &MANTYPE    - MANIFEST TYPE (SS = SALES SUMMARY)           */
+/********************************************************************/
+/* MODIFICATIONS:                                                   */
+/* 09/19/2017 DN  E011527  UNDO &SELECT CHANGE FROM 2 BACK TO 1 BYTE*/
+/*                         & CHANGED OPT 7 & 8 TO CLONE PMD4CPPV19  */
+/*                         & PMD4CPPV18 AND REMOVED THE PRICE CODE  */
+/*                         RESTRICTION.                             */
+/* 08/28/2017 LJB E011527  SELECT FIELD CHANGED TO 2 CHAR.          */
+/* 07/25/2014 LJB E003182  ADD ORDER NUMBER AND FROM AND THRU       */
+/*       PO NUMBER SELECTIONS                                       */
+/********************************************************************/
+ PBJDUPC:    PGM        PARM(&COMPN &CUSTN &FROMDTN &TODTN &ORDERN +
+                          &WHSETYPE &EMAILADDR &RTNCDE &PO#FILLED +
+                          &BROKER &SELECT &OUTQ &HOLD &SAVE &COPYN +
+                          &MANTYPE &PONBR)
+
+             DCL        VAR(&CUSTN)     TYPE(*DEC)
+             DCL        VAR(&CUST)      TYPE(*DEC)  LEN(7 0)
+             DCL        VAR(&CUSTA)     TYPE(*CHAR) LEN(7)
+             DCL        VAR(&COMPN)     TYPE(*DEC)
+             DCL        VAR(&COMP)      TYPE(*DEC)  LEN(3 0)
+             DCL        VAR(&COMPA)     TYPE(*CHAR) LEN(3)
+             DCL        VAR(&FROMDTN)   TYPE(*DEC)
+             DCL        VAR(&FROMDT)    TYPE(*DEC)  LEN(7 0)
+             DCL        VAR(&FROMDTA)   TYPE(*CHAR) LEN(7)
+             DCL        VAR(&FDATE)     TYPE(*CHAR) LEN(10)
+             DCL        VAR(&TODTN)     TYPE(*DEC)
+             DCL        VAR(&TODT)      TYPE(*DEC)  LEN(7 0)
+             DCL        VAR(&TODTA)     TYPE(*CHAR) LEN(7)
+             DCL        VAR(&TDATE)     TYPE(*CHAR) LEN(10)
+             DCL        VAR(&FROMPRCDN) TYPE(*DEC)
+             DCL        VAR(&FROMPRCDE) TYPE(*DEC)  LEN(6 0)
+             DCL        VAR(&FROMPRCDA) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&TOPRCDE)   TYPE(*DEC)  LEN(6 0)
+             DCL        VAR(&TOPRCDN)   TYPE(*DEC)
+             DCL        VAR(&TOPRCDA)   TYPE(*CHAR) LEN(6)
+             DCL        VAR(&RTNCDE)    TYPE(*CHAR) LEN(7)
+             DCL        VAR(&EMAILADDR) TYPE(*CHAR) LEN(50)
+             DCL        VAR(&SELECT)    TYPE(*CHAR) LEN(1)
+             DCL        VAR(&EMSG)      TYPE(*CHAR) LEN(100)
+             DCL        VAR(&EMSG2)     TYPE(*CHAR) LEN(100)
+             DCL        VAR(&EMSG3)     TYPE(*CHAR) LEN(100)
+             DCL        VAR(&EMSG4)     TYPE(*CHAR) LEN(100)
+             DCL        VAR(&WHSETYPE)  TYPE(*CHAR) LEN(2)
+             DCL        VAR(&BROKER)    TYPE(*CHAR) LEN(6)
+             DCL        VAR(&APPLIC)    TYPE(*CHAR) LEN(06)
+             DCL        VAR(&MANTYPE)   TYPE(*CHAR) LEN(2)
+             DCL        VAR(&DESC)      TYPE(*CHAR) LEN(25)
+             DCL        VAR(&COPYN)     TYPE(*DEC)
+             DCL        VAR(&COPIES)    TYPE(*DEC)  LEN(3 0)
+             DCL        VAR(&OUTQ)      TYPE(*CHAR) LEN(10)
+             DCL        VAR(&HOLD)      TYPE(*CHAR) LEN(4)
+             DCL        VAR(&SAVE)      TYPE(*CHAR) LEN(4)
+             DCL        VAR(&NQSTAT) TYPE(*CHAR) LEN(01) VALUE(N)
+             DCL        VAR(&NIGHTQ) TYPE(*CHAR) LEN(10) +
+                          VALUE('          ')
+             DCL        VAR(&SUBJECT)   TYPE(*CHAR) LEN(60)
+             DCL        VAR(&ORDERN)    TYPE(*DEC)
+             DCL        VAR(&ORDER)     TYPE(*DEC)  LEN(7 0)
+             DCL        VAR(&ORDERA)    TYPE(*CHAR) LEN(7)
+             DCL        VAR(&PONBR)     TYPE(*CHAR) LEN(15)
+             DCL        VAR(&PO#FILLED) TYPE(*CHAR) LEN(15)
+
+             MONMSG     MSGID(CPF0000 QRY0000)
+                        GOTO CHGVAR
+/*** FOR TESTING PURPOSES                                     +
+             RMVLIBLE   LIB(PRKDEVQRY)                        +
+             MONMSG     MSGID(CPF0000 QRY0000)                +
+             ADDLIBLE   LIB(PRKDEVQRY)                        +
+             MONMSG     MSGID(CPF0000 QRY0000)                ******/
+
+/* SET ALPHA VALUES FOR THE SETVAR PARM IN THE EXECUTE COMMAND       */
+ CHGVAR:     CHGVAR     VAR(&CUST) VALUE(&CUSTN)
+             CHGVAR     VAR(&CUSTA) VALUE(&CUST)
+             CHGVAR     VAR(&COMP) VALUE(&COMPN)
+             CHGVAR     VAR(&COMPA) VALUE(&COMP)
+             CHGVAR     VAR(&ORDER) VALUE(&ORDERN)
+             CHGVAR     VAR(&ORDERA) VALUE(&ORDER)
+             CHGVAR     VAR(&FROMDT) VALUE(&FROMDTN)
+             CHGVAR     VAR(&FROMDTA) VALUE(&FROMDT)
+             CHGVAR     VAR(&TODT) VALUE(&TODTN)
+             CHGVAR     VAR(&TODTA) VALUE(&TODT)
+             CHGVAR     VAR(&FROMPRCDE) VALUE(&FROMPRCDN)
+             CHGVAR     VAR(&FROMPRCDA) VALUE(&FROMPRCDE)
+             CHGVAR     VAR(&TOPRCDE) VALUE(&TOPRCDN)
+             CHGVAR     VAR(&TOPRCDA) VALUE(&TOPRCDE)
+             CHGVAR     VAR(&COPIES) VALUE(&COPYN)
+
+/* CONVERT DATE FOR PRINTING IN EMSG                                */
+             CVTDAT     DATE(&FROMDTA) TOVAR(&FDATE) FROMFMT(*CYMD) +
+                          TOFMT(*MDYY) TOSEP('/')
+             CVTDAT     DATE(&TODTA) TOVAR(&TDATE) FROMFMT(*CYMD) +
+                          TOFMT(*MDYY) TOSEP('/')
+
+             CHGVAR     VAR(&EMSG) VALUE('Customer:' *BCAT &CUSTA +
+                          *BCAT 'for Scheduled Ship Date range:' +
+                          *BCAT &FDATE *BCAT 'through' *BCAT &TDATE)
+
+             CHGVAR     VAR(&EMSG2) VALUE('Customer:' *BCAT &CUSTA +
+                          *BCAT 'Company:' *BCAT &COMPA *BCAT 'for +
+                          Scheduled Ship Date range:' *BCAT &FDATE +
+                          *BCAT 'through' *BCAT &TDATE)
+
+             CHGVAR     VAR(&EMSG3) VALUE('Customer:' *BCAT &CUSTA +
+                          *BCAT 'Order#:' *BCAT &ORDERA)
+
+             CHGVAR     VAR(&EMSG4) VALUE('Customer:' *BCAT &CUSTA +
+                          *BCAT 'Purchase Order#:' *BCAT &PONBR)
+
+/* CREATE PMD4CPP WF CUSTOMER PRICE HEADER IN QTEMP                  */
+             CRTDUPOBJ  OBJ(PMD4CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) NEWOBJ(PMD4CPP) CST(*NO) +
+                          TRG(*NO)
+             MONMSG     MSGID(CPF0000)
+             CHGPF      FILE(PMD4CPP) LVLCHK(*NO)
+             MONMSG     MSGID(CPF0000)
+             CLRPFM     FILE(QTEMP/PMD4CPP)
+             MONMSG     MSGID(CPF0000)
+             CRTDUPOBJ  OBJ(PMD4CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) NEWOBJ(PMD4CPL0) CST(*NO) +
+                          TRG(*NO)
+             MONMSG     MSGID(CPF0000)
+
+             CRTDUPOBJ  OBJ(PMD4CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) NEWOBJ(PMD4CPL1) CST(*NO) +
+                          TRG(*NO)
+             MONMSG     MSGID(CPF0000)
+             CRTDUPOBJ  OBJ(PMD4CPL2) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) NEWOBJ(PMD4CPL2) CST(*NO) +
+                          TRG(*NO)
+             MONMSG     MSGID(CPF0000)
+             CRTDUPOBJ  OBJ(PMD4CPL3) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) NEWOBJ(PMD4CPL3) CST(*NO) +
+                          TRG(*NO)
+             MONMSG     MSGID(CPF0000)
+             CRTDUPOBJ  OBJ(PMD4CPL4) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) NEWOBJ(PMD4CPL4) CST(*NO) +
+                          TRG(*NO)
+             MONMSG     MSGID(CPF0000)
+/* #######                                                           */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* CREATE DATA IN PMD4CPP TO GET ORDER #'S AND ASSOCIATED            */
+/* PRICE CODES FOR THE PASSED IN BILL TO AND BROKER CODE.            */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 1 = ITEMS SHIPPED FOR ALL COMPANIES-1 CUSTOMER        */
+/*  AND BROKER, AND ACTUAL SHIPPED DATE                              */
+/*  WAREHOUSE TYPE ADDED   E002587                                   */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+             IF         COND(&SELECT *EQ '1') THEN(DO)
+             IF         COND(&COMP *EQ 000) THEN(DO)
+
+             IF         COND(&ORDER *NE 0) THEN(DO)
+/* BUILD WORK FILE FOR 1 ORDER                              E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV19) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG3)
+             GOTO       CMDLBL(JCO_V3)
+             ENDDO
+
+             IF         COND(&PONBR *NE '        ') THEN(DO)
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL FOR 1 ORDER       E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV18) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG4)
+             GOTO       CMDLBL(JCO_V3)
+             ENDDO
+
+/* IF NOT FOR 1 ORDER OR 1 PO# THEN POPULATE THE WORK FILE           */
+/* FOR A DATE RANGE                                         E001893  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV9) OUTFILE(QTEMP/PMD4CPP) +
+                          SETVAR((&CUST &CUSTA) (&FROMDT &FROMDTA) +
+                          (&TODT &TODTA) (&BROKER &BROKER) +
+                          (&WHSETYPE &WHSETYPE))
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+/******      CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)     *****/
+
+/* CREATE A TEMP FILE OF THE ORDER HEADER AND DETAIL RECORDS FOR     */
+/* THE REQUESTED DATE RANGE. ADD COMPANY NUMBER TO JCO_V3   E001893  */
+ JCO_V3:     EXECUTE    VIEW(*LIBL/JCO_V3) OUTFILE(QTEMP/PMD4JCO3)
+
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/*********** CPYF       FROMFILE(QTEMP/PMD4JCO3) +
+                          TOFILE(OMSDEVGEN/PMD4JCO3SV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)     *********/
+
+/* BUILD A TABLE OF ALL THE PURCHASE ORDER ITEMS FOR THE REQUESTED   */
+/* DATE RANGE AND TOTAL THE P.O.'S AND THE ITEMS. CREATE AN          */
+/* EXCEL SPREADSHEET OF THE RESULTS AND EMAIL                        */
+/* ADD COMPANY NUMBER TO PMD4JCOVT                      E001893      */
+             EXECUTE    VIEW(*LIBL/PMD4JCOVT) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+             ENDDO      /*  COMPANY = 000 */
+
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 1 = ITEMS SHIPPED,1 COMPANY, 1 CUSTOMER, BROKER       */
+/*                 BY ACTUAL SHIPPED DATE RANGE                      */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+             IF         COND(&COMP *NE 000) THEN(DO)
+
+             IF         COND(&ORDER *NE 0) THEN(DO)
+/* BUILD WORK FILE FOR 1 ORDER                              E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV19) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG3)
+             GOTO       CMDLBL(JCO_V3B)
+             ENDDO
+
+             IF         COND(&PONBR *NE '        ') THEN(DO)
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL FOR 1 ORDER       E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV18) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG4)
+             GOTO       CMDLBL(JCO_V3B)
+             ENDDO
+
+/* IF NOT FOR 1 ORDER OR 1 PO# THEN POPULATE THE WORK FILE           */
+/* FOR A DATE RANGE                                         E001893  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV10) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&FROMDT &FROMDTA) (&TODT &TODTA) +
+                          (&BROKER &BROKER) (&COMP &COMPA) +
+                          (&WHSETYPE &WHSETYPE))
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/****        CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)          ****/
+
+/* CREATE A TEMP FILE OF THE ORDER HEADER AND DETAIL RECORDS FOR     */
+/* THE ACTUAL SHIP DATES.                                            */
+ JCO_V3B:    EXECUTE    VIEW(*LIBL/JCO_V3) OUTFILE(QTEMP/PMD4JCO3)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/****        CPYF       FROMFILE(QTEMP/PMD4JCO3) +
+                          TOFILE(OMSDEVGEN/PMD4JCO3SV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)         ****/
+
+/* BUILD A TABLE OF ALL THE PURCHASE ORDER ITEMS FOR THE ACTUAL      */
+/* SHIP DATES AND TOTAL THE P.O.'S AND THE ITEMS. CREATE AN          */
+/* EXCEL SPREADSHEET OF THE RESULTS AND EMAIL                        */
+             EXECUTE    VIEW(*LIBL/PMD4JCOVT) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+             ENDDO      /*   END COMPANY <> 000 */
+
+             ENDDO      /* End Select Report Type = 1 */
+
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 2 = ITEMS ORDERED,1 CUSTOMER, ALL COMPANIES, BROKER   */
+/*                 BY REQUESTED SHIP DATE                            */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+             IF         COND(&SELECT *EQ '2') THEN(DO)
+             IF         COND(&COMP *EQ 000) THEN(DO)
+
+             IF         COND(&ORDER *NE 0) THEN(DO)
+/* BUILD WORK FILE FOR 1 ORDER                              E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV19) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG3)
+             GOTO       CMDLBL(JCO_V3C)
+             ENDDO
+
+             IF         COND(&PONBR *NE '        ') THEN(DO)
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL FOR 1 ORDER       E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV18) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG4)
+             GOTO       CMDLBL(JCO_V3C)
+             ENDDO
+
+/* IF NOT FOR 1 ORDER OR 1 PO# THEN POPULATE THE WORK FILE           */
+/* FOR A DATE RANGE                                         E001893  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV11) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&FROMDT &FROMDTA) (&TODT &TODTA) +
+                          (&BROKER &BROKER) (&WHSETYPE &WHSETYPE))
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/****           CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                             TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                             MBROPT(*REPLACE) CRTFILE(*YES)    ******/
+
+/* CREATE A TEMP FILE OF THE ORDER HEADER AND DETAIL RECORDS FOR     */
+/* THE REQUESTED PRICE CODES                                         */
+JCO_V3C:     EXECUTE    VIEW(*LIBL/JCO_V3) OUTFILE(QTEMP/PMD4JCO3)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/* FOR TESTING, COPY THE TEMP FILE                                  */
+/**********     CPYF       FROMFILE(QTEMP/PMD4JCO3)     +
+                             TOFILE(OMSDEVGEN/PMD4JCO3SV) +
+                             MBROPT(*REPLACE) CRTFILE(*YES)    ******/
+
+/* BUILD A TABLE OF ALL THE PURCHASE ORDER ITEMS FOR THE REQUESTED   */
+/* DATE RANTE  AND TOTAL THE P.O.'S AND THE ITEMS. CREATE AN         */
+/* EXCEL SPREADSHEET OF THE RESULTS AND EMAIL                        */
+/* ADD COMPANY NUMBER TO PMD4JCOT2                      E001893      */
+             EXECUTE    VIEW(*LIBL/PMD4JCOT2) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+             ENDDO      /*  END COMPANY = 000 */
+
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 2 = ITEMS ORDERED,1 CUSTOMER, 1 COMPANY, BROKER       */
+/*                 BY REQUESTED SHIP DATE                            */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+             IF         COND(&COMP *NE 000) THEN(DO)
+
+             IF         COND(&ORDER *NE 0) THEN(DO)
+/* BUILD WORK FILE FOR 1 ORDER                              E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV19) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG3)
+             GOTO       CMDLBL(JCO_V3D)
+             ENDDO
+
+             IF         COND(&PONBR *NE '        ') THEN(DO)
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL FOR 1 ORDER       E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV18) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG4)
+             GOTO       CMDLBL(JCO_V3D)
+             ENDDO
+
+/* IF NOT FOR 1 ORDER OR 1 PO# THEN POPULATE THE WORK FILE           */
+/* FOR A DATE RANGE                                         E003182  */
+/* CREATE A TEMP FILE OF THE ORDER HEADER AND DETAIL RECORDS FOR     */
+/* THE REQUESTED PRICE CODES                                         */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV12) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&FROMDT &FROMDTA) (&TODT &TODTA) +
+                          (&COMP &COMPA) (&BROKER &BROKER) +
+                          (&WHSETYPE &WHSETYPE))
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+/************** CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                             TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                             MBROPT(*REPLACE) CRTFILE(*YES) **********/
+
+/* CREATE A TEMP FILE OF THE ORDER HEADER AND DETAIL RECORDS FOR     */
+/* THE REQUESTED PRICE CODES                                         */
+JCO_V3D:     EXECUTE    VIEW(*LIBL/JCO_V3) OUTFILE(QTEMP/PMD4JCO3)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/************** CPYF       FROMFILE(QTEMP/PMD4JCO3)      +
+                             TOFILE(OMSDEVGEN/PMD4JCO3SV)  +
+                             MBROPT(*REPLACE) CRTFILE(*YES)  *********/
+
+/* BUILD A TABLE OF ALL THE PURCHASE ORDER ITEMS FOR THE REQUESTED   */
+/* PRICE CODES AND TOTAL THE P.O.'S AND THE ITEMS. CREATE AN         */
+/* EXCEL SPREADSHEET OF THE RESULTS AND EMAIL                        */
+/* ADD COMPANY NUMBER TO PMD4JCOT2                      E001893      */
+             EXECUTE    VIEW(*LIBL/PMD4JCOT2) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+             ENDDO      /* End CO# <> 000 */
+
+             ENDDO      /* End Select Report Type = 2 */
+
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 3 = BY ORDERED VS SHIPPED, 1 CUSTOMER, ALL COMPANIES  */
+/*                 BY ACTUAL SHIP DATE AND BROKER                    */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+             IF         COND(&SELECT *EQ '3') THEN(DO)
+             IF           COND(&COMP *EQ 000) THEN(DO)
+
+             IF         COND(&ORDER *NE 0) THEN(DO)
+/* BUILD WORK FILE FOR 1 ORDER                              E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV19) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG3)
+             GOTO       CMDLBL(JCO_V3E)
+             ENDDO
+
+             IF         COND(&PONBR *NE '        ') THEN(DO)
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL FOR 1 ORDER       E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV18) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG4)
+             GOTO       CMDLBL(JCO_V3E)
+             ENDDO
+
+/* IF NOT FOR 1 ORDER OR 1 PO# THEN POPULATE THE WORK FILE           */
+/* FOR A DATE RANGE                                         E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV13) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&FROMDT &FROMDTA) (&TODT &TODTA) +
+                          (&BROKER &BROKER) (&WHSETYPE &WHSETYPE))
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/******      CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)  ***********/
+
+/* CREATE A TEMP FILE OF THE ORDER HEADER AND DETAIL RECORDS FOR     */
+/* THE REQUESTED PRICE CODES                                         */
+ JCO_V3E:    EXECUTE    VIEW(*LIBL/JCO_V3) OUTFILE(QTEMP/PMD4JCO3)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/*******     CPYF       FROMFILE(QTEMP/PMD4JCO3) +
+                          TOFILE(OMSDEVGEN/PMD4JCO3SV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)        *****/
+
+/* BUILD A TABLE OF ALL THE PURCHASE ORDER ITEMS FOR THE REQUESTED   */
+/* PRICE CODES AND TOTAL THE P.O.'S AND THE ITEMS. THIS REPORT WILL  */
+/* INCLUDE ORDERED AND SHIPPED ON THE SAME REPORT. CREATE AN         */
+/* EXCEL SPREADSHEET OF THE RESULTS AND EMAIL                        */
+/* ADD COMPANY NUMBER TO PMD4JCOT3                      E001893      */
+             EXECUTE    VIEW(*LIBL/PMD4JCOT3) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+             ENDDO      /* End REPORT TYPE=3, COMPANY = 000 */
+
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 3 = ORDERED VS SHIPPED, 1 CUSTOMER, 1 COMPANY         */
+/*                 BY ACTUAL SHIP DATE AND BROKER                    */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+             IF         COND(&COMP *NE 000) THEN(DO)
+
+             IF         COND(&ORDER *NE 0) THEN(DO)
+/* BUILD WORK FILE FOR 1 ORDER                              E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV19) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG3)
+             GOTO       CMDLBL(JCO_V3F)
+             ENDDO
+
+             IF         COND(&PONBR *NE '        ') THEN(DO)
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL FOR 1 ORDER       E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV18) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG4)
+             GOTO       CMDLBL(JCO_V3F)
+             ENDDO
+
+/* IF NOT FOR 1 ORDER OR 1 PO# THEN POPULATE THE WORK FILE           */
+/* FOR A DATE RANGE                                         E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV14) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&FROMDT &FROMDTA) (&TODT &TODTA) +
+                          (&COMP &COMPA) (&WHSETYPE &WHSETYPE) +
+                          (&BROKER &BROKER))
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/*********** CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)       ******/
+
+/* CREATE A TEMP FILE OF THE ORDER HEADER AND DETAIL RECORDS FOR     */
+/* THE REQUESTED PRICE CODES                                         */
+JCO_V3F:     EXECUTE    VIEW(*LIBL/JCO_V3) OUTFILE(QTEMP/PMD4JCO3)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/********    CPYF       FROMFILE(QTEMP/PMD4JCO3) +
+                          TOFILE(OMSDEVGEN/PMD4JCO3SV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)        ******/
+
+/* BUILD A TABLE OF ALL THE PURCHASE ORDER ITEMS FOR THE REQUESTED   */
+/* PRICE CODES AND TOTAL THE P.O.'S AND THE ITEMS. THIS REPORT WILL  */
+/* INCLUDE ORDERED AND SHIPPED ON THE SAME REPORT. CREATE AN         */
+/* EXCEL SPREADSHEET OF THE RESULTS AND EMAIL                        */
+/* ADD COMPANY NUMBER TO PMD4JCOT3                      E001893      */
+             EXECUTE    VIEW(*LIBL/PMD4JCOT3) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+             ENDDO      /* End REPORT TYPE=3, COMPANY <> 000 */
+
+             ENDDO      /* End Select Report Type = 3 */
+
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 4 = THIS OPTION PRODUCES 2 SPREADSHEET REPORTS.       */
+/*                 ALL CUSTOMERS, 1 COMPANY, BY ACTUAL SHIP DATE.    */
+/*                 AND BY BROKER <> BLANKS                           */
+/*                 1. SUMMARY OF ALL ITEMS SHIPPED FOR ALL CUSTOMERS */
+/*                      BY CUSTOMER AND ITEM FOR A SINGLE COMPANY.   */
+/*                      THE TABLE SUMMARIZES SHIPPED CASES AND       */
+/*                      WEIGHT BY ITEM ACROSS AND BY CUSTOMER DOWN.  */
+/*                 2. SUMMARY BY CATEGORY OF SELECTED TYPES OF ITEMS */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+             IF         COND(&SELECT *EQ '4') THEN(DO)
+
+             IF         COND(&ORDER *NE 0) THEN(DO)
+/* BUILD WORK FILE FOR 1 ORDER                              E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV19) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG3)
+             GOTO       CMDLBL(JCO_V4)
+             ENDDO
+
+             IF         COND(&PONBR *NE '        ') THEN(DO)
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL FOR 1 ORDER       E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV18) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG4)
+             GOTO       CMDLBL(JCO_V4)
+             ENDDO
+
+/* IF NOT FOR 1 ORDER OR 1 PO# THEN POPULATE THE WORK FILE           */
+/* FOR A DATE RANGE                                         E003182  */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV14) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&FROMDT &FROMDTA) (&TODT &TODTA) +
+                          (&COMP &COMPA) (&WHSETYPE &WHSETYPE) +
+                          (&BROKER &BROKER))
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+/********    CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)        *****/
+
+/* CREATE A TEMP FILE OF THE ORDER HEADER AND DETAIL RECORDS FOR     */
+/* THE REQUESTED PRICE CODES AND ITEMS                               */
+/* THIS ALSO ASSIGNS CATAGORIES TO THE ITEM CODES                    */
+ JCO_V4:     EXECUTE    VIEW(*LIBL/JCO_V4) OUTFILE(*LIBL/PMD4JCO4)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/*********   CPYF       FROMFILE(*LIBL/PMD4JCO4) +
+                          TOFILE(OMSDEVGEN/PMD4JCO4SV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)      ********/
+
+/* BUILD A TABLE OF ALL THE ITEMS FOR THE REQUESTED PRICE CODES.     */
+/* TOTAL THE ITEMS ACROSS BY CUSTOMER NAME. TOTAL THE CUSTOMER       */
+/* ITEMS DOWN. THIS SUMMARY IS FOR SHIPPED ITEMS ONLY.               */
+/* CREATE AN EXCEL SPREADSHEET OF THE RESULTS AND EMAIL.             */
+             EXECUTE    VIEW(*LIBL/PMD4JCOT4) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG2)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+/* BUILD A TABLE THAT SUMMARIZES SELECTED ITEM CODES INTO            */
+/* CATEGORIES. EMAIL THIS WITH THE PREVIOUS REPORT.                  */
+             EXECUTE    VIEW(*LIBL/PMD4JCOS4T) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG2)
+             MONMSG     MSGID(CPF0000 EML0000 QRY0000) EXEC(GOTO +
+                          CMDLBL(END2))
+
+             ENDDO      /* End Select Report Type = 4 */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 5 = MANIFEST DETAIL SUMMARY                           */
+/* REPORT TYPE 6 = CUSTOMER DETAIL TITLED MANIFEST DETAIL            */
+/*                 EMAIL THE PDF TO THE REQUESTED EMAIL ADDRESS      */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+             IF         COND((&SELECT *EQ '5') *OR (&SELECT *EQ +
+                          '6')) THEN(DO)
+
+/* BUILD WORK FILE FOR 1 ORDER                              E003182  */
+             IF         COND(&ORDER *NE 0) THEN(DO)
+             EXECUTE    VIEW(*LIBL/PMD4CPPV21) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG3)
+
+/******      CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)     ****/
+             GOTO       CMDLBL(CALL)
+             ENDDO
+
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL FOR 1 ORDER       E003182  */
+             IF         COND(&PONBR *NE '        ') THEN(DO)
+             EXECUTE    VIEW(*LIBL/PMD4CPPV20) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))
+             CHGVAR     VAR(&EMSG) VALUE(&EMSG4)
+
+/****        CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)  ****/
+             GOTO       CMDLBL(CALL)
+             ENDDO
+
+/* IF NOT FOR 1 ORDER OR 1 PO# THEN POPULATE THE WORK FILE           */
+/* FOR A DATE RANGE                                         E003182  */
+/* BUILD THE WORK FILE                                               */
+             EXECUTE    VIEW(*LIBL/PMD4CPPV14) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&FROMDT &FROMDTA) (&TODT &TODTA) +
+                          (&COMP &COMPA) (&WHSETYPE &WHSETYPE) +
+                          (&BROKER &BROKER))
+
+/***FOR TEST:     CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)        ******/
+
+/* PRINT SALES DETAIL MANIFEST SUMMARY OR CUSTOMER DETAIL            */
+/* PBKRXFR CREATES THE REPORT AND EMAILS IT TO THE RECIPIENT         */
+
+CALL:        CALL       PGM(PBKRXFR) PARM(' ' &COMP &CUST &WHSETYPE +
+                          &MANTYPE &DESC &OUTQ &HOLD &SAVE &NQSTAT +
+                          &NIGHTQ &COPYN &BROKER &FDATE &TDATE +
+                          &EMAILADDR)
+
+             ENDDO      /* END SELECT REPORT TYPE = 5 OR 6  */
+
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 7 = BUILD WORK FILE AND EMAIL MANIFEST SUMMARY        */
+/*             SPREADSHEET TO THE REQUESTED EMAIL ADDRESS            */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+             IF         COND(&SELECT *EQ '7') THEN(DO)
+
+             IF         COND(&ORDER *NE 0) THEN(DO)
+/* BUILD WORK FILE FOR 1 ORDER                                       */
+  /*E011527  IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV19) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER)))     ***********/
+  /*E011527 - PMD4CPPV26 cloned from PMD4CPPV19 but dropped Price Code Check.*/
+             IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV26) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER)))
+             IF         COND(&WHSETYPE *EQ 'FZ') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV21) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER)))
+/* EMAIL MANIFEST SUMMARY SPREADSHEET FOR 1 ORDER                    */
+             EXECUTE    VIEW(*LIBL/OMFNCPL6_2) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG3) +
+                          SETVAR((&ORDER  &ORDERA))
+/*********** CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)  ************/
+             ENDDO      /* End &ORDER NOT ZEROS        */
+
+             IF         COND(&PONBR *NE '        ') THEN(DO)
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL FOR 1 ORDER                */
+  /*E011527  IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV18) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))) *****/
+  /*E011527 - PMD4CPPV27 cloned from PMD4CPPV18 but dropped Price Code Check.*/
+             IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV27) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER)))
+             IF         COND(&WHSETYPE *EQ 'FZ') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV20) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER)))
+/******      CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)      ******/
+
+/*   CALL THE PGM THAT WILL EXECUTE THE SQL TO CREATE THE XLS        */
+             CALL       PGM(PBOAXFR) PARM('' &PONBR &WHSETYPE &COMPN +
+                          &CUSTN &MANTYPE &EMAILADDR &SELECT)
+             ENDDO      /* End &PO NUMBER NOT ZEROS    */
+
+             ENDDO      /* End Select Report Type = 7  */
+
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 8 = BUILD WORK FILE AND EMAIL MANIFEST DETAIL         */
+/*             SPREADSHEET TO THE REQUESTED EMAIL ADDRESS            */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+             IF         COND(&SELECT *EQ '8') THEN(DO)
+
+             IF         COND(&ORDER *NE 0) THEN(DO)
+/* BUILD WORK FILE FOR 1 ORDER                                       */
+  /*E011527  IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV19) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER)))     ***********/
+  /*E011527 - PMD4CPPV26 cloned from PMD4CPPV19 but dropped Price Code Check.*/
+             IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV26) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER)))
+             IF         COND(&WHSETYPE *EQ 'FZ') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV21) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER)))
+/* EMAIL MANIFEST DETAIL  SPREADSHEET FOR 1 ORDER                    */
+             EXECUTE    VIEW(*LIBL/OMFNCPL6_3) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG3) +
+                          SETVAR((&ORDER  &ORDERA))
+/*****       CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)   ****/
+             ENDDO      /* End &ORDER NOT ZEROS        */
+
+             IF         COND(&PONBR *NE '        ') THEN(DO)
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL FOR 1 ORDER                */
+  /*E011527  IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV18) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER)))     */
+  /*E011527 - PMD4CPPV27 cloned from PMD4CPPV18 but dropped Price Code Check.*/
+             IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV27) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER)))
+             IF         COND(&WHSETYPE *EQ 'FZ') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV20) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER)))
+/*********** CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)  ************/
+
+/*   CALL THE PGM THAT WILL EXECUTE THE SQL TO CREATE THE XLS        */
+             CALL       PGM(PBOAXFR) PARM('' &PONBR &WHSETYPE &COMPN +
+                          &CUSTN &MANTYPE &EMAILADDR &SELECT)
+             ENDDO      /* End &PO NUMBER NOT ZEROS    */
+
+             ENDDO      /* End Select Report Type = 8   */
+
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 9 = BUILD WORK FILE AND EMAIL MANIFEST SUMMARY        */
+/*             SPREADSHEET TO THE REQUESTED EMAIL ADDRESS            */
+/*             WITH NO TEST FOR PRICE CODE                           */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+          /* IF         COND(&SELECT *EQ '9') THEN(DO) */
+
+          /* IF         COND(&ORDER *NE 0) THEN(DO) */
+/* BUILD WORK FILE FOR 1 ORDER                                       */
+          /* IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV21) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))) */
+          /* IF         COND(&WHSETYPE *EQ 'FZ') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV21) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))) */
+/* BUILD SPREADSHEET AND EMAIL MAN SUMMARY FOR 1 ORDER & EMAIL       */
+/*   POPULATE THE WORK FILE IN QTEMP WITH THE RECORDS FOR 1 ORDER    */
+          /* EXECUTE    VIEW(*LIBL/OMFNCPL6_2) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG3) +
+                          SETVAR((&ORDER &ORDERA)) */
+/********    CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)        ******/
+          /* ENDDO */   /* End &ORDER NOT ZEROS        */
+
+          /* IF         COND(&PONBR *NE '        ') THEN(DO) */
+/* BUILD SPREADSHEET AND EMAIL MAN SUMMARY FOR ORDERS FOR 1 PO GROUP */
+/*   POPULATE THE WORK FILE IN QTEMP WITH THE RECORDS FOR ALL        */
+/*   ORDERS FOR EITHER 1 PO# OR 1 PO# RANGE, NO TEST FOR PRICE CODE  */
+          /* IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV20) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))) */
+          /* IF         COND(&WHSETYPE *EQ 'FZ') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV20) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))) */
+/**********  CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)     ********/
+
+/*   CALL THE PGM THAT WILL EXECUTE THE SQL TO CREATE THE XLS        */
+          /* CALL       PGM(PBOAXFR) PARM('' &PONBR &WHSETYPE &COMPN +
+                          &CUSTN &MANTYPE &EMAILADDR &SELECT) */
+          /* ENDDO */   /* End &PO NUMBER NOT ZEROS    */
+
+          /* ENDDO */   /* End Select Report Type = 9  */
+
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+/* REPORT TYPE 10= BUILD WORK FILE AND EMAIL MANIFEST DETAIL         */
+/*             SPREADSHEET TO THE REQUESTED EMAIL ADDRESS            */
+/*             FOR 1 ORDER OR FOR 1 PO# WITH NO TEST FOR PRICE CODE  */
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+          /* IF         COND(&SELECT *EQ '10') THEN(DO) */
+
+          /* IF         COND(&ORDER *NE 0) THEN(DO) */
+/* BUILD WORK FILE FOR 1 ORDER                                       */
+          /* IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV21) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))) */
+          /* IF         COND(&WHSETYPE *EQ 'FZ') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV21) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&ORDER +
+                          &ORDERA) (&BROKER &BROKER))) */
+
+/*TESTING*** CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)  ************/
+
+/* EMAIL MANIFEST DETAIL  SPREADSHEET FOR 1 ORDER                    */
+          /* EXECUTE    VIEW(*LIBL/OMFNCPL6_3) PCFMT(*XLS) +
+                          RECIPIENT(&EMAILADDR) EMLMSG(&EMSG3) +
+                          SETVAR((&ORDER  &ORDERA)) */
+          /* ENDDO */   /* End &ORDER NOT ZEROS        */
+
+/* BUILD SPREADSHEET AND EMAIL MAN DETAIL ALL ORDS, 1 PO#            */
+/*   POPULATE THE WORK FILE IN QTEMP WITH THE ORDERS FOR 1 PO#       */
+          /* IF         COND(&PONBR *NE '        ') THEN(DO) */
+
+          /* IF         COND(&WHSETYPE *EQ 'FR') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV20) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))) */
+          /* IF         COND(&WHSETYPE *EQ 'FZ') THEN(EXECUTE +
+                          VIEW(*LIBL/PMD4CPPV20) +
+                          OUTFILE(QTEMP/PMD4CPP) SETVAR((&CUST +
+                          &CUSTA) (&COMP &COMPA) (&FROMPO &PONBR) +
+                          (&TOPO &PO#FILLED) (&BROKER &BROKER))) */
+
+/*TESTING**  CPYF       FROMFILE(QTEMP/PMD4CPP) +
+                          TOFILE(OMSDEVGEN/PMD4CPPSV) +
+                          MBROPT(*REPLACE) CRTFILE(*YES)  ************/
+
+/*   CALL THE PGM THAT WILL EXECUTE THE SQL TO CREATE THE XLS        */
+          /* CALL       PGM(PBOAXFR) PARM('' &PONBR &WHSETYPE &COMPN +
+                          &CUSTN &MANTYPE &EMAILADDR &SELECT) */
+          /* ENDDO */   /* End &PO NUMBER NOT ZEROS    */
+
+          /* ENDDO */   /* End Select Report Type = 10  */
+
+
+             DLTF       FILE(QTEMP/PMD4CPL0)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(QTEMP/PMD4CPL1)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(QTEMP/PMD4CPL2)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(QTEMP/PMD4CPL3)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(QTEMP/PMD4CPL4)
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(QTEMP/PMD4CPP)
+             MONMSG     MSGID(CPF0000)
+
+             GOTO       CMDLBL(END)
+
+ END2:       CHGVAR     VAR(&RTNCDE) VALUE(CPF9999)
+/* - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - */
+ END:        ENDPGM

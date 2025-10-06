@@ -1,0 +1,2427 @@
+      *****************  RPG PROGRAM HEADING  ***********************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP169
+      * TITLE:       CREATE SCHEDULED TRANSFERS
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     11/11/99
+      *
+      * FUNCTION: This program uses a subfile to create scheduled transfer movements.
+      *           The program creates one movement (1 header record with a single detail
+      *           record) for each subfile line entry.
+      *
+      *           If the user needs to create a transfer movement with 2 detail lines,
+      *           he will create it here with 1 detail line and then take the standard
+      *           revise function from the Work With to add the additional detail lines.
+      *
+      *           Movements cannot be revised or deleted through this function.
+      *
+      *           The users wanted to 'see' the system assigned movement numbers. So, after
+      *           they take F9=Accept to process their entries, we redisplay the screen
+      *           with all fields protected (Note: For subfile lines that had no entries
+      *           we make the fields non-displayed as well as protected).  To make more
+      *           entries, they must take F5=Refresh to clear the screen.
+      *
+      *           Please note that the 'redisplay' logic above played havoc with the standard
+      *           page down function.  So, I had to add some work-around code in the
+      *           paging logic to keep the page down from automatically starting over with
+      *           page one when it reached the end of the subfile.
+      *
+      *
+      *           This program is called from:
+      *                HP429-Work With Scheduled Transfers
+      *
+      *           IT DOES NOT HAVE SELECTORS OR POSITIONERS.
+      *           IT HAS F4-PROMPT LOGIC.
+      *           IT USES THE STANDARD MESSAGE HANDLING PROGRAM.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 02/06/01  LeAnne Fedor
+      *           Added production type as a parm on the calls to the group
+      *           select programs.
+      *
+      * 06/05/01  LeAnne Fedor
+      *           Recompile only. New field 'multisite' added to Farm Site file.
+      *
+      * 06/28/01  LeAnne Fedor
+      *           Recompile only.
+      *           Three fields (manager/supervisor/multisite) renamed in Farm Site file.
+      *           Manager and supervisor fields removed from Hog Group file.
+      *
+      * 09/05/01  LeAnne Fedor
+      *           Recompile only...'hog capacity' removed from Farm Buildings file.
+      *           'Square feet' fields added to Farm Site file.
+      *
+      * 07/17/02  LeAnne Fedor
+      *           Added production phase as a parm on the calls to the group
+      *           select programs.
+      *
+      * 11/26/02  LeAnne Fedor
+      *           Added new edits for WTF groups.
+      *
+      * 01/07/03  LeAnne Fedor
+      *           Added edit that 'trucker' must be active.
+      *
+      * 05/17/05  LeAnne Fedor
+      *           The users want to "temporarily" lift the edit that requires both sides of
+      *           a WTF transfer to be WTF groups. When they are ready to put the edit back
+      *           into effect, scan for WTF-TEMP to see what code to reinstate.
+      *
+      * 01/18/06  LeAnne Fedor
+      *           Recompile only.
+      *           Field "Bin Set" was removed from HSP020-Building Rooms file
+      *
+      * 08/10/06  LeAnne Ramsey
+      *           We reinstated the edit that was temporarily 'lifted' in May 2005 for
+      *           WTF groups.
+      *
+      * 07/02/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 10/21/13  LeAnne Ramsey (E2831)
+      *           Added MTech Reference as a parm on the calls to:
+      *               HP538-Select Trucker
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHPD169    CF   E             WORKSTN SFILE(HP169S1:HDRRN1)
+     F                                     INFDS(IOFEED)
+      *
+     FHSP018    IF   E           K DISK
+      *    FARM SITE
+      *
+      *
+     FHSP019    IF   E           K DISK
+      *    FARM BUILDINGS
+      *
+      *
+     Fhsp020    if   e           k disk
+      *    Building rooms
+      *
+      *
+     FHSP034    IF   E           K DISK
+      *  HOG GROUPS
+      *
+      *
+     Fhsl034o   if   e           k disk    rename(hgrec:hgreco)
+      *  Hog groups  (open and created groups only)
+      *
+      *
+     Fhsl034p   if   e           k disk    rename(hgrec:hgrecp) prefix(p1)
+      *  Hog groups (open groups only)
+      *
+      *
+     FHSP046    IF   E           K DISK
+      *    TRUCKER ID
+      *
+      *
+     FHSP058    UF A E           K DISK
+      *  MOVEMENT EVENT
+      *
+      *
+     FHSP074    UF A E           K DISK
+      *  TRANSFER HEADER
+      *
+      *
+     FHSP075    UF A E           K DISK
+      *  TRANSFER DETAIL
+      *
+      /EJECT
+      ****************************************************************
+      * TABLE AND ARRAY SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * INPUT SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * STANDARD ERROR MESSAGE HANDLING DATA STRUCTURES
+      *---------------------------------------------------------------
+      *
+      * FOR ERROR MESSAGE HANDLING, A PACKED INDEX (E) IS REQUIRED.
+      * FOR PROGRAM READABILITY, DEFINE A CORRESPONDING ERROR COUNT
+      * FIELD CALLED 'ERROR'. ALSO DEFINE CURSOR LOCATION FIELDS.
+      *
+     D                 DS                  INZ
+     D  ERROR                  1      2P 0
+     D  E                      1      2P 0
+      *
+      * THIS DATA STRUCTURE SUPPLIES THE NAME OF THE MESSAGE FILE TO
+      * THE MESSAGE HANDLING CL PROGRAM.  THE FIELD NAME MSGFIL MUST BE
+      * CONSTANT. THE VALUE IN QUOTES IS THE NAME OF THE SPECIFIC
+      * MESSAGE FILE CONTAINING THE USER DEFINED MESSAGES.
+      *
+     D                 DS                  INZ
+     D  MSGFIL                 1     10    INZ('HSMSGF    ')
+      *
+      * THE FOLLOWING 3 DATA STRUCTURES ARE USED TO SPEED MESSAGE
+      * HANDLING SINCE IT IS FASTER TO CLEAR DATA STRUCTURES THAN
+      * ARRAYS.  EACH IS ASSOCIATED WITH A STANDARD MESSAGE ARRAY.
+      *
+     D MGI             DS           140    INZ
+     D  MGID                   1    140
+     D                                     DIM(20)                              MSG ID ARRAY
+      *
+     D MGD             DS          1000    INZ
+     D  MGDT                   1   1000
+     D                                     DIM(20)                              MSG PARMS
+      *
+     D MGWK            DS            50    INZ
+     D  MGW                    1     50
+     D                                     DIM(50)                              MSG WORK PARMS
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *---------------------------------------------------------------
+      * STANDARD WORKSTATION INFORMATION DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTWSFR (RECORD FORMAT: UTIDFRR)
+     D IOFEED        E DS                  EXTNAME(UTWSFR)
+      *
+      *---------------------------------------------------------------
+      * STANDARD DATABASE FILE INFORMATION DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTDBFR (RECORD FORMAT: FDBCKD)
+     D DBFEED        E DS                  EXTNAME(UTDBFR)
+      *
+      *---------------------------------------------------------------
+      *  DATA AREA FOR NEXT MOVEMENT NUMBER
+      *---------------------------------------------------------------
+      *
+     D                 DS
+     D  DAMVSN                 1      7  0
+      *
+      *---------------------------------------------------------------
+      *  DEFINITION FOR EXTERNAL DATA AREA 'DAAPER'
+      *---------------------------------------------------------------
+     D                 DS
+     D  DAAPER                 1     24
+     D  DACCYY                 1      4
+     D  DAPER                  5      6
+     D  DABPDT                 7     14  0
+     D  DAEPDT                15     22  0
+     D  DAPGFL                23     23
+     D  DAPPFL                24     24
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D CREATE          C                   CONST('CREATE')
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+     D SET1            C                   CONST('SET1  ')
+     D EDIT1           C                   CONST('EDIT1 ')
+     D SCRN1           C                   CONST('SCRN1 ')
+     D EXIT            C                   CONST('EXIT  ')
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+     C                   MOVEL     SET1          ROUTNE
+      *
+     C     *INLR         DOWEQ     *OFF                                         MAIN DO LOOP
+      *
+     C     ROUTNE        CASEQ     SET1          $SET1
+     C     ROUTNE        CASEQ     SCRN1         $SCRN1
+     C     ROUTNE        CASEQ     EDIT1         $EDIT1
+      *
+     C     ROUTNE        CASEQ     EXIT          $EXIT
+     C                   ENDCS
+     C                   ENDDO                                                  MAIN DO LOOP
+      /EJECT
+      *----------------------------------------------------------------
+      * $SET1 - SUBROUTINE TO SET ENVIRONMENT FOR SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $SET1         BEGSR
+      *
+      *  CLEAR/FILL THE SUBFILE
+      *
+     C                   EXSR      $CLR1
+     C                   EXSR      $FRSH1
+      *
+      *  SET ROUTINE TO DISPLAY SCREEN
+      *
+     C                   MOVEL     SCRN1         ROUTNE
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $SCRN1 - SUBROUTINE TO PERFORM OPERATOR I/O FOR SCREEN 1
+      *---------------------------------------------------------------
+      *
+     C     $SCRN1        BEGSR
+      *
+      * SET THE PAGE OF THE SUBFILE TO DISPLAY
+      *
+     C                   SELECT
+     C     WKFLOW        WHENEQ    0
+     C     ERROR         ANDEQ     0
+     C                   Z-ADD     1             HDPAG1
+      *
+     C     RESET         WHENEQ    YES
+     C     WKFLOW        IFGT      HDRRN1
+     C                   ELSE
+     C                   Z-ADD     WKFLOW        HDPAG1
+     C                   ENDIF
+     C                   ENDSL
+      *
+      *
+      * IF THE USER HAS EDITED THE DATA, THEN ISSUE THE 'ACCEPT
+      * ENTRIES' MESSAGE
+      *
+     C     ERROR         IFEQ      0
+     C     EDITFL        ANDEQ     YES
+     C                   Z-ADD     1             ERROR
+     C                   MOVEL     'HS09026'     MGID(E)
+     C                   ENDIF
+      *
+      * WRITE THE ERROR MESSAGES FROM THE ERROR ARRAYS TO THE
+      * ERROR MESSAGE SUBFILE
+      *
+     C                   EXSR      $WRMSG
+      *
+      * THIS SUBFILE HAS FOLD/UNFOLD CAPABILITIES.  THE DDS USES THE
+      * KEYWORDS (SFLDROP, SFLFOLD) TO DETERMINE WHETHER THE
+      * USER IS FOLDED OR UNFOLDED AND TO REDISPLAY THE SCREEN IN THE
+      * SAME MODE AS WHEN HE LAST SAW IT.  INDICATORS 88 AND 89 ARE
+      * ASSIGNED IN THE DDS TO SFLDROP AND SFLFOLD.
+      *
+      *
+     C                   setoff                                       8889
+     C                   if        fold = '0'
+     C                   seton                                        88
+     C                   else
+     C                   seton                                        89
+     C                   endif
+      *
+      *  WRITE SCREEN 1 TO CRT
+      *
+     C                   WRITE     HP169K1
+     C                   WRITE     HP169EC
+     C                   EXFMT     HP169C1
+      *
+      * RETRIEVE THE LOWEST SUBFILE RRN ON THE SCREEN FROM THE DSPF
+      * FEEDBACK AREA (IDFLOW) AND MOVE IT TO A WORK FIELD.  THIS VALUE
+      * WILL BE USED LATER TO CONTROL THE REPOSITIONING OF THE SUBFILE.
+      *
+     C                   Z-ADD     IDFLOW        WKFLOW
+     C                   MOVEL     NO            RESET
+     C                   MOVEL     NO            EDITFL
+      *
+      * CLEAR ALL MESSAGES
+      *
+     C                   EXSR      $CLMSG
+      *
+      * GET USER'S ENTRY AND RESET STANDARD RESPONSE
+      *
+     C                   SELECT
+     C     *IN03         WHENEQ    *ON                                          F3-EXIT
+     C                   MOVEL     EXIT          ROUTNE
+      *
+     C     *IN04         WHENEQ    *ON                                          F4-PROMPT
+     C     acceptedfl    andeq     no
+     C                   EXSR      $F4S1
+     C                   MOVEL     SCRN1         ROUTNE
+      *
+     C     *IN05         WHENEQ    *ON                                          F5-REFRESH
+     C                   SETOFF                                       90
+     C                   move      no            acceptedfl
+     C                   MOVEL     SET1          ROUTNE
+      *
+     C     *IN09         WHENEQ    *ON                                          F9-ACCEPT
+     C     acceptedfl    andeq     no
+     C                   EXSR      $EDIT1
+     C                   MOVEL     SCRN1         ROUTNE
+     C     ERROR         IFEQ      0                                            IF OK CREATE
+     C                   EXSR      $CREATE
+     C                   ENDIF                                                  IF OK CREATE
+      *
+     C     *IN12         WHENEQ    *ON                                          F12-PREVIOUS
+     C                   MOVEL     EXIT          ROUTNE
+      *
+     C     *IN25         WHENEQ    *ON                                          F25-ROLLUP
+     C     IDFLOW        ADD       WKPLIN        WKDIFF
+      *
+     C                   select
+     C                   when      hdrrn1 > wkdiff
+      *
+     C                   when      acceptedfl = yes and
+     C                             hdrrn1 >= idflow and hdrrn1 < wkdiff
+     C                   z-add     hdrrn1        hdpag1
+     C                   other
+      *
+     C                   if        acceptedfl = no                              If accepted
+     C                   Z-ADD     COUNT         HDRRN1
+     C                   EXSR      $SETOF
+     C                   EXSR      $CLRLN
+     C                   DO        WKPLIN                                       DO FILL
+     C                   EXSR      $BLANK
+     C                   ENDDO                                                  DO FILL
+     C                   endif                                                  If accepted
+     C                   endsl                                                  IF SOMETHING
+      *
+     C                   MOVEL     SCRN1         ROUTNE
+     C                   OTHER
+      *
+      * IF 'ENTER' AND YOU ARE NOT WAITING FOR THE USER TO START OVER AFTER
+      * CREATING A BATCH OF MOVEMENTS, EDIT THE DATA
+      *
+     C                   if        acceptedfl = no
+     C                   EXSR      $EDIT1
+     C                   endif
+      *
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $EDIT1 - SUBROUTINE TO EDIT INPUT FIELDS FOR SCREEN 1
+      *---------------------------------------------------------------
+      *
+     C     $EDIT1        BEGSR
+      *
+     C                   MOVEL     YES           EDITFL
+      *
+      * EDIT THE CONTROL RECORD
+      *
+     C                   EXSR      $EDC1
+      *
+      * EDIT THE SUBFILE IF THERE ARE NO ERRORS IN THE CONTROL
+      * RECORD. IF THERE ARE ERRORS IN THE CONTROL RECORD, YOU
+      * NEED TO REWRITE ANY SUBFILE RECORDS WITH THE ERROR INDICATORS
+      * OFF.
+      *
+     C     ERROR         IFEQ      0
+     C                   EXSR      $EDS1
+     C                   ELSE
+     C                   EXSR      $OFFIN
+     C                   ENDIF
+      *
+     C     ERROR         IFEQ      0
+     C                   Z-ADD     1             HDPAG1
+     C                   ENDIF
+     C                   MOVEL     SCRN1         ROUTNE
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $EDC1 - SUBROUTINE TO EDIT THE CONTROL RECORD INFO ON SCREEN 1
+      *---------------------------------------------------------------
+      *
+     C     $EDC1         BEGSR
+      *
+      * SCHEDULED SHIP DATE
+      *
+     C                   EXSR      $SCDT
+      * TRUCKER
+     C                   EXSR      $TICD
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $SCDT - EDIT SCHEDULED SHIP DATE
+      *----------------------------------------------------------------
+      *
+     C     $SCDT         BEGSR
+      *
+     C                   SELECT
+     C     C1MDY         WHENEQ    0
+     C                   SETON                                        39
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVE      'HS09001'     MGID(E)
+     C                   ENDIF
+     C                   OTHER
+      *
+      * VALIDATE THAT THE DATE IS VALID AND ADD CENTURY VALUES
+      * TO THE WORK FIELD FOR LATER USE IN THE UPDATING ROUTINE.
+      *
+     C                   Z-ADD     C1MDY         PFRM8
+     C                   Z-ADD     0             PTO8
+     C                   MOVEL     'MDY '        PFRFMT
+     C                   MOVEL     'CYMD'        PTOFMT
+     C                   Z-ADD     0             PDAYS
+     C                   MOVE      *BLANK        PCODE
+     C                   MOVE      *BLANK        PRTRN
+      *
+     C                   EXSR      $DATE
+      *
+     C     PRTRN         IFNE      *BLANK                                       IF INVALID
+     C                   SETON                                        39
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVE      'HS09004'     MGID(E)
+     C                   ENDIF
+     C                   ELSE
+     C                   Z-ADD     PTO8          WKSCDT
+     C                   ENDIF                                                  IF INVALID
+      *
+      * IF THE DATE IS VALID,
+      *     CHECK THAT IT IS NOT IN A CLOSED PERIOD
+      *     IF IT IS IN THE CURRENT PERIOD,
+      *         CHECK THAT THE PERIOD CLOSE PROGRAMS ARE NOT RUNNING
+      *
+     C     *IN39         IFEQ      *OFF                                         IF GOOD DATE
+      *
+     C                   SELECT
+     C     WKSCDT        WHENLT    DABPDT
+     C                   SETON                                        39
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09007'     MGID(E)
+     C                   ENDIF
+      *
+     C     WKSCDT        WHENGE    DABPDT
+     C     WKSCDT        ANDLE     DAEPDT
+     C     DAPPFL        ANDNE     *BLANK
+     C                   SETON                                        39
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09016'     MGID(E)
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C                   ENDIF                                                  IF GOOD DATE
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * Validate Trucker
+      *---------------------------------------------------------------
+      *
+      * Validations:
+      *   1) must exist in Trucker master file
+      *   2) must be 'active'
+      *
+     C     $ticd         begsr
+      *
+     C                   MOVE      *BLANK        C1TINM
+      *
+     C     C1TICD        IFNE      *BLANK                                       IF TRUCKER
+     C     C1TICD        CHAIN     HSP046                             92
+     C     *IN92         IFEQ      *ON                                          IF BAD
+     C                   SETON                                        33
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00235'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     C1TICD        MGW(1)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+     C                   ELSE
+      *
+     C                   MOVEL     TITINM        C1TINM
+      *
+     C                   if        tiaist <> 'A'                                If not active
+     C                   seton                                        33
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00231'
+     C                   clear                   mgw
+     C                   movea     c1ticd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If not active
+     C                   ENDIF                                                  IF BAD
+     C                   ENDIF                                                  IF TRUCKER
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $EDS1 - SUBROUTINE TO READ AND EDIT CHANGED SUBFILE RECORDS
+      *          FOR SCREEN 1
+      *---------------------------------------------------------------
+      *
+     C     $EDS1         BEGSR
+      *
+      *
+      * SET THE FLAG THAT WILL DETERMINE WHETHER THE USER KEYED
+      * ANY SUBFILE ENTRIES.
+      *
+     C                   MOVEL     NO            ENTRFL
+      *
+      * READ/PROCESS ALL THE CHANGED SUBFILE RECORDS
+      *
+     C     *IN80         DOUEQ     *ON                                          DO PROCESS
+     C                   READC     HP169S1                                80
+     C     *IN80         IFEQ      *OFF                                         IF REC READ
+      *
+      * SETON MDT
+     C                   SETON                                        85
+      *
+      * SET OFF THE ERROR INDICATORS IN THE SUBFILE
+      *
+     C                   EXSR      $SETOF
+      *
+      * IF THERE ARE NO USER ENTRIES FOR THE CHANGED SUBFILE RECORD,
+      * CLEAR ALL FIELDS ON THE LINE
+      *
+     C     dforfscd      IFEQ      0                                            IF ENTRY
+     C     dforblcd      ANDEQ     *BLANK
+     C     dforrmcd      ANDEQ     *BLANK
+     C     dforhgcd      ANDEQ     *BLANK
+     C     dfschd        ANDEQ     0
+     C     dfdnfscd      ANDEQ     0
+     C     dfdnblcd      ANDEQ     *BLANK
+     C     dfdnrmcd      ANDEQ     *BLANK
+     C     dfdnhgcd      ANDEQ     *BLANK
+     C                   EXSR      $CLRLN
+     C                   ELSE
+      *
+      *
+     C                   MOVEL     YES           ENTRFL
+      *
+      * If groups are blank, clear output only group status field.
+      *
+     C                   if        dforhgcd = *blank
+     C                   move      *blank        dforgscd
+     C                   move      *blank        dforgtcd
+     C                   endif
+      *
+     C                   if        dfdnhgcd = *blank
+     C                   move      *blank        dfdngscd
+     C                   move      *blank        dfdngtcd
+     C                   endif
+      *
+     C                   move      *blank        dforfsnm
+     C                   move      *blank        dforgtcd
+     C                   move      *blank        dfdnfsnm
+     C                   move      *blank        dfdngtcd
+      *
+      * The user must at least enter an origin farm and a building or group.
+      * Edit farm site. If farm is valid and neither building or group are
+      * entered, issue message; otherwise retrieve defaults for missing values.
+      *
+     C                   exsr      $orfscd
+      *
+     C                   select
+     C                   when      dforblcd = *blank and
+     C                             dforhgcd = *blank and
+     C                             *in31 = *off
+     C                   seton                                        3435
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09132'     mgid(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   other
+      *
+      * Perform 'origin' edits
+      *
+     C                   exsr      $edorigin
+     C                   endsl
+      *
+      * The user must at least enter an destination farm and a building or group.
+      * Edit farm site. If farm is valid and neither building or group are
+      * entered, issue message; otherwise retrieve defaults for missing values.
+      *
+     C                   exsr      $dnfscd
+      *
+     C                   select
+     C                   when      dfdnblcd = *blank and
+     C                             dfdnhgcd = *blank and
+     C                             *in32 = *off
+     C                   seton                                        3637
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09132'     mgid(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   other
+      *
+      * Perform 'destination' edits
+      *
+     C                   exsr      $eddest
+     C                   endsl
+     C                   endif                                                  IF ENTRY
+      *
+     C                   UPDATE    HP169S1
+     C                   EXSR      $SETOF
+     C                   ENDIF                                                  IF REC READ
+     C                   ENDDO                                                  DO PROCESS
+      *
+      *---------------------------------------------------------------
+      * AFTER ALL SUBFILE RECORDS HAVE BEEN EDITED,
+      * ISSUE AN ERROR MESSAGE IF THERE ARE NO SUBFILE ENTRIES
+      *
+     C     ENTRFL        IFEQ      NO                                           IF NO ENTRY
+     C     ERROR         ANDLT     MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00593'     MGID(E)
+     C                   ENDIF                                                  IF NO ENTRY
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $ORFSCD - EDIT ORIGIN FARM SITE
+      *----------------------------------------------------------------
+      *
+     C     $ORFSCD       BEGSR
+      *
+     C                   MOVE      *BLANK        dforfsnm
+     C     dforfscd      IFEQ      0                                            IF NO ORIG
+     C                   SETON                                        31
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   exsr      $err1
+     C                   MOVEL     'HS09001'     MGID(E)
+     C                   ENDIF
+     C                   ELSE
+      *
+      * CHECK THAT FARM SITE EXISTS IN THE FARM SITE MASTER FILE
+      *
+     C     dforfscd      CHAIN     HSP018                             92
+     C     *IN92         IFEQ      *OFF                                         IF GOOD ORIG
+     C                   MOVEL     FSFSNM        dforfsnm
+     C                   ELSE
+      *
+      * INVALID FARM SITE
+     C                   SETON                                        31
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   exsr      $err1
+     C                   MOVEL     'HS00131'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVE      dforfscd      xxalphfscd
+     C                   MOVEA     xxalphfscd    MGW(1)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+     C                   ENDIF                                                  IF GOOD ORIG
+     C                   ENDIF                                                  IF NO ORIG
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $edorigin - Edits for origin entries
+      *----------------------------------------------------------------
+      *
+     C     $edorigin     begsr
+      *
+      * Validate:
+      *  1) Building
+      *  2) Room
+      *  3) Hog group
+      *
+     C                   exsr      $orblcd
+      *
+      * Edit room if a) it is not blank and b) it was not edited previously
+      * in the logic that attempted to default a group for a building.
+      * (The check on indicator 40 keeps you from issuing a second invalid
+      * room message.)
+      *
+     C                   if        dforrmcd <> *blank and *in40 = *off
+     C                   exsr      $orrmcd
+     C                   endif
+      *
+     C                   exsr      $orhgcd
+      *
+      *
+      * VALIDATE SCHEDULED HEAD
+      *
+     C                   SELECT
+     C     dfschd        WHENEQ    0
+     C                   SETON                                        38
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09001'     MGID(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+      *
+     C     dfschd        WHENLT    0
+     C                   SETON                                        38
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09000'     MGID(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * $orblcd - validate origin building
+      *----------------------------------------------------------------
+      *
+     C     $orblcd       begsr
+      *
+      * If building is blank and hog group is entered, default building and
+      * room from hog group.
+      *
+     C                   if        dforblcd = *blank and dforhgcd <> *blank
+     C     dforhgcd      chain     hsp034                             92
+     C                   if        *in92 = *off
+     C                   move      hgblcd        dforblcd
+     C                   move      hgrmcd        dforrmcd
+     C                   endif
+     C                   endif
+      *
+      * Validations:
+      *  1) building is required
+      *  2) building must exist on the specified farm site
+      *
+     C                   select
+     C                   when      dforblcd = *blank
+     C                   seton                                        35
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+     C                   other
+      *
+     C     key01         chain     hsp019                             92
+     C                   if        *in92 = *on                                  If not found
+     C                   seton                                        35
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00116'
+     C                   clear                   mgw
+     C                   movea     dforblcd      mgw(1)
+     C                   move      dforfscd      xxalphfscd
+     C                   movea     xxalphfscd    mgw(6)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If not found
+     C                   endsl
+      *
+      * Attempt to default in a group when:
+      *   1) building is valid and group is blank and
+      *   2) room is blank or valid
+      *
+     C                   if        *in35 = *off and dforhgcd = *blank           If valid building
+      *
+     C                   if        dforrmcd <> *blank
+     C                   exsr      $orrmcd
+     C                   endif
+      *
+     C                   if        *in40 = *off                                 If room OK/blank
+     C                   exsr      $orgroup
+     C                   endif                                                  If room OK/blank
+     C                   endif                                                  If valid building
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * $orrmcd - validate origin room
+      *----------------------------------------------------------------
+      *
+      * Validations:
+      *  1) required
+      *  2) must exist in the building on the farm site
+      *  3) must have an active status
+      *
+     C     $orrmcd       begsr
+      *
+     C                   select
+     C                   when      dforrmcd = *blank
+     C                   seton                                        40
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+     C                   other
+      *
+      * Check that the room exists in the building on the farm site
+     ‚*
+     C     key02         chain     hsp020                             92
+     C                   if        *in92 = *on                                  If no hit
+     C                   seton                                        40
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00117'
+     C                   clear                   mgw
+     C                   movea     dforrmcd      mgw(1)
+     C                   movea     dforblcd      mgw(6)
+     C                   move      dforfscd      xxalphfscd
+     C                   movea     xxalphfscd    mgw(11)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   else
+     ‚*
+      * Room must have an 'active' status
+     ‚*
+     C                   if        brrmst <> 'A'                                If not active
+     C                   seton                                        40
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00726'
+     C                   clear                   mgw
+     C                   movea     dforrmcd      mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If not active
+     C                   endif                                                  If no hit
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------
+      * $orgroup - Attempt to find a default group in the origin building
+      *--------------------------------------------------------------------
+      *
+      * If only one group is open in that building or building/room, default
+      * it in. But, if multiple groups are open, issue a message to the
+      * user to select a group.
+      *
+     C     $orgroup      begsr
+      *
+      * Key with either a) farm/building if room is blank or b) farm/
+      * building/room if room is populated.
+      *
+     C                   if        dforrmcd = *blank
+     C     key01         chain     hsl034p                            92
+     C                   else
+     C     key02         chain     hsl034p                            92
+     C                   endif
+      *
+     C                   if        *in92 = *off                                 If open group
+      *
+      * Check to see if there is another open group.
+      * Key with either a) farm/building if room is blank or b) farm/
+      * building/room if room is populated.
+      *
+     C                   if        dforrmcd = *blank
+     C     key01         reade     hsl034p                                92
+     C                   else
+     C     key02         reade     hsl034p                                92
+     C                   endif
+      *
+     C                   if        *in92 = *off                                 If mult group
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   clear                   mgw
+     C                   movea     dforblcd      mgw(1)
+      *
+     C                   select
+     C                   when      dforrmcd = *blank
+     C                   movel     'HS00721'     mgid(e)
+     C                   other
+     C                   movel     'HS00765'     mgid(e)
+     C                   movea     dforrmcd      mgw(6)
+     C                   endsl
+      *
+     C                   movea     mgw           mgdt(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   else
+      *
+      * Only one group is open; default in its values.
+      *
+     C                   movel     p1hghgcd      dforhgcd
+     C                   movel     p1hgrmcd      dforrmcd
+     C                   endif                                                  If mult group
+     C                   else
+      *
+      * No groups are open in this building/room
+      *
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   clear                   mgw
+     C                   move      dforfscd      xxalphfscd
+     C                   movea     xxalphfscd    mgw(1)
+     C                   movea     dforblcd      mgw(6)
+      *
+     C                   select
+     C                   when      dforrmcd = *blank
+     C                   movel     'HS00722'     mgid(e)
+     C                   other
+     C                   movel     'HS00766'     mgid(e)
+     C                   movea     dforrmcd      mgw(11)
+     C                   endsl
+      *
+     C                   movea     mgw           mgdt(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   endif                                                  If open group
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * $ORHGCD - EDIT ORIGIN HOG GROUP
+      *----------------------------------------------------------------
+      *
+     C     $ORHGCD       BEGSR
+      *
+     C                   Z-ADD     0             hdorhgsn
+     C                   MOVE      *BLANK        hdorfsbo
+     C                   MOVE      *BLANK        hdorptcd
+     C                   MOVE      *BLANK        hdorppcd
+     C                   move      *blank        dforgscd
+     C                   move      *blank        dforgtcd
+      *
+     C                   SELECT
+     C     dforhgcd      WHENEQ    *BLANK
+     C                   SETON                                        34
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09001'     MGID(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   OTHER
+      *
+     C     dforhgcd      CHAIN     HSP034                             91
+     C     *IN91         IFEQ      *ON                                          IF BAD GROUP
+     C                   SETON                                        34
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00261'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     dforhgcd      MGW(1)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   ELSE
+      *
+     C                   MOVEL     HGGSCD        dforgscd
+     C                   MOVEL     HGGTCD        dforgtcd
+      *
+      * ORIGIN MUST ALWAYS HAVE A STATUS OF OPENED
+      *
+     C     HGGSCD        IFNE      'OP'                                         IF STATUS
+     C                   SETON                                        34
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00603'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     dforhgcd      MGW(1)
+     C                   MOVEA     HGGSCD        MGW(8)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   ENDIF                                                  IF STATUS
+      *
+      * GROUP MUST BE ON THE ORIGIN FARM
+      *
+     C     HGFSCD        IFNE      dforfscd                                     IF DIFF FARM
+     C                   SETON                                        34
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00468'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     dforhgcd      MGW(1)
+     C                   MOVE      HGFSCD        xxalphfscd
+     C                   MOVEA     xxalphfscd    MGW(8)
+     C                   MOVE      dforfscd      xxalphfscd
+     C                   MOVEA     xxalphfscd    MGW(13)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   ENDIF                                                  IF DIFF FARM
+      *
+      *
+      * Group building must match subfile building---if there is a building
+      * on the subfile.
+     C                   select
+     C                   when      dforblcd = *blank
+     C                   movel     hgblcd        dforblcd
+     C                   other
+     C                   if        dforblcd <> hgblcd                           If mismatch building
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00481'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     dforhgcd      mgw(1)
+     C                   movea     hgblcd        mgw(8)
+     C                   movea     dforblcd      mgw(13)
+     C                   movea     mgw           mgdt(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   endif                                                  If mismatch building
+     C                   endsl
+      *
+      *
+      * Group room must match subfile room---if there is a room
+      * on the subfile.
+     C                   select
+     C                   when      dforrmcd = *blank
+     C                   movel     hgrmcd        dforrmcd
+     C                   other
+     C                   if        dforrmcd <> hgrmcd                           If mismatch room
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00482'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     dforhgcd      mgw(1)
+     C                   movea     hgrmcd        mgw(8)
+     C                   movea     dforrmcd      mgw(13)
+     C                   movea     mgw           mgdt(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   endif                                                  If mismatch room
+     C                   endsl
+      *
+     C                   ENDIF                                                  IF BAD GROUP
+     C                   ENDSL
+      *
+     C     *IN34         IFEQ      *OFF
+     C                   Z-ADD     HGHGSN        hdorhgsn
+     C                   MOVE      hgfsbo        hdorfsbo
+     C                   MOVE      hgptcd        hdorptcd
+     C                   MOVE      hgppcd        hdorppcd
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $DNFSCD - EDIT DESTINATION FARM SITE
+      *----------------------------------------------------------------
+      *
+     C     $DNFSCD       BEGSR
+      *
+     C                   MOVE      *BLANK        dfdnfsnm
+     C     dfdnfscd      IFEQ      0                                            IF NO DEST
+     C                   SETON                                        32
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   exsr      $err1
+     C                   MOVEL     'HS09001'     MGID(E)
+     C                   ENDIF
+     C                   ELSE
+      *
+      * CHECK THAT FARM SITE EXISTS IN THE FARM SITE MASTER FILE
+      *
+     C     dfdnfscd      CHAIN     HSP018                             92
+     C     *IN92         IFEQ      *OFF                                         IF GOOD DEST
+     C                   MOVEL     FSFSNM        dfdnfsnm
+     C                   ELSE
+      *
+      * INVALID FARM SITE
+     C                   SETON                                        32
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   exsr      $err1
+     C                   MOVEL     'HS00131'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVE      dfdnfscd      xxalphfscd
+     C                   MOVEA     xxalphfscd    MGW(1)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+     C                   ENDIF                                                  IF GOOD DEST
+     C                   ENDIF                                                  IF NO DEST
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $eddest - Edits for destination entries
+      *----------------------------------------------------------------
+      *
+     C     $eddest       begsr
+      *
+      * Validate destination:
+      *  1) Building
+      *  2) Room
+      *  3) Hog group
+      *
+     C                   exsr      $dnblcd
+      *
+      * Edit room if a) it is not blank and b) it was not edited previously
+      * in the logic that attempted to default a group for a building.
+      * (The check on indicator 48 keeps you from issuing a second invalid
+      * room message.)
+      *
+     C                   if        dfdnrmcd <> *blank and *in48 = *off
+     C                   exsr      $dnrmcd
+     C                   endif
+      *
+     C                   exsr      $dnhgcd
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * $dnblcd - validate destination building
+      *----------------------------------------------------------------
+      *
+     C     $dnblcd       begsr
+      *
+      * If building is blank and hog group is entered, default building and
+      * room from hog group.
+      *
+     C                   if        dfdnblcd = *blank and dfdnhgcd <> *blank
+     C     dfdnhgcd      chain     hsp034                             92
+     C                   if        *in92 = *off
+     C                   move      hgblcd        dfdnblcd
+     C                   move      hgrmcd        dfdnrmcd
+     C                   endif
+     C                   endif
+      *
+      * Validations:
+      *  1) building is required
+      *  2) building must exist on the specified farm site
+      *
+     C                   select
+     C                   when      dfdnblcd = *blank
+     C                   seton                                        37
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+     C                   other
+      *
+     C     key03         chain     hsp019                             92
+     C                   if        *in92 = *on                                  If not found
+     C                   seton                                        37
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00116'
+     C                   clear                   mgw
+     C                   movea     dfdnblcd      mgw(1)
+     C                   move      dfdnfscd      xxalphfscd
+     C                   movea     xxalphfscd    mgw(6)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If not found
+     C                   endsl
+      *
+      * Attempt to default in a group when:
+      *   1) building is valid and group is blank and
+      *   2) room is blank or valid
+      *
+     C                   if        *in37 = *off and dfdnhgcd = *blank           If valid building
+      *
+     C                   if        dfdnrmcd <> *blank
+     C                   exsr      $dnrmcd
+     C                   endif
+      *
+     C                   if        *in48 = *off                                 If room OK/blank
+     C                   exsr      $dngroup
+     C                   endif                                                  If room OK/blank
+     C                   endif                                                  If valid building
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * $dnrmcd - validate destination room
+      *----------------------------------------------------------------
+      *
+      * Validations:
+      *  1) required
+      *  2) must exist in the building on the farm site
+      *  3) must have an active status
+      *
+     C     $dnrmcd       begsr
+      *
+     C                   select
+     C                   when      dfdnrmcd = *blank
+     C                   seton                                        48
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+     C                   other
+      *
+      * Check that the room exists in the building on the farm site
+     ‚*
+     C     key04         chain     hsp020                             92
+     C                   if        *in92 = *on                                  If no hit
+     C                   seton                                        48
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00117'
+     C                   clear                   mgw
+     C                   movea     dfdnrmcd      mgw(1)
+     C                   movea     dfdnblcd      mgw(6)
+     C                   move      dfdnfscd      xxalphfscd
+     C                   movea     xxalphfscd    mgw(11)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   else
+     ‚*
+      * Room must have an 'active' status
+     ‚*
+     C                   if        brrmst <> 'A'                                If not active
+     C                   seton                                        48
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00726'
+     C                   clear                   mgw
+     C                   movea     dfdnrmcd      mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If not active
+     C                   endif                                                  If no hit
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------
+      * $dngroup - Attempt to find a default group in the destination building
+      *-----------------------------------------------------------------------
+      *
+     C     $dngroup      begsr
+      *
+      * If only one group is open/created in that building or building/room, default
+      * it in. But, if multiple groups are open/created, issue a message to the
+      * user to select a group.
+      *
+      * Key with either a) farm/building if room is blank or b) farm/
+      * building/room if room is populated.
+      *
+     C                   if        dfdnrmcd = *blank
+     C     key03         chain     hsl034o                            92
+     C                   else
+     C     key04         chain     hsl034o                            92
+     C                   endif
+     C                   if        *in92 = *off                                 If open/created
+      *
+      * Check to see if there is another open/created group.
+      * Key with either a) farm/building if room is blank or b) farm/
+      * building/room if room is populated.
+      *
+      *
+     C                   if        dfdnrmcd = *blank
+     C     key03         reade     hsl034o                                92
+     C                   else
+     C     key04         reade     hsl034o                                92
+     C                   endif
+      *
+     C                   if        *in92 = *off                                 If mult group
+     C                   seton                                        36
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   clear                   mgw
+     C                   movea     dfdnblcd      mgw(1)
+      *
+     C                   select
+     C                   when      dfdnrmcd = *blank
+     C                   movel     'HS00767'     mgid(e)
+     C                   other
+     C                   movel     'HS00769'     mgid(e)
+     C                   movea     dfdnrmcd      mgw(6)
+     C                   endsl
+      *
+     C                   movea     mgw           mgdt(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   else
+      *
+      * Only one group is open/created; default in its values.
+      *
+     C                   movel     hghgcd        dfdnhgcd
+     C                   movel     hgrmcd        dfdnrmcd
+     C                   endif                                                  If mult group
+     C                   else
+      *
+      * No groups are open/created in this building/room
+      *
+     C                   seton                                        36
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   clear                   mgw
+     C                   move      dfdnfscd      xxalphfscd
+     C                   movea     xxalphfscd    mgw(1)
+     C                   movea     dfdnblcd      mgw(6)
+      *
+     C                   select
+     C                   when      dfdnrmcd = *blank
+     C                   movel     'HS00768'     mgid(e)
+     C                   other
+     C                   movel     'HS00770'     mgid(e)
+     C                   movea     dfdnrmcd      mgw(11)
+     C                   endsl
+      *
+     C                   movea     mgw           mgdt(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   endif                                                  If open/created
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Edit destination hog group
+      *----------------------------------------------------------------
+      *
+     C     $dnhgcd       BEGSR
+      *
+     C                   move      *BLANK        dfdngscd
+     C                   move      *blank        dfdngtcd
+     C                   Z-ADD     0             hddnhgsn
+     C                   MOVE      *BLANK        hddnfsbo
+     C                   MOVE      *BLANK        hddnptcd
+     C                   MOVE      *BLANK        hddnppcd
+      *
+      * Validations:
+      *  1) required
+      *  2) must be valid in hog group file
+      *  3) must have a status of created or open
+      *  4) must be on the destination farm
+      *  5) cannot be the same group as the origin group
+      *  6) both groups must be wean-to-finish if either group is WTF
+      *
+     C                   SELECT
+     C     dfdnhgcd      WHENEQ    *BLANK
+     C                   SETON                                        36
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09001'     MGID(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   OTHER
+      *
+     C     dfdnhgcd      CHAIN     HSP034                             91
+     C     *IN91         IFEQ      *ON                                          IF BAD GROUP
+     C                   SETON                                        36
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00261'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     dfdnhgcd      MGW(1)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   ELSE
+      *
+     C                   MOVEL     HGGSCD        dfdngscd
+     C                   MOVEL     HGGTCD        dfdngtcd
+      *
+      * GROUP MUST HAVE A STATUS OF OPENED OR CREATED
+      *
+     C     HGGSCD        IFEQ      'DS'                                         IF STATUS
+     C     HGGSCD        OREQ      'CL'
+     C     HGGSCD        OREQ      'VD'
+     C                   SETON                                        36
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00602'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     dfdnhgcd      MGW(1)
+     C                   MOVEA     HGGSCD        MGW(8)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   ENDIF                                                  IF STATUS
+      *
+      * GROUP MUST BE ON THE DESTINATION FARM
+      *
+     C     HGFSCD        IFNE      dfdnfscd                                     IF DIFF FARM
+     C                   SETON                                        36
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00468'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     dfdnhgcd      MGW(1)
+     C                   MOVE      HGFSCD        xxalphfscd
+     C                   MOVEA     xxalphfscd    MGW(8)
+     C                   MOVE      dfdnfscd      xxalphfscd
+     C                   MOVEA     xxalphfscd    MGW(13)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   ENDIF                                                  IF DIFF FARM
+     C                   ENDIF                                                  IF BAD GROUP
+      *
+      *
+      * Group building must match subfile building---if there is a building
+      * on the subfile.
+      *
+     C                   select
+     C                   when      dfdnblcd = *blank
+     C                   movel     hgblcd        dfdnblcd
+     C                   other
+     C                   if        dfdnblcd <> hgblcd                           If mismatch building
+     C                   seton                                        36
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00481'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     dfdnhgcd      mgw(1)
+     C                   movea     hgblcd        mgw(8)
+     C                   movea     dfdnblcd      mgw(13)
+     C                   movea     mgw           mgdt(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   endif                                                  If mismatch building
+     C                   endsl
+      *
+      *
+      * Group room must match subfile room---if there is a room
+      * on the subfile.
+     C                   select
+     C                   when      dfdnrmcd = *blank
+     C                   movel     hgrmcd        dfdnrmcd
+     C                   other
+     C                   if        dfdnrmcd <> hgrmcd                           If mismatch room
+     C                   seton                                        36
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00482'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     dfdnhgcd      mgw(1)
+     C                   movea     hgrmcd        mgw(8)
+     C                   movea     dfdnrmcd      mgw(13)
+     C                   movea     mgw           mgdt(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   endif                                                  If mismatch room
+     C                   endsl
+      *
+     C                   endsl
+      *
+      *
+      * Edits against origin/destination groups
+      *
+     C                   if        *in34 = *off and *in36 = *off                If edit more
+      *
+      * Origin/destination cannot be the same group
+      *
+     C     dforhgcd      ifeq      dfdnhgcd                                     If same group
+     C                   SETON                                        36
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00609'     MGID(E)
+     C                   EXSR      $ERR1
+     C                   ENDIF
+     C                   endif                                                  If same group
+      *
+      *
+      * If either group is WTF, then both origin/destination groups must be WTF
+      * (unless the orgin phase is BGF....)
+      *
+     C                   if        hdorppcd <> 'BGF  ' and                      If either WTF
+     C                             (dforgtcd = 'W' or dfdngtcd = 'W') and
+     C                             (dforgtcd <> 'W' or dfdngtcd <> 'W')
+     C                   seton                                        3436
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00883'     mgid(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   endif                                                  If either WTF
+      *
+     C                   endif                                                  If edit more
+      *
+      *
+     C     *IN36         IFEQ      *OFF
+     C                   Z-ADD     HGHGSN        hddnhgsn
+     C                   MOVE      hgfsbo        hddnfsbo
+     C                   MOVE      hgptcd        hddnptcd
+     C                   MOVE      hgppcd        hddnppcd
+     C                   ENDIF
+      *
+      * Perform additional edits when the destination group is:
+      *   1) a wean-to-finish group
+      *
+     C                   if        *in36 = *off and dfdngtcd = 'W'              If still OK
+     C                   exsr      $wtf
+     C                   endif
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------------------
+      * Wean-to-finish edits for destination group
+      *-------------------------------------------------------------------------
+      *
+      * You are only in this subroutine when the destination group has a group type
+      * of wean-to-finish. Basically, we are just trying to prevent illegal WTF movements
+      * here
+      *
+     C     $wtf          begsr
+      *
+     C                   select                                                 Big select
+      * Out of BGF
+     C                   when      hdorppcd = 'BGF  ' and
+     C                             (hddnppcd = 'NUR  ' or hddnppcd = 'GF   ')
+      * Out of Nursery
+      *
+     C                   when      hdorppcd = 'NUR  ' and
+     C                             (hddnppcd = 'GF   ' or
+     C                             (hddnppcd = 'NUR  ' and
+     C                             (dforfscd <> dfdnfscd or
+     C                              dforblcd <> dfdnblcd or
+     C                              dforrmcd <> dfdnrmcd)))
+      * Out of Grow Finish
+      *
+     C                   when      hdorppcd = 'GF   ' and
+     C                             (hddnppcd = 'GF   ' and
+     C                             (dforfscd <> dfdnfscd or
+     C                              dforblcd <> dfdnblcd or
+     C                              dforrmcd <> dfdnrmcd))
+     C                   other
+      *
+      * All other transfer combinations into a wean-to-finish group are invalid
+      *
+     C                   seton                                        36
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS01146'     mgid(e)
+     C                   exsr      $err1
+     C                   endif
+     C                   endsl                                                  Big select
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $CLR1 - SUBROUTINE TO CLEAR THE SUBFILE ON SCREEN 1
+      *---------------------------------------------------------------
+      *
+     C     $CLR1         BEGSR
+      *
+      *
+      * CLEAR WORKFIELD ACCUMULATORS
+      *
+      *
+     C                   Z-ADD     0             HDRRN1
+     C                   Z-ADD     0             COUNT
+      *
+     C                   CLEAR                   HP169S1
+     C                   SETON                                        83        SFLCLR
+     C                   WRITE     HP169C1
+     C                   SETOFF                                       818283
+      *                                                    81=SFLDSP
+      *                                                    82=SFLEND
+      *                                                    83=SFLCLR
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $frsh1 - refresh/fill the subfile for screen 1
+      *---------------------------------------------------------------
+      *
+      *
+     C     $frsh1        begsr
+      *
+      * Loading the subfile in this program is different.  You are always
+      * in create mode and will be loading a screen of blank lines.
+      * Write a subfile page of blank lines.
+      *
+     C                   if        wkplin <> 0 and wkplin <> count
+     C     count         div       wkplin        wkfld
+     C                   mvr                     wkrmdr
+     C                   eval      wkdiff = wkplin - wkrmdr
+     C                   exsr      $setof
+     C                   exsr      $clrln
+     C                   do        wkdiff
+     C                   exsr      $blank
+     C                   enddo
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $BLANK- SUBROUTINE TO LOAD BLANK SUBFILE RECORDS FOR SCREEN 1
+      *---------------------------------------------------------------
+      *
+     C     $BLANK        BEGSR
+      *
+     C                   ADD       1             COUNT
+     C                   ADD       1             HDRRN1
+      *
+     C                   SETON                                        85
+     C                   WRITE     HP169S1
+      *
+     C                   SETON                                        81
+     C                   Z-ADD     HDRRN1        HDPAG1
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $CLRLN - CLEAR SUBFILE LINE
+      *---------------------------------------------------------------
+      *
+      * THIS SUBROUTINE INITIALIZES THE FIELDS IN THE SUBFILE RECORD
+      *
+     C     $CLRLN        BEGSR
+      *
+      * ORIGIN
+     C                   Z-ADD     0             dforfscd
+     C                   MOVE      *BLANK        dforfsnm
+     C                   MOVE      *BLANK        dforhgcd
+     C                   MOVE      *BLANK        dforblcd
+     C                   MOVE      *BLANK        dforrmcd
+     C                   MOVE      *BLANK        dforgscd
+     C                   MOVE      *BLANK        dforgtcd
+     C                   Z-ADD     0             dfschd
+     C                   Z-ADD     0             hdorhgsn
+     C                   MOVE      *BLANK        hdorfsbo
+     C                   MOVE      *BLANK        hdorptcd
+     C                   MOVE      *BLANK        hdorppcd
+      *
+      * DESTINATION
+     C                   Z-ADD     0             dfdnfscd
+     C                   MOVE      *BLANK        dfdnfsnm
+     C                   MOVE      *BLANK        dfdnhgcd
+     C                   MOVE      *BLANK        dfdngscd
+     C                   MOVE      *BLANK        dfdngtcd
+     C                   MOVE      *BLANK        dfdnblcd
+     C                   MOVE      *BLANK        dfdnrmcd
+     C                   Z-ADD     0             hddnhgsn
+     C                   MOVE      *BLANK        hddnfsbo
+     C                   MOVE      *BLANK        hddnptcd
+     C                   MOVE      *BLANK        hddnppcd
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $OFFIN - REWRITE THE SUBFILE RECORDS WITH THE INDICATORS OFF
+      *---------------------------------------------------------------
+      *
+      * THIS SUBROUTINE KEEPS THE CURSOR FROM BEING IN THE SUBFILE
+      * WHILE THE DISPLAYED ERROR MESSAGE IS FOR THE CONTROL RECORD.
+      *
+     C     $OFFIN        BEGSR
+      *
+      * READ/PROCESS ALL THE CHANGED SUBFILE RECORDS
+      *
+     C     *IN80         DOUEQ     *ON                                          DO PROCESS
+     C                   READC     HP169S1                                80
+     C     *IN80         IFEQ      *OFF                                         IF REC READ
+      *
+      * SET OFF ALL INDICATORS IN THE SUBFILE
+      *
+     C                   EXSR      $SETOF
+      * SETON MDT
+     C                   SETON                                        85
+      *
+     C                   UPDATE    HP169S1
+     C                   ENDIF                                                  IF REC READ
+     C                   ENDDO                                                  DO PROCESS
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $SETOF - SET OFF ALL INDICATORS ON THE SUBFILE
+      *----------------------------------------------------------------
+      *
+     C     $SETOF        BEGSR
+      *
+     C                   SETOFF                                       3132
+     C                   SETOFF                                       3435
+     C                   SETOFF                                       363738
+     C                   SETOFF                                       4048
+     C                   SETOFF                                       505152
+     C                   SETOFF                                       545556
+     C                   SETOFF                                       5758
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $DATE -  MANIPULATE DATES WITH DATE UTILITY
+      *----------------------------------------------------------------
+      *
+     C     $DATE         BEGSR
+      *
+     C                   CALL      'UT80060R'
+     C                   PARM                    PFRM8             8 0
+     C                   PARM                    PTO8              8 0
+     C                   PARM                    PFRFMT            4
+     C                   PARM                    PTOFMT            4
+     C                   PARM                    PDAYS             4 0
+     C                   PARM                    PCODE             1
+     C                   PARM                    PRTRN             1
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CREATE - CREATE A TRANSFER HEADER AND TRANSFER DETAIL RECORD
+      *----------------------------------------------------------------
+      *
+     C     $CREATE       BEGSR
+      *
+     C                   z-add     0             wknbr
+     C                   move      yes           acceptedfl
+     C                   z-add     1             hdpag1
+      *
+      * Set on the indicator to protect all fields. This allows
+      * the user to see/write down the system-assigned movement numbers.
+      *
+     C                   seton                                        90
+      *
+      *
+      * READ/PROCESS ALL THE CHANGED SUBFILE RECORDS
+      *
+     C     *IN80         DOUEQ     *ON                                          DO READ C
+     C                   READC     HP169S1                                80
+     C     *IN80         IFEQ      *OFF                                         IF REC READ
+      *
+      *
+      * Set the indicator that makes all fields on the subfile line non-display
+      * if there is no entry for the line.
+      *
+     C                   select
+     C                   when      dforhgcd = *blank
+     C                   seton                                        98
+     C                   other
+      *
+      * Process and count the number of movements that you create so that
+      * you can display the number in the completion message.
+      *
+     C                   setoff                                       98
+     C                   add       1             wknbr
+      *
+      * Create the following:
+      *   1) a transfer header record
+      *   2) a transfer detail record
+      *   3) movement event records for both the origin and destination group
+      *
+     C                   exsr      $crtth
+     C                   exsr      $crttd
+     C                   EXSR      $crtme
+     C                   ENDSL
+      *
+     C                   UPDATE    HP169S1
+      *
+     C                   ENDIF                                                  IF REC READ
+     C                   ENDDO                                                  DO READ C
+      *
+      *
+      * Issue message that movements were created.
+      *
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09047'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     wknbr         xxnbr
+     C                   MOVEA     xxnbr         MGW(1)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CRTTH - CREATE A TRANSFER HEADER RECORD
+      *----------------------------------------------------------------
+      *
+     C     $CRTTH        BEGSR
+      *
+      * ASSIGN A MOVEMENT NUMBER
+      *
+     C     *LOCK         IN        DAMVSN
+     C                   ADD       1             DAMVSN
+     C                   OUT       DAMVSN
+     C                   Z-ADD     DAMVSN        MHMVSN
+     C                   Z-ADD     DAMVSN        DFMVSN
+      *
+     C                   MOVEL     'SC'          MHMSCD
+      *
+     C                   MOVEL     dforfscd      MHORFS
+     C                   MOVEL     hdorfsbo      MHORBO
+     C                   MOVEL     hdorptcd      MHORPT
+     C                   MOVEL     hdorppcd      MHORPP
+      *
+     C                   MOVEL     dfdnfscd      MHDNFS
+     C                   MOVEL     hddnfsbo      MHDNBO
+     C                   MOVEL     hddnptcd      MHDNPT
+     C                   MOVEL     hddnppcd      MHDNPP
+      *
+     C                   MOVEL     C1TICD        MHTICD
+     C                   Z-ADD     WKSCDT        MHSCDT
+      *
+     C                   Z-ADD     0             MHSHDT
+     C                   Z-ADD     0             MHSITM
+     C                   Z-ADD     0             MHSOTM
+     C                   Z-ADD     0             MHRCDT
+     C                   Z-ADD     0             MHRITM
+     C                   Z-ADD     0             MHROTM
+     C                   Z-ADD     0             MHEPDT
+     C                   Z-ADD     0             MHPODT
+      *
+     C                   WRITE     MHREC
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CRTTD - CREATE TRANSFER DETAIL RECORDS
+      *----------------------------------------------------------------
+      *
+     C     $CRTTD        BEGSR
+      *
+      *
+     C                   Z-ADD     DAMVSN        MDMVSN
+      *
+     C                   Z-ADD     1             MDLNNO
+     C                   Z-ADD     hdorhgsn      MDORSN
+     C                   Z-ADD     hddnhgsn      MDDNSN
+      *
+     C                   Z-ADD     dfschd        MDSCHD
+     C                   Z-ADD     0             MDSHHD
+     C                   Z-ADD     0             MDQLHD
+     C                   Z-ADD     0             MDRJHD
+     C                   Z-ADD     0             MDDOHD
+     C                   Z-ADD     0             MDSHLB
+     C                   Z-ADD     0             MDQLLB
+     C                   Z-ADD     0             MDRJLB
+     C                   Z-ADD     0             MDDOLB
+      *
+     C                   WRITE     MDREC
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CRTME - CREATE MOVEMENT EVENT RECORDS
+      *----------------------------------------------------------------
+      *
+     C     $CRTME        BEGSR
+      *
+      *
+      * SET UP UPDATE TIME STAMP
+      *
+     C                   Z-ADD     WKUDAT        MEUPDT
+     C                   TIME                    MEUPTM
+     C                   MOVEL     SDUSR         MEUSCD
+     C                   MOVEL     SDPGM         MEPGM
+      *
+      *
+      * SETUP THE MOVEMENT NUMBER AND STATUS
+      *
+     C                   Z-ADD     DAMVSN        MEMVSN
+      *
+     C                   Z-ADD     0             MECVNO
+     C                   Z-ADD     1             MELNNO
+      *
+      * WRITE AN EVENT RECORD FOR THE ORIGIN GROUP
+      *
+     C                   Z-ADD     hdorhgsn      MEHGSN
+     C                   MOVEL     'T'           MEMTCD
+     C                   MOVEL     'O'           MEODFL
+     C                   Z-ADD     hddnhgsn      MEHSN
+      *
+     C                   Z-ADD     WKSCDT        MEMEDT
+      *
+     C                   WRITE     MEREC
+      *
+      * WRITE AN EVENT RECORD FOR THE DESTINATION GROUP
+      *
+     C                   Z-ADD     hddnhgsn      MEHGSN
+     C                   MOVEL     'T'           MEMTCD
+     C                   MOVEL     'D'           MEODFL
+     C                   Z-ADD     hdorhgsn      MEHSN
+      *
+     C                   Z-ADD     WKSCDT        MEMEDT
+      *
+     C                   WRITE     MEREC
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $F4S1 - F4 PROMPT FOR SCREEN 1
+      *----------------------------------------------------------------
+      *
+     C     $F4S1         BEGSR
+      *
+      * Set off all indicators in all subfile records.
+      *
+     C                   exsr      $offin
+      *
+      *----------------------------------------------------------------
+      * PROMPTED FIELDS IN THE CONTROL RECORD
+      *----------------------------------------------------------------
+      *
+      * TRUCKER
+      *
+     C                   SELECT
+     C     FLD           WHENEQ    'C1TICD'
+     C                   CALL      'HP538'
+     C                   PARM      'A'           XXAIST
+     C                   PARM      *blank        XXTICD
+     C                   PARM      *blank        XXTINM
+     C                   PARM      *blank        XXMTECHREF
+     C                   SETON                                        53
+     C     XXTICD        IFNE      *BLANK                                       IF SELECTED
+     C                   MOVEL(P)  XXTICD        C1TICD
+     C                   MOVEL(P)  XXTINM        C1TINM
+     C                   ENDIF                                                  IF SELECTED
+      *
+      *
+      *----------------------------------------------------------------
+      * PROMPTED FIELDS IN THE SUBFILE
+      *----------------------------------------------------------------
+      *
+      *
+      *-------------------
+      *  ORIGIN FARM SITE
+      *-------------------
+      *
+     C     FLD           WHENEQ    'DFORFSCD'
+     C                   EXSR      $RRN1
+     C     *IN97         IFEQ      *OFF
+     C                   CALL      'HP5040'
+     C                   PARM      'A'           xxaist
+     C                   PARM      0             xxfscd
+     C                   PARM      *blank        XXFSNM
+     C     xxfscd        IFNE      0                                            IF SELECTED
+     C                   Z-ADD     xxfscd        dforfscd
+     C                   MOVEL     xxfsnm        dforfsnm
+     C                   ENDIF                                                  IF SELECTED
+     C                   SETON                                        8551
+     C                   UPDATE    HP169S1
+      *
+      * RESET THE SUBFILE RELATIVE RECORD NUMBER TO WHAT IT WAS BEFORE
+      * THE USER TOOK F4 (IT WILL BE OUT-OF-SYNCH IF THE USER HAS
+      * SELECTED A RECORD THUS CAUSING THE SUBFILE RECORD TO BE
+      * RETRIEVED AND UPDATED.)  BUT, SET THE PAGE OF THE SUBFILE TO
+      * BE DISPLAYED TO THE PAGE ON WHICH THE USER TOOK F4.
+      *
+     C                   Z-ADD     COUNT         HDRRN1
+     C                   Z-ADD     HDRR1         HDPAG1
+     C                   ENDIF
+      *
+      *-------------------
+      *  ORIGIN BUILDING
+      *-------------------
+      *
+     C     FLD           WHENEQ    'DFORBLCD'
+     C                   EXSR      $RRN1
+     C     *IN97         IFEQ      *OFF
+     C                   CALL      'HP523'
+     C                   PARM      dforfscd      xxfscd
+     C                   PARM      *blank        XXBLCD
+     C                   PARM      *blank        XXBLDS
+     C     XXBLCD        IFNE      *BLANK
+     C                   MOVEL     XXBLCD        dforblcd
+     C                   ENDIF
+     C                   SETON                                        8555
+     C                   UPDATE    HP169S1
+      *
+      * RESET THE SUBFILE RELATIVE RECORD NUMBER TO WHAT IT WAS BEFORE
+      * THE USER TOOK F4 (IT WILL BE OUT-OF-SYNCH IF THE USER HAS
+      * SELECTED A RECORD THUS CAUSING THE SUBFILE RECORD TO BE
+      * RETRIEVED AND UPDATED.)  BUT, SET THE PAGE OF THE SUBFILE TO
+      * BE DISPLAYED TO THE PAGE ON WHICH THE USER TOOK F4.
+      *
+     C                   Z-ADD     COUNT         HDRRN1
+     C                   Z-ADD     HDRR1         HDPAG1
+     C                   ENDIF
+      *
+      *-------------------
+      *  ORIGIN ROOM
+      *-------------------
+      *
+     C     FLD           WHENEQ    'DFORRMCD'
+     C                   EXSR      $RRN1
+     C     *IN97         IFEQ      *OFF
+     C                   call      'HP524'
+     C                   parm                    dforfscd
+     C                   parm                    dforblcd
+     C                   parm      *blank        xxrmcd
+     C                   if        xxrmcd <> *blank
+     C                   movel     xxrmcd        dforrmcd
+     C                   endif
+     C                   SETON                                        8550
+     C                   UPDATE    HP169S1
+      *
+      * RESET THE SUBFILE RELATIVE RECORD NUMBER TO WHAT IT WAS BEFORE
+      * THE USER TOOK F4 (IT WILL BE OUT-OF-SYNCH IF THE USER HAS
+      * SELECTED A RECORD THUS CAUSING THE SUBFILE RECORD TO BE
+      * RETRIEVED AND UPDATED.)  BUT, SET THE PAGE OF THE SUBFILE TO
+      * BE DISPLAYED TO THE PAGE ON WHICH THE USER TOOK F4.
+      *
+     C                   Z-ADD     COUNT         HDRRN1
+     C                   Z-ADD     HDRR1         HDPAG1
+     C                   ENDIF
+      *
+      *-----------------
+      * ORIGIN HOG GROUP
+      *-----------------
+      *
+     C     FLD           WHENEQ    'DFORHGCD'
+     C                   EXSR      $RRN1
+     C     *IN97         IFEQ      *OFF                                         If hgcd hit
+     C                   CALL      'HP5950'
+     C                   PARM                    dforfscd
+     C                   PARM                    dforfsnm
+     C                   PARM      dforblcd      XXBLCD
+     C                   PARM      dforrmcd      XXRMCD
+     C                   PARM      *blank        XXHGCD
+     C                   PARM      *blank        XXGSCD
+     C                   PARM      *blank        XXPTCD
+     C                   PARM      *blank        XXPPCD
+     C     XXHGCD        IFNE      *BLANK
+     C                   MOVEL     XXHGCD        dforhgcd
+     C                   MOVEL     XXBLCD        DFORBLCD
+     C                   MOVEL     XXRMCD        DFORRMCD
+     C                   MOVEL     XXGSCD        DFORGSCD
+     C                   ENDIF
+     C                   SETON                                        8554
+     C                   UPDATE    HP169S1
+      *
+      * RESET THE SUBFILE RELATIVE RECORD NUMBER TO WHAT IT WAS BEFORE
+      * THE USER TOOK F4 (IT WILL BE OUT-OF-SYNCH IF THE USER HAS
+      * SELECTED A RECORD THUS CAUSING THE SUBFILE RECORD TO BE
+      * RETRIEVED AND UPDATED.)  BUT, SET THE PAGE OF THE SUBFILE TO
+      * BE DISPLAYED TO THE PAGE ON WHICH THE USER TOOK F4.
+      *
+     C                   Z-ADD     COUNT         HDRRN1
+     C                   Z-ADD     HDRR1         HDPAG1
+     C                   ENDIF
+      *
+      *----------------------
+      * DESTINATION FARM SITE
+      *----------------------
+      *
+     C     FLD           WHENEQ    'DFDNFSCD'
+     C                   EXSR      $RRN1
+     C     *IN97         IFEQ      *OFF
+     C                   CALL      'HP5040'
+     C                   PARM      'A'           xxaist
+     C                   PARM      0             xxfscd
+     C                   PARM      *blank        XXFSNM
+     C     xxfscd        IFNE      0                                            IF SELECTED
+     C                   Z-ADD     xxfscd        dfdnfscd
+     C                   MOVEL     xxfsnm        dfdnfsnm
+     C                   ENDIF                                                  IF SELECTED
+     C                   SETON                                        8552
+     C                   UPDATE    HP169S1
+      *
+      * RESET THE SUBFILE RELATIVE RECORD NUMBER TO WHAT IT WAS BEFORE
+      * THE USER TOOK F4 (IT WILL BE OUT-OF-SYNCH IF THE USER HAS
+      * SELECTED A RECORD THUS CAUSING THE SUBFILE RECORD TO BE
+      * RETRIEVED AND UPDATED.)  BUT, SET THE PAGE OF THE SUBFILE TO
+      * BE DISPLAYED TO THE PAGE ON WHICH THE USER TOOK F4.
+      *
+     C                   Z-ADD     COUNT         HDRRN1
+     C                   Z-ADD     HDRR1         HDPAG1
+     C                   ENDIF
+      *
+      *
+      *----------------------
+      * DESTINATION BUILDING
+      *----------------------
+      *
+     C     FLD           WHENEQ    'DFDNBLCD'
+     C                   EXSR      $RRN1
+     C     *IN97         IFEQ      *OFF
+     C                   CALL      'HP523'
+     C                   PARM      dfdnfscd      xxfscd
+     C                   PARM      *blank        XXBLCD
+     C                   PARM      *blank        XXBLDS
+     C     XXBLCD        IFNE      *BLANK                                       IF SELECTED
+     C                   MOVEL     XXBLCD        dfdnblcd
+     C                   ENDIF                                                  IF SELECTED
+     C                   SETON                                        8557
+     C                   UPDATE    HP169S1
+      *
+      * RESET THE SUBFILE RELATIVE RECORD NUMBER TO WHAT IT WAS BEFORE
+      * THE USER TOOK F4 (IT WILL BE OUT-OF-SYNCH IF THE USER HAS
+      * SELECTED A RECORD THUS CAUSING THE SUBFILE RECORD TO BE
+      * RETRIEVED AND UPDATED.)  BUT, SET THE PAGE OF THE SUBFILE TO
+      * BE DISPLAYED TO THE PAGE ON WHICH THE USER TOOK F4.
+      *
+     C                   Z-ADD     COUNT         HDRRN1
+     C                   Z-ADD     HDRR1         HDPAG1
+     C                   ENDIF
+      *
+      *-----------------------
+      * DESTINATION ROOM
+      *-----------------------
+      *
+     C     FLD           WHENEQ    'DFDNRMCD'
+     C                   EXSR      $RRN1
+     C     *IN97         IFEQ      *OFF
+     C                   call      'HP524'
+     C                   parm                    dfdnfscd
+     C                   parm                    dfdnblcd
+     C                   parm      *blank        xxrmcd
+     C                   if        xxrmcd <> *blank
+     C                   movel     xxrmcd        dfdnrmcd
+     C                   endif
+     C                   SETON                                        8558
+     C                   UPDATE    HP169S1
+      *
+      * RESET THE SUBFILE RELATIVE RECORD NUMBER TO WHAT IT WAS BEFORE
+      * THE USER TOOK F4 (IT WILL BE OUT-OF-SYNCH IF THE USER HAS
+      * SELECTED A RECORD THUS CAUSING THE SUBFILE RECORD TO BE
+      * RETRIEVED AND UPDATED.)  BUT, SET THE PAGE OF THE SUBFILE TO
+      * BE DISPLAYED TO THE PAGE ON WHICH THE USER TOOK F4.
+      *
+     C                   Z-ADD     COUNT         HDRRN1
+     C                   Z-ADD     HDRR1         HDPAG1
+     C                   ENDIF
+      *
+      *
+      *----------------------
+      * DESTINATION HOG GROUP
+      *----------------------
+      *
+     C     FLD           WHENEQ    'DFDNHGCD'
+     C                   EXSR      $RRN1
+     C                   if        *in97 = *off
+     C                   CALL      'HP598'
+     C                   PARM                    dfdnfscd
+     C                   PARM                    dfdnfsnm
+     C                   PARM      dfdnblcd      XXBLCD
+     C                   PARM      dfdnrmcd      XXRMCD
+     C                   PARM      *blank        XXHGCD
+     C                   PARM      *blank        XXGSCD
+     C                   PARM      *blank        XXPTCD
+     C                   PARM      *blank        XXPPCD
+     C     XXHGCD        IFNE      *BLANK
+     C                   MOVEL     XXHGCD        dfdnhgcd
+     C                   MOVEL     XXBLCD        dfdnblcd
+     C                   MOVEL     XXRMCD        dfdnrmcd
+     C                   MOVEL     XXGSCD        dfdngscd
+     C                   ENDIF
+     C                   SETON                                        8556
+     C                   UPDATE    HP169S1
+      *
+      * RESET THE SUBFILE RELATIVE RECORD NUMBER TO WHAT IT WAS BEFORE
+      * THE USER TOOK F4 (IT WILL BE OUT-OF-SYNCH IF THE USER HAS
+      * SELECTED A RECORD THUS CAUSING THE SUBFILE RECORD TO BE
+      * RETRIEVED AND UPDATED.)  BUT, SET THE PAGE OF THE SUBFILE TO
+      * BE DISPLAYED TO THE PAGE ON WHICH THE USER TOOK F4.
+      *
+     C                   Z-ADD     COUNT         HDRRN1
+     C                   Z-ADD     HDRR1         HDPAG1
+     C                   ENDIF
+     C                   OTHER
+      *
+      * F4 NOT VALID FOR THIS FIELD SO ISSUE MESSAGE
+      *
+     C     ERROR         IFLT      MAXMSG                                       IF FIRST ERR
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS09011'     MGID(E)
+     C                   ENDIF                                                  IF FIRST ERR
+      *
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $ERR1  - SUBROUTINE TO SET THE SUBFILE TO REDISPLAY AT
+      *          THE FIRST SCREEN THAT HAS ERRORS
+      *---------------------------------------------------------------
+      *
+     C     $ERR1         BEGSR
+      *
+     C     ERROR         IFEQ      1
+     C                   Z-ADD     HDRRN1        HDPAG1
+     C                   ENDIF
+      *
+     C                   ENDSR
+      *
+      *---------------------------------------------------------------
+      * $EXIT - SUBROUTINE TO SET ON LR AND END JOB
+      *---------------------------------------------------------------
+      *
+     C     $EXIT         BEGSR
+      *
+     C                   SETON                                        LR
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $WRMSG - SUBROUTINE TO WRITE ERROR MESSAGES
+      *---------------------------------------------------------------
+      *
+     C     $WRMSG        BEGSR
+      *
+     C                   CALL      'UT80045J'                           43
+     C                   PARM                    MGID
+     C                   PARM                    MGDT
+     C                   PARM                    ERROR
+     C                   PARM      SDPGM         PGM
+     C                   PARM      MSGFIL        MSGFL
+      *
+      * IF CALL TO UT80045J FAILED, A MESSAGE HARDCODED IN THE DSPF
+      * COMMAND KEY RECORD WILL BE SET ON. SO, REDISPLAY SCREEN TO USER
+      *
+     C     *IN43         IFEQ      *ON
+     C                   MOVEL     SET1          ROUTNE
+     C                   ENDIF
+      *
+     C                   ENDSR
+      *
+      *---------------------------------------------------------------
+      * $CLMSG - SUBROUTINE TO CLEAR MESSAGES
+      *---------------------------------------------------------------
+      *
+     C     $CLMSG        BEGSR
+      *
+     C                   CALL      'UT80045J'                           43
+     C                   PARM      *BLANKS       MGI
+     C                   PARM      *BLANKS       MGD
+     C                   PARM      *ZEROS        ERROR
+     C                   PARM      SDPGM         PGM
+     C                   PARM      MSGFIL        MSGFL
+      *
+      * IF CALL TO UT80045J FAILED, A MESSAGE HARDCODED IN THE DSPF
+      * COMMAND KEY RECORD WILL BE SET ON. SO, REDISPLAY SCREEN TO USER
+      *
+     C     *IN43         IFEQ      *ON
+     C                   MOVEL     SET1          ROUTNE
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $RRN1  - ROUTINE TO FIND/RETRIEVE THE SUBFILE RECORD TO UPDATE
+      *          WHEN RETURNING FROM A SELECT PROGRAM ON SCREEN 1
+      *----------------------------------------------------------------
+      *
+      * HDRR1 IS THE HIDDEN FIELD ASSOCIATED WITH THE KEYWORD SFLCSRRRN
+      * ON THE CONTROL RECORD IN THE DSPF.
+      * HDRRN1 IS THE VALUE ASSOCIATED WITH THE KEYWORD 'KSFILE' IN
+      * THE F-SPECS FOR THE WORKSTATION.
+      *
+     C     $RRN1         BEGSR
+      *
+     C                   SETOFF                                       97
+      *
+     C     HDRR1         IFNE      0
+     C                   Z-ADD     HDRR1         HDRRN1
+     C     HDRRN1        CHAIN     HP169S1                            97
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * *INZSR - INITIALIZATION SUBROUTINE
+      *---------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    dforfscd
+     C                   kfld                    dforblcd
+      *
+     C     key02         klist
+     C                   kfld                    dforfscd
+     C                   kfld                    dforblcd
+     C                   kfld                    dforrmcd
+      *
+     C     key03         klist
+     C                   kfld                    dfdnfscd
+     C                   kfld                    dfdnblcd
+      *
+     C     key04         klist
+     C                   kfld                    dfdnfscd
+     C                   kfld                    dfdnblcd
+     C                   kfld                    dfdnrmcd
+      *
+      * GLOBAL DEFINES
+      *
+     C                   MOVE      *BLANK        PGM              10            USED IN MSG
+     C                   MOVE      *BLANK        MSGFL            10            USED IN MSG
+     C                   MOVE      *BLANK        ROUTNE            6            ROUTINE
+     C                   MOVEL     NO            RESET             1            REPOSITION
+     C     *LIKE         DEFINE    IDFLOW        WKFLOW                         SFL POSITION
+     C                   MOVEL     NO            EDITFL            1
+     C                   MOVEL     NO            acceptedfl        1
+      *
+      *
+      * ALPHA AND NUMERIC FIELDS FOR USE AS PARMS
+      *
+      *
+     C                   MOVE      *BLANK        XXNBR             3
+     C                   MOVE      *BLANK        XXMVSN            7
+     C     *LIKE         DEFINE    HGHGCD        XXHGCD
+     C     *LIKE         DEFINE    HGPTCD        XXPTCD
+     C     *LIKE         DEFINE    HGPPCD        XXPPCD
+     C     *LIKE         DEFINE    FSFSCD        xxfscd
+     C                   MOVE      *BLANK        xxalphfscd        5
+     C     *LIKE         DEFINE    FSFSNM        XXFSNM
+     C     *LIKE         DEFINE    HGBLCD        XXBLCD
+     C     *like         define    fbblds        XXBLDS
+     C     *LIKE         DEFINE    HGRMCD        XXRMCD
+     C     *LIKE         DEFINE    HGGSCD        XXGSCD
+     C     *LIKE         DEFINE    TITICD        XXTICD
+     C     *LIKE         DEFINE    TITINM        XXTINM
+     C                   MOVE      *BLANK        XXAIST            1
+     C     *LIKE         DEFINE    FSMTECHREF    xxmtechref
+      *
+      *
+      * CONTROL FIELDS, FLAGS, COUNTERS, WORK FIELDS
+      *
+     C     *LIKE         DEFINE    MHSCDT        WKUDAT
+     C     *LIKE         DEFINE    MHSCDT        WKSCDT
+     C                   z-add     0             wknbr             3 0
+     C                   MOVEL     NO            ENTRFL            1            SFL ENTRIES
+      *
+      *
+      * TO SUPPORT F5-REFRESH, LOGIC REQUIRES THE NUMBER OF LINES ON
+      * THE SUBFILE PAGE AND ALSO THE NUMBER OF LINES LESS 1.  BY
+      * SETTING THESE VALUES UP AS CONSTANT WORK FIELDS, THE PROCESSING
+      * LOGIC CAN BE STANDARDIZED BETWEEN PROGRAMS. SINCE THIS DISPLAY
+      * HAS FOLD/DROP LOGIC, DOUBLE THE SUBFILE PAGE VALUE.
+      *
+     C                   Z-ADD     12            WKPLIN            2 0          SFLPAG(0006)
+     C     WKPLIN        SUB       1             WKRLIN            2 0          SFLPAG - 1
+     C                   Z-ADD     0             COUNT             2 0
+     C     *LIKE         DEFINE    COUNT         WKDIFF
+     C     *LIKE         DEFINE    COUNT         WKRMDR
+     C     *LIKE         DEFINE    COUNT         WKFLD
+      *
+      *
+      * FLIP JOB DATE TO CCYYMMDD FOR WRITING MOVEMENT EVENT RECORDS
+      *
+     C                   Z-ADD     UDATE         PFRM8
+     C                   Z-ADD     0             PTO8
+     C                   MOVEL     'MDY '        PFRFMT
+     C                   MOVEL     'CYMD'        PTOFMT
+     C                   Z-ADD     0             PDAYS
+     C                   MOVE      *BLANK        PCODE
+     C                   MOVE      *BLANK        PRTRN
+      *
+     C                   EXSR      $DATE
+      *
+     C     PRTRN         IFEQ      *BLANK                                       IF VALID
+     C                   Z-ADD     PTO8          WKUDAT
+     C                   ELSE
+     C                   Z-ADD     0             WKUDAT
+     C                   ENDIF                                                  IF VALID
+      *
+      *
+      * YOU ARE ALWAYS IN CREATE MODE IN THIS PROGRAM.
+      *
+     C                   MOVEL     'CREATE'      DFMODE
+      *
+      * BRING IN THE DATA AREA THAT CONTAINS THE CURRENT ACCOUNTING
+      * PERIOD
+      *
+     C     *DTAARA       DEFINE                  DAAPER
+     C                   IN        *DTAARA
+      *
+      * DEFINE THE DATA AREA THAT CONTAINS THE MOVEMENT NUMBER
+      *
+     C     *DTAARA       DEFINE                  DAMVSN
+      *
+      * THE FOLLOWING STANDARD CODE MUST BE INCLUDED TO MAKE THE
+      * STANDARD ERROR MESSAGE HANDLING PROGRAM FUNCTION PROPERLY.
+      * THIS CODE SETS AND CLEARS THE PROGRAM MESSAGE QUEUE.
+      *
+     C                   Z-ADD     20            MAXMSG            2 0
+     C                   MOVEL     '*'           MSGPGM                         SET QUEUE
+     C                   EXSR      $CLMSG                                       CLEAR MSG
+      *
+     C                   ENDSR
+      /EJECT

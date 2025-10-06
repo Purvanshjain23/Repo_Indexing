@@ -1,0 +1,799 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production
+      * PROGRAM:     TF613 - Claims Adjustment Listing--By Product
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     05/26/05
+      *
+      * FUNCTION:    Prints the Claims Adjustment file data.
+      *
+      *              This 'report' is generated:
+      *                 1) on-demand
+      *
+      **********************************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 08/31/06  LeAnne Ramsey
+      *           Added three fields to detail print line:
+      *             1) affect sales pounds flag
+      *             2) aggregate net product revenue price/lb
+      *             3) claim net price/lb
+      *           We had to scrunch everything to fit them in and remove:
+      *             1) Total Claim Sales Expense Amount
+      *
+      * 01/05/11  LeAnne Ramsey (E1245)
+      *           A new field was added to TFP022-Claim Adjustments:
+      *              1) customer type
+      *           When a Claim is for an Affiliated Sales Customer, this field will be
+      *           'IS'. The field will be blank when the Claim is for a Customer that is
+      *           NOT an Affiliated Sales Customer.
+      *           I have added logic to allow this Listing to be printed with/without
+      *           Affiliated Sales Claims.
+      *
+      * 11/29/17  Danny Nguyen  (R12011A-Weekly Product Revenue)
+      *           Added 2 STF fields to TFP022 file:
+      *             CLXRPPC  - STF RESPONSIBILITY %
+      *             CLXNCLAM - STF NET CLAIM AMT
+      *           Recompile only, no logic change.
+      *
+      * W105621 RMC 10/10/2022 INCREASE FIELD SIZES TO HANDLE PRICES > 999.99
+      *         CHANGE @@ANPRPR TO SIZE 10.6
+      *           CHANGES CLANPRPR IN TFP022
+      *         CHANGE @@NCLPR  TO SIZE 10.6
+      *           CHANGES CLNCLPR IN TFP022
+      *
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Ftfl022a   if   e           k disk
+      *    Claim adjustments
+      *
+      *
+     Fprint198  o    f  198        printer oflind(*inof)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+     D aragam          s             11  2 dim(3)
+     D aranam          s             11  2 dim(3)
+     D arsnam          s             11  2 dim(3)
+     D artnam          s             11  2 dim(3)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D dash            s            198    inz(*all'-')
+     d rtime           s              6  0
+      *
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     d cntlnno         s              3  0
+     D svwedt          s                   like(clwedt)
+     D svprcd          s                   like(clprcd)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+      *
+      *
+      * Print fields
+      *
+     d h1ieods         s              7
+     d h1demand        s             26
+     d h2wemdy         s              6  0
+      *
+     d l1osmdy         s              6  0
+      *
+     d t1desc          s             30
+     d t1wemdy         s              6  0
+      *
+      *
+     D t2eagam         s             11  2
+     D t2eanam         s             11  2
+     D t2esnam         s             11  2
+     D t2etnam         s             11  2
+      *
+     D t2nagam         s             11  2
+     D t2nanam         s             11  2
+     D t2nsnam         s             11  2
+     D t2ntnam         s             11  2
+      *
+      *
+      * Array index
+      *
+     D x               s              3  0
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+      *
+      * Do not use the first 38 LDA positions. We have to generate this from the
+      * Close function as well as on-demand from this program. So, the LDAs have to
+      * match up (The Close function is already using the first 38 positions.)
+      * EXCEPT, put blanks in position 37 (prelimary/final code) to match TF410.
+      *
+     D  ldpfcd                37     37
+     D  ldfmdy                39     44  0
+     D  ldtmdy                45     50  0
+     D  ldfcymd               52     59  0
+     D  ldtcymd               60     67  0
+      *
+     D  ldcono                68     70  0
+     D  ldclno                71     77  0
+     D  ldmmno                78     84  0
+     D  ldprcd                85     91  0
+     D  ldmmty                92     93
+     D  ldclorno              94    100  0
+     D  ldrpfl               101    101
+     D  ldrpdept             102    104
+     D  ldrscd               105    107
+     D  lddscd               108    108
+     D  ldieofl              109    109
+      *
+     D  lddemand             300    300
+      *
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /eject
+      ****************************************************************************************
+      * Mainline
+      ****************************************************************************************
+      *
+      * Read all Claim Adjustment records for the selected date range.
+      * Print each record and accumulate values for the total for the week.
+      *
+     C                   exsr      $h1hdr
+      *
+     C     *loval        setll     tfl022a
+      *
+     C                   dou       *in90 = *on or                               Main do
+     C                             (ldtcymd > 0 and clwedt > ldtcymd)
+     C                   read      tfl022a                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             (clwedt <= ldtcymd or ldtcymd = 0)
+      *
+      * Control break logic
+      *
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   z-add     clwedt        svwedt
+     C                   z-add     clprcd        svprcd
+     C                   exsr      $h2hdr
+      * Week-ending date
+     C                   when      clwedt <> svwedt
+     C                   exsr      $totprcd
+     C                   exsr      $totwedt
+     C                   exsr      $h2hdr
+      * Product
+     C                   when      clprcd <> svprcd
+     C                   exsr      $totprcd
+     C                   endsl
+      *
+      * Detail processing:
+      *   1) accumulate totals into arrays
+      *
+     C                   add       clagclam      aragam
+     C                   add       clanclam      aranam
+     C                   add       clsnclam      arsnam
+     C                   add       cltnclam      artnam
+      *
+      *   2) accumulate totals into Exempt/Non-Exempt totals for the
+      *      "summary section" at the end of the report
+      *
+     C                   select
+     C                   when      clrcexfl = 'Y'
+     C                   add       clagclam      t2eagam
+     C                   add       clanclam      t2eanam
+     C                   add       clsnclam      t2esnam
+     C                   add       cltnclam      t2etnam
+     C                   other
+     C                   add       clagclam      t2nagam
+     C                   add       clanclam      t2nanam
+     C                   add       clsnclam      t2nsnam
+     C                   add       cltnclam      t2ntnam
+     C                   endsl
+      *
+      * Count the lines processed for a Claim.
+      *
+     C                   add       1             cntlnno
+      *
+      * Print detail line
+     C                   exsr      $l1dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *-------------------
+      * EOF PROCESSING
+      *-------------------
+      *
+     C                   select
+     C                   when      first = yes
+     C                   except    nodata
+     C                   other
+      *
+      * Print total lines:
+      *  1) Last product
+      *  2) Last week
+      *  3) Report
+      *
+     C                   exsr      $totprcd
+     C                   exsr      $totwedt
+     C                   exsr      $totrpt
+      *
+      *  Print Summary Section (Exempt/Non-Exempt) total lines
+      *
+     C                   exsr      $t2tot
+     C                   endsl
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Print detail line
+      *---------------------------------------------------------------
+      *
+     C     $l1dtl        begsr
+      *
+      * Flip Original Sale Week-Ending Date from CCYYMMDD to MMDDYY format
+      *
+     C                   if        closwedt <> 0
+     C     *iso          test(d)                 closwedt               92
+     C                   if        *in92 = *off                                 If good date
+     C                   move      closwedt      wkisodate
+     C     *mdy          move      wkisodate     l1osmdy
+     C                   endif                                                  If good date
+     C                   endif
+      *
+      *
+      * If this Claim is for an Affiliated Sales Customer, we will set on an
+      * indicator to print an '*' in position 198...we didn't have room on the
+      * report to do anything else. (LeAnne decided to do this; no user asked
+      * for it.)
+     C                   if        clcutycd = 'IS'
+     C                   seton                                        45
+     C                   else
+     C                   setoff                                       45
+     C                   endif
+      *
+      * Print headings if necessary
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+      *
+     C                   except    l1dtl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Product Total Line
+      *---------------------------------------------------------------
+      *
+     C     $totprcd      begsr
+      *
+     C                   z-add     1             x
+     C                   move      *blank        t1desc
+     C                   z-add     0             t1wemdy
+      *
+      * If you printed more than 1 detail line for this product,
+      *    print a Product Total line
+      * Otherwise,
+      *    clear the array totals for this product
+      *
+     C                   if        cntlnno > 1
+     C                   exsr      $t1tot
+     C                   else
+     C                   exsr      $clear
+     C                   except    blank
+     C                   endif
+      *
+      * Save product code and reset count of number of lines processed for a product.
+      *
+     C                   z-add     clprcd        svprcd
+     C                   z-add     0             cntlnno
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Week Total line
+      *---------------------------------------------------------------
+      *
+     C     $totwedt      begsr
+      *
+     C                   z-add     2             x
+     C                   move      *blank        t1desc
+     C                   z-add     h2wemdy       t1wemdy
+     C                   seton                                        88
+      *
+      *
+     C                   eval      %subst(t1desc:9:22) =
+     C                             'Total for Week-ending:'
+     C                   exsr      $t1tot
+      *
+     C                   setoff                                       88
+     C                   z-add     clwedt        svwedt
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Report Total line
+      *---------------------------------------------------------------
+      *
+     C     $totrpt       begsr
+      *
+     C                   move      *blank        t1desc
+     C                   z-add     0             t1wemdy
+     C                   seton                                        88
+      *
+     C                   eval      %subst(t1desc:18:13) = 'Report Total:'
+      *
+     C                   z-add     3             x
+     C                   exsr      $t1tot
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Total line
+      *---------------------------------------------------------------
+      *
+     C     $t1tot        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+      *
+     C                   except    t1tot
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Exempt/Non-Exempt Total Lines at end of the report
+      *---------------------------------------------------------------
+      *
+     C     $t2tot        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   except    t2tot
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print report headings
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Week/Company heading
+      *---------------------------------------------------------------
+      *
+     C     $h2hdr        begsr
+      *
+      * Flip Week Ending Date from CCYYMMDD to MMDDYY format
+      *
+     C                   if        clwedt <> 0
+     C     *iso          test(d)                 clwedt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C                   move      clwedt        wkisodate
+     C     *mdy          move      wkisodate     h2wemdy
+     C                   endif                                                  If OK date
+     C                   endif
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+      * Print it twice to make it "Bold".
+      *
+     C                   except    h2hdr
+     C                   except    h2hdr
+      *
+      * Space twice
+     C                   except    blank
+     C                   except    blank
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Clear elements in arrays
+      *---------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   z-add     0             aragam (x)
+     C                   z-add     0             aranam (x)
+     C                   z-add     0             arsnam (x)
+     C                   z-add     0             artnam (x)
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Set up report headings
+      *
+     C                   time                    rtime
+      *
+      *
+      * This report is generated on-demand and also from the submitted
+      * Weekly Revenue Close function.
+      *
+     C                   select
+     C                   when      lddemand = yes
+     C                   eval      h1demand = '         On-Demand        '
+      *
+     C                   when      ldpfcd = 'P'
+     C                   eval      h1demand = 'Preliminary Revenue Close'
+      *
+     C                   when      ldpfcd = 'F'
+     C                   eval      h1demand = '   Final Revenue Close   '
+     C                   endsl
+      *
+      *
+     C                   if        ldfmdy = 0
+     C                   seton                                        80
+     C                   endif
+      *
+     C                   if        ldtmdy = 0
+     C                   seton                                        81
+     C                   endif
+      *
+     C                   if        ldcono = 0
+     C                   seton                                        82
+     C                   endif
+      *
+     C                   if        ldclno = 0
+     C                   seton                                        83
+     C                   endif
+      *
+     C                   if        ldclorno = 0
+     C                   seton                                        89
+     C                   endif
+      *
+     C                   if        ldmmty = *blank
+     C                   seton                                        84
+     C                   endif
+      *
+     C                   if        ldmmno = 0
+     C                   seton                                        85
+     C                   endif
+      *
+     C                   if        ldprcd = 0
+     C                   seton                                        86
+     C                   endif
+      *
+     C                   if        ldrpfl = *blank
+     C                   seton                                        95
+     C                   endif
+      *
+     C                   if        ldrpdept = *blank
+     C                   seton                                        96
+     C                   endif
+      *
+     C                   if        ldrscd = *blank
+     C                   seton                                        97
+     C                   endif
+      *
+     C                   if        lddscd = *blank
+     C                   seton                                        98
+     C                   endif
+      *
+      *
+      * Include/Exclude/Only print claims from Affiliated Sales Customers
+      *
+     C                   select
+     C                   when      ldieofl = 'I'
+     C                   eval      h1ieods = 'Include'
+      *
+     C                   when      ldieofl = 'E'
+     C                   eval      h1ieods = 'Exclude'
+      *
+     C                   when      ldieofl = 'O'
+     C                   eval      h1ieods = 'Only'
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oprint198  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                          110 'CLAIM ADJUSTMENTS LISTING'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                                          188 'TIME'
+     O                                          105 'By Product Code'
+     O                       rtime              198 '  :  :  '
+      *
+     O          e            h1hdr          1
+     O                                          188 'PAGE'
+     O                       h1demand           110
+     O                       page          Z    198
+      *
+      * Line 1
+     O          e            h1hdr       1  1
+     O                                           15 'From date:'
+     O              n80      ldfmdy        y     25
+     O               80                          20 'All'
+      *
+     O                                           66 'Memo type:'
+     O              n84      ldmmty              70
+     O               84                          71 'All'
+      *
+     O                                          105 'Responsibility flag:'
+     O              n95      ldrpfl             108
+     O               95                         110 'All'
+      *
+     O                                          140 'Affiliated sales claims:'
+     O                       h1ieods            148
+      *
+      * Line 2
+      *
+     O          e            h1hdr          1
+     O                                           15 'To date:'
+     O              n81      ldtmdy        y     25
+     O               81                          20 'All'
+      *
+     O                                           66 'Credit/debit memo number:'
+     O              n85      ldmmno        z     75
+     O               85                          71 'All'
+      *
+     O                                          105 'Responsible department:'
+     O              n96      ldrpdept           110
+     O               96                         110 'All'
+      *
+      * Line 3
+      *
+     O          e            h1hdr          1
+     O                                           15 'Company number:'
+     O              n82      ldcono        z     20
+     O               82                          20 'All'
+      *
+     O                                           66 'Claim order number:'
+     O              n89      ldclorno      z     75
+     O               89                          71 'All'
+      *
+     O                                          105 'Reason code:'
+     O              n97      ldrscd             110
+     O               97                         110 'All'
+      *
+      * Line 4
+     O          e            h1hdr          2
+     O                                           15 'Claim number:'
+     O              n83      ldclno        z     24
+     O               83                          20 'All'
+      *
+     O                                           66 'Product code:'
+     O              n86      ldprcd        z     75
+     O               86                          71 'All'
+      *
+      *
+     O                                          105 'Data source code:'
+     O              n98      lddscd             110
+     O               98                         110 'All'
+      *
+      *
+      *
+      *-------------------------------------------------------------
+      * Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr          1
+     O                                           56 'Aff'
+     O                                          131 'SBF'
+     O                                          154 'TF'
+     O                                          181 'Agg Net'
+     O                                          193 'Original'
+      *
+     O          e            h1hdr          1
+     O                                            7 'Product'
+     O                                           15 'Claim'
+     O                                           21 'Line'
+     O                                           26 'Mem'
+     O                                           34 'CR/DB'
+     O                                           38 'Rsp'
+     O                                           42 'Exm'
+     O                                           47 'Rsp'
+     O                                           52 'Rsn'
+     O                                           56 'Lbs'
+      *
+     O                                           71 'Total Claim'
+     O                                           87 'Total Gross'
+     O                                          103 'Total Net'
+     O                                          119 'Seaboard Net'
+     O                                          131 'Resp'
+     O                                          147 'Triumph Net'
+     O                                          155 'Resp'
+     O                                          169 'Claim Net'
+     O                                          181 'Prod Rev'
+     O                                          192 'Sale'
+     O                                          198 'Sls'
+      *
+     O          e            h1hdr          1
+     O                                            7 'Code'
+     O                                           14 'Nbr'
+     O                                           21 'Nbr'
+     O                                           26 'Typ'
+     O                                           34 'Memo#'
+     O                                           38 'Flg'
+     O                                           42 'Rec'
+     O                                           47 'Dpt'
+     O                                           52 'Cde'
+     O                                           56 'Flg'
+      *
+     O                                           71 'Pounds'
+     O                                           87 'Claim Amount'
+     O                                          103 'Claim Amount'
+     O                                          119 'Claim Amount'
+     O                                          131 'Percent'
+     O                                          147 'Claim Amount'
+     O                                          157 'Percent'
+     O                                          169 'Price/Lb'
+     O                                          181 'Price/Lb'
+     O                                          193 'W/E Date'
+     O                                          198 'Flg'
+      *
+     O          e            h1hdr          1
+     O                       dash               198
+      *
+      *-------------------------------------------------------------
+      * Week-ending date/Company heading
+      *-------------------------------------------------------------
+      *
+     O          e            h2hdr       0  0
+     O                                           12 'Week-ending:'
+     O                       h2wemdy             22 '  /  /  '
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl          1
+     O                       clprcd        m      8
+     O                       clclno        m     17
+     O                       clcllnno      m     22
+     O                       clmmty              25
+     O                       clmmno        m     35
+     O                       clrpfl              37
+     O                       clrcexfl            41
+     O                       clrpdept            47
+     O                       clrscd              52
+     O                       clafslfl            55
+      *
+     O                       clacllb       k     72
+     O                       clagclam      k     87
+     O                       clanclam      k    104
+     O                       clsnclam      k    120
+     O                       clsrppc       k    132
+     O                       cltnclam      k    148
+     O                       cltrppc       k    158
+     O                       clnclpr       k    170
+     O                       clanprpr      k    182
+     O                       l1osmdy        b   193 '  /  /  '
+     O                       clsalefl           197
+     O               45                         198 '*'
+      *
+      *
+      *-------------------------------------------------------------
+      * Total line
+      *-------------------------------------------------------------
+      *
+     O          e            t1tot          1
+     O              n88                          87 '--------------'
+     O              n88                         103 '--------------'
+     O              n88                         119 '--------------'
+     O              n88                         147 '--------------'
+      *
+     O          e            t1tot          0
+     O                       t1wemdy             41 '  /  /  '
+     O                       t1desc              71
+      *
+     O          e            t1tot          2
+     O                       t1wemdy             41 '  /  /  '
+     O                       t1desc              71
+     O                       aragam(x)     kb    87
+     O                       aranam(x)     kb   104
+     O                       arsnam(x)     kb   120
+     O                       artnam(x)     kb   148
+      *
+      *--------------------------------------------------------------------------------
+      * Total lines for the Exempt/Non-Exempt summary totals at the end of the report
+      *--------------------------------------------------------------------------------
+      *
+     O          e            t2tot       2  0
+     O                                           57 'EXEMPT/NON-EXEMPT SUMMARY:'
+     O                                           71 'Exempt:'
+      *
+     O          e            t2tot       0  0
+     O                                           57 'EXEMPT/NON-EXEMPT SUMMARY:'
+     O                                           71 'Exempt:'
+     O                       t2eagam       kb    87
+     O                       t2eanam       kb   104
+     O                       t2esnam       kb   120
+     O                       t2etnam       kb   148
+      *
+     O          e            t2tot       2  0
+     O                                           71 'Non-Exempt:'
+      *
+     O          e            t2tot       0  0
+     O                                           71 'Non-Exempt:'
+     O                       t2nagam       kb    87
+     O                       t2nanam       kb   104
+     O                       t2nsnam       kb   120
+     O                       t2ntnam       kb   148
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank          1
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata         1
+     O                                           19 'No data meets your'
+     O                                           39 'selection criteria.'

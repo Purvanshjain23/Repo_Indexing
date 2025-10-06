@@ -1,0 +1,266 @@
+// ?------------------------------------------------------------------------------------------------
+// ?Synon action diagram for PNIZXFR
+// ?Date: 14.08.2025 Time: 03:45:17
+// ?------------------------------------------------------------------------------------------------
+
+//?Execute user function
+
+//?S13534 RMC 8/3/18
+//?    Set pricing event that will create tms order trigger - if gross wt is
+//?E4119L 7/25/16 RMC recalc est gross weight when updating OD
+EXECUTE FUNCTION(UPS ReClc Wgt Sched   RT) TYPE(RTVOBJ) FILE(CABZREP)           AC1404314;
+PARAMETER(PAR.Company_Number);
+{
+ //?USER: Process Data record
+
+ EXECUTE FUNCTION(UPS ReClc Wgt Sched   RT) TYPE(RTVOBJ) FILE(OPBGWKP)           AC1425202;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(DB1.Unit_Weight);
+ {
+  //?USER: Process Data record
+
+  EXECUTE FUNCTION(RTV Hdr Sts,BillActTy RT) TYPE(RTVOBJ) FILE(OPBFCPP)           AC1946282;
+  PARAMETER(DB1.Company_Number);
+  PARAMETER(DB1.Order_Number);
+  PARAMETER(LCL.Header_Status);
+  PARAMETER(LCL.Billing_Activity_Type);
+  {
+   //?USER: Processing if Data record not found
+
+   // PGM.*Return code = CND.*Record does not exist
+   PGM.*Return_code = 'Y2U0005';
+
+   //?USER: Process Data record
+
+   MOVE *ALL (To: PAR From: DB1);
+
+  }
+
+  CASE;
+
+  // IF LCL.Billing Activity Type is Invoice or Transfer
+  IF LCL.Billing_Activity_Type = '1'/'4';
+
+  // PAR.Weight Scheduled = DB1.Quantity Scheduled * PAR.Unit Weight *Rounded
+  PAR.Weight_Scheduled = DB1.Quantity_Scheduled * PAR.Unit_Weight 'H';
+
+  // PAR.Weight Ordered = DB1.Quantity Ordered * PAR.Unit Weight *Rounded
+  PAR.Weight_Ordered = DB1.Quantity_Ordered * PAR.Unit_Weight 'H';
+
+  // LCL.Pricing Event Called From = CND.Unit Weight Change
+  LCL.Pricing_Event_Called_From = 'UWC';
+
+  //?Set to event that will create tms order trigger - if gross wt is changing
+  CASE;
+
+  // IF DB1.Weight Ordered NE PAR.Weight Ordered
+  IF DB1.Weight_Ordered <> PAR.Weight_Ordered;
+
+  // LCL.Pricing Event Called From = CND.Unit Weight Change-TMS
+  LCL.Pricing_Event_Called_From = 'UWT';
+
+  ENDIF;
+
+  EXECUTE FUNCTION(Chg Wgt Sched,Unit Wt CH) TYPE(CHGOBJ) FILE(OPBGWKP)           AC1425210;
+  PARAMETER(DB1.Company_Number);
+  PARAMETER(DB1.Order_Number);
+  PARAMETER(DB1.Order_Sequence_Number);
+  PARAMETER(DB1.Order_Secondary_Line_Seq);
+  PARAMETER(PAR.Weight_Ordered);
+  PARAMETER(PAR.Weight_Scheduled);
+  PARAMETER(PAR.Unit_Weight);
+  {
+   //?USER: Processing before Data update
+
+   //?Calc Gross Weight from tares...    copied from Dsp Gross Wgt function
+   DO;
+
+   // Call program Rtv Tare Weight        XF.
+   CALL PROGRAM(Rtv Tare Weight        XF) ('PBI3XFR');
+   PARAMETER(DB1.Company_Number);
+   PARAMETER(DB1.Item_Code);
+   PARAMETER(LCL.Misc_Tare_Weight);
+
+   //?WI464 get wt for order's pallet type
+   // Call program RTV Itm BxID & Tares  XF.
+   CALL PROGRAM(RTV Itm BxID & Tares  XF) ('PBI4XFR');
+   PARAMETER(DB1.Company_Number);
+   PARAMETER(DB1.Item_Code);
+   PARAMETER(LCL.Box_Weight);
+   PARAMETER(LCL.Number_Cases_On_A_Pallet);
+   PARAMETER(LCL.Pallet_Tare_Weight);
+   PARAMETER(LCL.Box_iD);
+   PARAMETER(DB1.OD_Pallet_Type);
+
+   // LCL.Total Tare USR = LCL.Box Weight + LCL.Misc Tare Weight
+   LCL.Total_Tare_USR = LCL.Box_Weight + LCL.Misc_Tare_Weight;
+
+   // Box + Misc Tare
+   LCL.Weight_1_1_U = ( LCL.Box_Weight + LCL.Misc_Tare_Weight ) * DB1.Quantity_Ordered 'H';
+
+   //?Pallet Tare
+   CASE;
+
+   // IF DB1.Palletize is yes
+   IF DB1.Palletize = 'Y';
+
+   CASE;
+
+   // IF LCL.Number Cases On A Pallet is GT Zero
+   IF LCL.Number_Cases_On_A_Pallet > *ZERO;
+
+   // Pallet Weight
+   LCL.Weight_1_2_U = ( DB1.Quantity_Ordered / LCL.Number_Cases_On_A_Pallet 'H' )
+   * LCL.Pallet_Tare_Weight 'H';
+
+   // IF *OTHERWISE
+   IF *OTHERWISE;
+
+   // LCL.Weight 1.2             .U = CON.*ZERO
+   LCL.Weight_1_2_U = *ZERO;
+
+   ENDIF;
+
+   //?Pallet Tare
+   // IF *OTHERWISE
+   IF *OTHERWISE;
+
+   // LCL.Weight 1.2             .U = CON.*ZERO
+   LCL.Weight_1_2_U = *ZERO;
+
+   ENDIF;
+
+   // Estimated Gross
+   DB1.OD_Estimated_Gross_Weight = ( DB1.Weight_Ordered + LCL.Weight_1_1_U )
+   + LCL.Weight_1_2_U;
+
+   //?E00196 RMC 8/24/12 chk pfs interface SHPTRN too
+   ENDDO;
+
+  }
+
+  EXECUTE FUNCTION(UPS ReClc Wgt Sched   RT) TYPE(RTVOBJ) FILE(PDKNCPP)           AC1404318;
+  PARAMETER(DB1.Company_Number);
+  PARAMETER(DB1.Order_Number);
+  PARAMETER(DB1.Order_Sequence_Number);
+  PARAMETER(PAR.Unit_Weight);
+  {
+   //?USER: Process Data record
+
+   // PAR.OD Weight Scheduled = DB1.OD Quantity Scheduled * PAR.Unit Weight *Rounded
+   PAR.OD_Weight_Scheduled = DB1.OD_Qty_Cnsmd_Pieces_Sched * PAR.Unit_Weight 'H';
+
+   EXECUTE FUNCTION(CHG Weight Scheduled   CH) TYPE(CHGOBJ) FILE(PDKNCPP)          AC1404319;
+   PARAMETER(DB1.Company_Number);
+   PARAMETER(DB1.Order_Number);
+   PARAMETER(DB1.Order_Sequence_Number);
+   PARAMETER(DB1.Order_Secondary_Line_Seq);
+   PARAMETER(DB1.OD_Production_Date);
+   PARAMETER(PAR.OD_Weight_Scheduled);
+   {
+    //?USER: Processing before Data update
+
+    EXECUTE FUNCTION(Set Record Stamp CHGOB IF) TYPE(EXCINTFUN)                     AC1283156;
+    PARAMETER(DB1.Job_Time);
+    PARAMETER(DB1.User_Id);
+    PARAMETER(DB1.Job_Name);
+    PARAMETER(DB1.Job_Date);
+    {
+     //?Execute internal function
+
+     // PAR.Job Time = JOB.*Job time
+     PAR.Job_Time = JOB.*Job_time;
+
+     // PAR.User Id = JOB.*USER
+     PAR.User_Id = JOB.*USER;
+
+     // PAR.Job Name = JOB.*PROGRAM
+     PAR.Job_Name = JOB.*PROGRAM;
+
+     // PAR.Job Date = JOB.*Job date
+     PAR.Job_Date = JOB.*Job_date;
+
+    }
+
+   }
+
+  }
+
+  //?****    PDD012   ********
+  // Call program EDT Post Open Orders   XF.
+  CALL PROGRAM(EDT Post Open Orders   XF) ('PDHRXFR');
+  PARAMETER(DB1.Company_Number);
+  PARAMETER(DB1.Order_Number);
+  PARAMETER(DB1.Ship_To_Customer);
+  PARAMETER(WRK.Unused_Parm_Value_USR);
+  PARAMETER(WRK.Order_Weight_Total);
+  PARAMETER(LCL.Pricing_Event_Called_From);
+
+  EXECUTE FUNCTION(RTV Load ID            RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1384375;
+  PARAMETER(DB1.Company_Number);
+  PARAMETER(DB1.Order_Number);
+  PARAMETER(WRK.Load_ID);
+  {
+   //?USER: Processing if Data record not found
+
+   MOVE *ALL (To: PAR From: CON);
+
+   //?USER: Process Data record
+
+   MOVE *ALL (To: PAR From: DB1);
+
+  }
+
+  //?RMC 02/05/07 do this only if there is a Load on the Order
+  CASE;
+
+  // IF WRK.Load ID is NE Blank
+  IF WRK.Load_ID <> *ZERO;
+
+  // Call program RTV UPD Ld Abs.Frt/Wgt XF.
+  CALL PROGRAM(RTV UPD Ld Abs.Frt/Wgt XF) ('PDE0XFR');
+  PARAMETER(WRK.Load_ID);
+  PARAMETER(WRK.Total_Load_Order_Weight);
+  PARAMETER(WRK.Total_Freight);
+
+  ENDIF;
+
+  ENDIF;
+
+ }
+
+ EXECUTE FUNCTION(Chg Unit Wgt Chg Sts  CH) TYPE(CHGOBJ) FILE(CABZREP)           AC1404316;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER('NO');
+ {
+  //?USER: Processing before Data update
+
+  EXECUTE FUNCTION(Set Record Stamp CHGOB IF) TYPE(EXCINTFUN)                     AC1283156;
+  PARAMETER(DB1.Job_Time);
+  PARAMETER(DB1.User_Id);
+  PARAMETER(DB1.Job_Name);
+  PARAMETER(DB1.Job_Date);
+  {
+   //?Execute internal function
+
+   // PAR.Job Time = JOB.*Job time
+   PAR.Job_Time = JOB.*Job_time;
+
+   // PAR.User Id = JOB.*USER
+   PAR.User_Id = JOB.*USER;
+
+   // PAR.Job Name = JOB.*PROGRAM
+   PAR.Job_Name = JOB.*PROGRAM;
+
+   // PAR.Job Date = JOB.*Job date
+   PAR.Job_Date = JOB.*Job_date;
+
+  }
+
+ }
+
+}
+
+

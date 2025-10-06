@@ -1,0 +1,920 @@
+     H*****************************************************************
+     H*
+     H*  Program number:  M3APINT
+     H*  Program name:    Read hog voucher internal producer vouchers- crt gl interface entries
+     H*  Programmer:      Rose Centonze
+     H*  Date created:    09/15/2015
+     H*  Program purpose: This program will read the Hog Voucher Header/Details per a document id
+     H*                   and for Internal vouchers (ie.SEABOA) create the G/L Interface Journal
+     H*                   Entries for the 350 and 360 accounts -- it creates both sides of the
+     H*                   voucher so they are balanced. The clearing account 1910 is the contra acct
+      *
+     H*
+     H*                   The user will need to go into M3 and post
+     H*                   this batch of journal entries.
+     H*   JDE F0011 is the batch header -->  write M3 PLB9CPP
+     H*   JDE F9011 is the batch detail -->  write M3 PLCACPP
+     H***
+     H*      Cross divisional entries will post to DIM1 = 1910  DIM2 = facility in the division
+     H***    of the voucher that they are posted to, SO that each co/div/voucher is balanced.
+     H*      co  div  DIM1  DIM2  AMT
+     H*      100 500  6030  501   22080.24                                     360.6030.110
+     H*      100 500  3610  501   -2000.00    nppc                             360.3610
+     H*      100 500  1910  109  -20080.24    NEW  was internally done by JDE  360.1910.350
+     H*
+     H*      100 300  5021  301  -22080.24                                JDE  350.5021
+     H*      100 300  1910  109   22080.24    NEW  was internally done by JDE  350.1910.360
+     H*****************************************************************
+     H*  RMC 1/10/2017  T8163  Only create 350 entries if 350 is Live or Parallel
+     H*                          scan: PINTER
+     H*  RMC 3/31/2017  T8163  Upd hog voucher header and detail with Run Number:  M3SERIES9
+     H*  RMC 5/04/2017  T8163  Upd th with pgm pktkxfr
+     H*  RMC 5/18/17    T8163 CHG INT/EXT TO '0' INSTEAD OF '1'
+     H*  ISE 11/04/2020 H16853 Increased Buy Order Number field length from 5 to 7.
+     H*****************************************************************
+     F*
+     FPKBKCPL0  UF   E           K DISK
+      * RTV : Hog Voucher Header        Retrieval index     (format: @bkcpej)
+      *
+     FPKBLCPL0  UF   E           K DISK
+      * RTV : Hog Voucher Detail        Retrieval index   (format:  @blcpei)
+      *
+     FPKCDCPLF  IF   E           K DISK
+     F* HPE TATTOO D/A FILE             KEY: CO#/BUYORDER#/LOAD#/TATOO#/DA Code
+      *
+     FPKBBREL0  IF   E           K DISK
+      * RTV : Deduction/Addition        Retrieval index
+     FPDKMREL1  IF   E           K DISK
+     F* Company Values File            KEY: Company/Company Value code
+     F*OML300    IF   E           K DISK
+     F* OM Workfile            (Key: Co#, Document #, Account ID, subledger, subledger type)
+     F*
+     Fplb8rel3  if a e           k disk
+      *   G/L JDE to M3 Cross Ref   K= b8aht1, b8qncd, b8qocd
+     Fplb8rel5  if a e           k disk
+      *   G/L JDE to M3 Cross Ref   K= B8HONB  b8qmcd                 (co/cgl code)
+      *
+     Fplb9cpp   uf a e             disk
+      *   M3 GL Header Staging file
+      *
+     Fplcacpp   uf a e             disk
+      *   M3 GL Detail Staging file
+      *
+     F*
+      * Workfields
+      *
+     d*wkacono         s                   like(glco)
+     d wkuser          s                   like(b9aavn)
+     d wkdescb         s             40    inz('Base')
+     d wkdescl         s             40    inz('Live Intercompany')
+     d wkdesci         s             40    inz('Intercompany Sales Offset')
+     d wkdescm         s             40    inz('Market Hogs-Interco Sales')
+     d wkdesco         s             40    inz('Intercompany Hog Purch Offset')
+     d wktemp          s             15    inz('GL_HPEUPL')
+     d wkamt           s             15s 2
+     d dsamt           s             17
+     D*
+     D***  RETRIEVE USER I.D. AND WORKSTATION I.D.
+     D*
+     D                SDS
+     D  PGMSGQ           *PROC
+     D  WRKSTN               244    253
+     D  USRNAM               254    263
+      *
+      * Work fields for date manipulation
+      *
+     D wkyymmdd        s              6  0
+     d wksyssyndt      s              7  0
+     d wkhhmmss        s                   like(caabtm)
+      *
+     d wktime          s             12  0
+     D wkcymdiso       s               d   datfmt(*iso)
+      *
+      * Parm fields
+      *
+     D*
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+      * Workfields
+      *WRITE
+     D*
+     D***  ACTUAL SHIP DATE FROM WORKFILE  YYMMDD
+     D*
+     D                 DS
+     D  GLYMD                  1      7  0
+     D  YYGL                   2      3  0
+     D  MMGL                   4      5  0
+     D  DDGL                   6      7  0
+     D*
+     D***  G/L DATE MMDDYY
+     D*
+     D                 DS
+     D  GLMDY                  1      6  0
+     D  GLMM                   1      2  0
+     D  GLDD                   3      4  0
+     D  GLYY                   5      6  0
+     D*
+     D*
+     D***  m3 key value
+     D*
+     D                 DS
+     D  m3keyvalue             1     15
+     D  m3keydt                1      8
+     D  m3series               9     12
+      *
+      *---------------------------------------------------------------
+      *
+     C*
+     C*
+     C/EJECT
+     C*----------------------------------------------------------------
+     C* MAIN PROCESSING LOOP
+     C*----------------------------------------------------------------
+     C*   Read Hog Voucher Header ...
+     C*
+      * Define keylist
+     C     KRSSA         KLIST
+     C                   KFLD                    WQSA01            3 0          VCH Company num
+     C                   KFLD                    WQSA02            5 0          VCH Batch Numbe
+      *
+     C                   z-add     0             svlwnb                         break fields:batch
+     C                   z-add     0             svg9nb                                     :hdr#
+      * Setup key
+     C                   Z-ADD     P1HNNB        WQSA01                          VCH Company num
+     C                   Z-ADD     P1LWNB        WQSA02                          VCH Batch Numbe
+      * Establish starting position
+     C     KRSSA         SETLL     @BKCPEJ                                       *
+     C     *IN90         DOuEQ     '1'                                           not eof
+     C     KRSSA         READE     @BKCPEJ                                90*
+      * Data record not found
+     C   90              MOVEL     'PRK0099'     W0RTN             7
+      *
+     C*    *IN90         ifeq      '0'                                           not eof
+     C*    bkcsst        ifeq      'I'                                           internal only
+     C*
+      * USER: Process Data record
+     c***********
+     C*  BREAK -  When batch header # changes
+     C*     1.   Write 360.1910 for the last batch hdr #  as a + amt
+     C*     2.   Write new batch header
+     c***********
+     C*
+     C     svlwnb        ifne      bklwnb                                       batch # break
+     C     svg9nb        orne      bkg9nb                                       or  batch hdr#
+     C     *in90         oreq      '1'                                          or  eof
+     C*
+     C*  For the Previous batch header #
+     c*   Write the Total detail - rcd which offets the other details to make a balanced vchr
+     c*        to the 360.1910.350 M3 equivalent
+     c                   if        btchdramt <> 0                               batch hdr# amt
+     c                   exsr      $contrabtchr
+     C                   Endif                                                  batch # break
+     C*
+     C* Then, WRITE 350 Rcd TO M3 GL Interface Header for the batch (1 header)
+     c*         1.   detail total amt written to 1910 above   +   350.1910.36  m3 equiv
+     c*         2.   detail total amt written to 1910 above   -   350.5021     m3 equiv
+     C* ------------------------------
+     c                   if        batchamt  <> 0                               batch amount
+     c                   if        pinter    =  'Y'
+     c                   exsr      $contrabatch                                 batch contra 350
+     C                   Endif                                                  batch # break
+     C                   Z-ADD     0             batchamt         17 2
+     C                   Endif                                                  batch # break
+     C*
+     c* WRITE RECORD TO  M3 GL Interface Header for every header -- unique key value
+     C                   if        *In90 = '0'    and bkcsst = 'I'              not eof & = Internal
+     c                   exsr      $newbreak                                    new key
+     c                   exsr      $getbatchno                                  new run number
+     C                   exsr      $writebatch                                  write header M3
+     C* Update hog voucher header
+     c                   z-add     m3seriez      bklynb                         ap voucher
+     c                   update    @bkcpej
+     C                   Endif                                                  batch # break
+     C*
+     C                   Endif                                                  batch # break or eof
+     C* ------------------------------
+     C*   Write the details BASE  + 360.6030.110  m3 equiv
+     C*   Write the details NPPC  - 360.3610      m3 equiv
+     C* ------------------------------
+     C*
+     C                   if        *In90 = '0'    and bkcsst = 'I'              not eof & = Internal
+     C                   EXSR      $WRITE
+     C                   ENDIF                                                   eof
+     C*
+     C*
+     C                   ENDdo                                                   doueq
+     C*
+     C*
+     C                   MOVE      *ON           *INLR
+     C/EJECT
+     C***************************************************************
+     C* SUBROUTINE SECTION
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C*EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE SUBROUTINE -- read hog voucher detail and write plcacpp detail
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $WRITE        BEGSR
+     C                   z-add     bkcipr        GLAA             17 2             base amt
+     C*
+     c     keybl         klist
+     c                   kfld                    BkHNNB                            co
+     c                   kfld                    BkLWNB                            batch
+     c                   kfld                    BkG9NB                            header
+     C*
+     C*******************************************************************************
+     C**** Set up M3 GL Interface Line record -- PLCACPP
+     C*******************************************************************************
+     C* Format sample for PARM field:
+     C* I12015072411       62012030    621     970
+     C* 00000000000000000USD                 00000013736271520150723  HPE Intercompany Hog Purchase
+     C* I12015072411       62012030    621     970
+     C* 00000000000000000USD                 -0000013736271520150723  HPE Intercompany Hog Purchase
+     C***
+     c                   movel     m3cono        cawja1
+     c                   movel     m3divi        caqxcd
+     c                   movel     m3keyvalue    caait1                         key: yyyymmddnnnn
+     C*
+      *
+     C*
+     C*  CONVERT gl date  FROM YYMMDD TO MMDDYY
+     c*           USE gl date FOR ENTRY DATE??
+     C*
+     C                   Z-ADD     bka4dt        GLYMD
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    bka4DT
+     C                   PARM                    WKASDT            8            yyyymmdd
+      *
+      *  M3  Set values in parameter field
+      *
+     c                   setoff                                       77
+     c     keybl         setll     @blcpei
+     c     *in77         doweq     '0'
+     c     keybl         reade     @blcpei                                77
+     c     *in77         ifeq      '0'
+     C**** Translate JDE cost center/object/sub to M3 dimensions.
+     C                   move      bkhnnb        svmcu            12
+     C                   movel     6030          svobj             6
+     C                   movel     110           svsub             8
+     C                   EXSR      $getdim
+     C** Carcass or Live?
+     c*    bli6st        ifeq      'C'
+     C*                  z-add     blamva        GLAA             17 2           net amt
+     c*                  else
+     C                   z-add     blakva        GLAA             17 2           gross amt
+     c*                  endif
+      *
+     C                   eval      dsamt = %triml(%editc(glaa:'Q'))
+     C                   move      *blanks       dsqty            17            quantity
+      *
+     C                   movel(p)  wkdescb       dsdescr          40            description-Base
+      *
+     C                   ADD       1             CAWKA1                         LINE NUMBER
+     C                   movel(p)  wkuser        caaavn                         User
+     C                   move      wkasdt        caaedx                         M3 Entry Date
+     C                   move      wksyssyndt    caabdt                         date added
+     C                   move      wkhhmmss      caabtm                         time added
+     C                   MOVEL     svUSRNAM      caabvn                         USER ID
+     C                   movel     sdpgm         caagvn                         program updated
+     C                   move      *blanks       dsdim           200
+     C                   eval      dsdim = 'I1'                 +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     '1       '  +                         group nbr
+     C                                     m3divi      +                         division
+     C***********  5-18-17                 '1'         +                         ext/int
+     C                                     '0'         +                         ext/int
+     C                                            dsdim1  +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '             ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             wkasdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter
+      *
+     C*
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+      *
+      *     Update hog voucher detail with m3series9   PKBLCPP
+     c                   z-add     m3seriez      blwsa1                        erp
+     c                   z-add     wksyssyndt    blhfdt
+     c                   z-add     wkhhmmss      blb2tm
+     C                   update    @blcpei                                      M3 pkblcpp dtl
+     C*---------------------------------
+     C*   UPDATE TATTOO HEADER FILE                                         added 5/4/17
+     C*---------------------------------
+     C*
+     C                   CALL      'PKTKXFR'
+     C                   PARM                    RETRN
+     C                   PARM      blhnnb        CO#               3 0
+16853C*                  PARM      BLBNNB        BUYORD            5 0
+16853C                   PARM      BLBNNB        BUYORD            7 0
+     C                   PARM      BLBONB        LOAD              5 0
+     C                   PARM      BLCVNB        TATOO             5 0
+     C                   PARM      m3seriez      VOUCH             8 0
+
+     C*
+     C*  ACCUMULATE AMOUNTS FOR BATCH HEADER # to write to the 1910 rcd sales offset
+     C*       net amount
+     C                   ADD       blamva        btchdramt        15 2          batchhdr#amt tot
+     C*
+     C*  Write d/a detail rcds for each bo/ld/tattoo in hog voucher dtl
+     C*
+     C                   EXSR      $WRITEDA                                     write d/a dtls
+     c                   endif
+     c                   enddo
+     c*
+     C                   endsr
+     C*EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE Deduction/Additions SUBROUTINE
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $WRITEDA      BEGSR
+     C     KEYTA         KLIST                                                     PKCDCPL1
+     C                   KFLD                    blhmnb                            company
+     C                   KFLD                    BLBNNB                            BUYORDER
+     C                   KFLD                    BLBONB                            LOAD
+     C                   KFLD                    BLCVNB                            TATTOO
+     C     KEYb8         KLIST                                                     PKCDCPL1
+     C                   KFLD                    Blhmnb                            company
+     C                   KFLD                    bbf7tx                            cgl code
+     C*
+     c                   move      '0'           *in52
+     C*
+     C*******************************************************************************
+     C**** Set up M3 GL Interface Line record -- PLCACPP
+     C*******************************************************************************
+     C* Format sample for PARM field:
+     C* I12015072411       62012030    621     970
+     C* 00000000000000000USD                 00000013736271520150723  HPE Intercompany Hog Purchase
+     C* I12015072411       62012030    621     970
+     C* 00000000000000000USD                 -0000013736271520150723  HPE Intercompany Hog Purchase
+     C***
+     C                   MOVE      'Y'           FIRSTda           1
+     C     keyta         SETLL     @CDCPPU
+     C     *IN52         DOUEQ     *ON
+     C     KEYTA         READE     @CDCPPU                                52
+     C**    *IN52         ifeq      *OFF                                         HAVE RECORD
+     c**   cda0va        andne     0
+     C**
+     C     *IN52         ifeq      *OFF                                         HAVE RECORD
+     C     FIRSTda       andeq     'Y'                                           First deduction ??
+     C                   MOVE      CDBQCD        SVBQCD            5            D/A Code
+     C                   MOVE      CDPEST        SVPEST            1           Expense paid by
+     C                   MOVE      CDPFST        SVPFST            1           Expense Type
+     C                   MOVE      CDDPCD        SVDPCD            8           GL Code
+     C                   MOVE      CDE3CD        SVE3CD            8           GL Contra code
+     C                   MOVE      'N'           FIRSTda           1
+     C                   ENDIF                                                 First deduction ??
+     C*
+     C* Break in D/A code  or EOF - write record
+     C*
+     C     cdbqcd        ifne      svbqcd                                       break
+     C     *IN52         oreq      *ON                                          or  EOF
+     c     accamt        ifne      0
+     c                   movel     m3cono        cawja1
+     c                   movel     m3divi        caqxcd
+     c                   movel     m3keyvalue    caait1                         key: yyyymmddnnnn
+     C                   ADD       1             CAWKA1                         LINE NUMBER
+     C*
+     C**** Translate cgl code  to M3 dimensions.                 plb8rel5
+     C*
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     c     svbqcd        chain     @BBRED5                            55
+     c     *in55         ifeq      '0'
+     c     keyb8         chain     @B8REVA                            56        plb8rel5 xref
+     C                   if        *in56 = *off
+     C                   move      b8qpcd        dsdim1
+     C                   move      b8qqcd        dsdim2
+     C                   move      b8qrcd        dsdim3
+     C                   move      b8qscd        dsdim4
+     C                   move      b8qtcd        dsdim5
+     C                   move      b8qucd        dsdim6
+     C                   move      b8qvcd        dsdim7
+     C                   endif
+     c                   endif
+      *
+      *  M3  Set values in parameter field
+      *
+     C* (use date that we have already )
+     c                   move      accamt        glaa
+     C                   eval      dsamt = %triml(%editc(glaa:'Q'))
+     C                   move      *blanks       dsqty            17            quantity
+      *
+      *
+     C                   movel(p)  bbbltx        dsdescr          40            d/a desc
+      *
+     C                   movel(p)  wkuser        caaavn                         User
+     C                   move      wkasdt        caaedx                         M3 Entry Date
+     C                   move      wksyssyndt    caabdt                         date added
+     C                   move      wkhhmmss      caabtm                         time added
+     C                   MOVEL     svUSRNAM      caabvn                         USER ID
+     C                   movel     sdpgm         caagvn                         program updated
+     C                   move      *blanks       dsdim           200
+     C                   eval      dsdim = 'I1'                 +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     '1       '  +                         group nbr
+     C                                     m3divi      +                         division
+     C                                     '1'         +                         ext/int
+     C                                            dsdim1  +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '             ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             wkasdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter
+      *
+      *
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+     C*
+     C                   MOVE      CDBQCD        SVBQCD                        D/A Code
+     C                   MOVE      CDPEST        SVPEST                        Expense paid by
+     C                   MOVE      CDPFST        SVPFST                        Expense Type
+     C                   MOVE      CDDPCD        SVDPCD                        GL Code
+     C                   MOVE      cDE3CD        SVE3CD                        GL Contra code
+     C                   Z-ADD     0             ACCAMT           15 2         Accumulated amt
+     C                   ENDIF                                                 accamt<>0
+     C                   ENDIF                                                 D/A Code is diff
+     C*
+     C*
+     C*  Accumulate D/A Amount
+     C*
+     C     *IN52         ifeq      *OFF                                         HAVE RECORD
+     c                   if        cdjbst='+'
+     C                   z-add     cda0va        wkamt                          d/a amt
+     c                   else
+     c     cda0va        mult      -1            wkamt
+     c                   endif
+     c                   add       wkamt         accamt
+     c                   endif
+     C*
+     c                   enddo                                                 eof
+      *
+     C                   endsr
+     C*
+     C*EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE CONTRA Batch Header line Record to 360.1910.350 account
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $contrabtchr  BEGSR
+     C                   add       btchdramt     batchamt                       batch amt
+     C                   z-sub     btchdramt     glaa                           reverse sign
+     C                   z-add     0             btchdramt                      reset to 0
+     c                   movel     m3cono        cawja1
+     c                   movel     m3divi        caqxcd
+     c                   movel     m3keyvalue    caait1                         key: yyyymmddnnnn
+     C                   ADD       1             CAWKA1                         LINE NUMBER
+     C*
+     C**** Translate JDE cost center/object/sub to M3 dimensions.
+     C                   move      bkhnnb        svmcu                         360.1910.350
+     C                   movel     '1910'        svobj
+     C                   movel     '350'         svsub
+     C                   EXSR      $getdim
+      *
+     C*
+     C*  CONVERT gl date DATE FROM YYMMDD TO MMDDYY
+     C*
+     C                   Z-ADD     SVASDT        GLYMD
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    SVASDT
+     C                   PARM                    WKASDT            8            yyyymmdd
+      *
+      *  M3  Set values in parameter field
+      *
+     C                   eval      dsamt = %triml(%editc(glaa:'Q'))
+     C*                  z-add     glu           wkqty                          quantity UNITS
+     C*                  move      wkqty         dsqty                          quantity
+     C*                  eval      dsqty = %triml(%editc(glu:'Z'))              quantity UNITS
+     C                   move      *blanks       dsqty            17            quantity
+      *
+     c*                  if        b8hgss='I'
+     c*                  if        dsdim5= *blanks
+     c*                  move      omcust        work8             8
+     c*                  eval      dsdim5 =  %triml(work8)                      move cust to DIM5
+     c*                  endif
+     c*                  endif
+      *
+     C                   movel(p)  wkdesco       dsdescr          40            hog purch offset
+      *
+     C                   movel(p)  wkuser        caaavn                         User
+     C                   move      wkasdt        caaedx                         M3 Entry Date
+     C                   move      wksyssyndt    caabdt                         date added
+     C                   move      wkhhmmss      caabtm                         time added
+     C                   MOVEL     svUSRNAM      caabvn                         USER ID
+     C                   movel     sdpgm         caagvn                         program updated
+     C*                  if        svsbl <> *blanks                             have subledger
+     C*                  movel     svsbl         dsdim7                         subledger DIM7
+     c*                  evalr     dsdim7=%subst(svsbl:%check('0':svsbl))       left adj, remv 00-
+     C*                  eval      dsdim7= %triml(dsdim7)
+     c*                  endif
+     C                   move      *blanks       dsdim           200
+     C                   eval      dsdim = 'I1'                 +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     '1       '  +                         group nbr
+     C                                     m3divi      +                         division
+     C                                     '1'         +                         ext/int
+     C                                            dsdim1  +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '             ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             wkasdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter
+      *
+      *
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+      *
+     c                   endsr                                                  end $contra
+     C*EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE CONTRA records to div: 350.1910.360 +   batch header # amt total
+     C*                                350.5021     -   batch header # amt total
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $contrabatch  BEGSR
+     C*
+     C* Write Batch header for 350 batch
+     C*
+     c                   exsr      $getbatchno                                  get new m3 runno
+      *
+      * RETRIEVE M3 COMPANY AND DIVISION EQUIVS
+      *
+     c                   z-add     350           co350             3 0
+     C                   CALL      'PDHGXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    co350                          COMP
+     C                   PARM      'M3COMPANY '  KMV8CD                         DESC
+     C                   PARM                    KMM8NB                         VALUE
+     c                   z-add     kmm8nb        m3cono
+     C                   CALL      'POMTXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    co350
+     C                   PARM      'M3DIVISION'  KMV8CD                         DESC
+     C                   PARM                    kmbxtx                         DIVISION
+     c                   movel     kmbxtx        m3divi
+     C*
+     C**   m3keyvalue    IFNE      *blanks                                     keyvalue not blank
+     C                   z-add     m3cono        b9wja1                         company
+     C                   movel     m3divi        b9qxcd                         division
+     c                   movel     m3keyvalue    b9ait1                         key: yyyymmddnnnn
+     C                   movel(p)  wktemp        b9ajt1                         interface template
+     C                   movel(p)  wkdesci       b9akt1                         inter co offset
+     C                   movel(p)  wkuser        b9abvn                         User
+     C                   move      wkccyymmdd    b9aedx                         M3 Entry Date
+     C                   move      wksyssyndt    b9abdt                         date added
+     C                   move      wkhhmmss      b9abtm                         time added
+     C                   move      '0'           b9g5ss                         erp process sts
+     C                   movel     sdpgm         b9agvn                         program updated
+      *
+     C                   write     @b9cpuj
+     C**                 ENDIF                                                  BATCH# NOT 0
+     C*
+     C                   z-sub     batchamt      GLAA                           reverse sign to +
+     c                   movel     m3cono        cawja1
+     c                   movel     m3divi        caqxcd
+     c                   movel     m3keyvalue    caait1                         key: yyyymmddnnnn
+     C                   ADD       1             CAWKA1                         LINE NUMBER
+     C*
+     C**** Translate JDE cost center/object/sub to M3 dimensions.
+     C                   move      '350'         svmcu                         350.1910.360
+     C                   movel     '1910'        svobj
+     C                   movel     '360'         svsub
+     C                   EXSR      $getdim
+      *
+     C*
+     C*  CONVERT gl date DATE FROM YYMMDD TO MMDDYY
+     C*
+     C                   Z-ADD     SVASDT        GLYMD
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    SVASDT
+     C                   PARM                    WKASDT            8            yyyymmdd
+      *
+      *  M3  Set values in parameter field
+      *
+     C                   eval      dsamt = %triml(%editc(glaa:'Q'))
+     C*                  z-add     glu           wkqty                          quantity UNITS
+     C                   move      *blanks       dsqty            17            quantity
+     C*                  eval      dsqty = %triml(%editc(glu:'Z'))              quantity UNITS
+      *
+     c*                  if        b8hgss='I'
+     c*                  if        dsdim5= *blanks
+     c*                  move      omcust        work8             8
+     c*                  eval      dsdim5 =  %triml(work8)                      move cust to DIM5
+     c*                  endif
+     c*                  endif
+      *
+     C                   movel(p)  wkdescm       dsdescr          40            description-Plant
+      *
+     C                   movel(p)  wkuser        caaavn                         User
+     C                   move      wkasdt        caaedx                         M3 Entry Date
+     C                   move      wksyssyndt    caabdt                         date added
+     C                   move      wkhhmmss      caabtm                         time added
+     C                   MOVEL     svUSRNAM      caabvn                         USER ID
+     C                   movel     sdpgm         caagvn                         program updated
+     C*                  if        svsbl <> *blanks                             have subledger
+     C*                  movel     svsbl         dsdim7                         subledger DIM7
+     c*                  evalr     dsdim7=%subst(svsbl:%check('0':svsbl))       left adj, remv 00-
+     C*                  eval      dsdim7= %triml(dsdim7)
+     c*                  endif
+     C                   move      *blanks       dsdim           200
+     C                   eval      dsdim = 'I1'                 +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     '1       '  +                         group nbr
+     C                                     m3divi      +                         division
+     C                                     '1'         +                         ext/int
+     C                                            dsdim1  +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '             ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             wkasdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter
+      *
+      *
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+     ******************************************************************************
+     C**** Write credit side of 350 to 350.5021
+     ******************************************************************************
+      *
+     C**** Translate JDE cost center/object/sub to M3 dimensions.
+     C                   z-sub     glaa          GLAA                           reverse sign to -
+     C                   move      '350'         svmcu                         350.5021.
+     C                   movel     '5021'        svobj
+     C                   movel     '   '         svsub
+     C                   EXSR      $getdim
+      *
+     C                   ADD       1             CAWKA1                         LINE NUMBER
+     C                   eval      dsamt = %triml(%editc(glaa:'Q'))
+     C                   movel(p)  wkdescm       dsdescr          40            description-Market
+     C                   move      *blanks       dsdim           200
+     C                   eval      dsdim = 'I1'                 +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     '1       '  +                         group nbr
+     C                                     m3divi      +                         division
+     C                                     '1'         +                         ext/int
+     C                                            dsdim1  +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '             ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             wkasdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter
+      *
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+     c                   endsr                                                  end $contrabtchr
+      *---------------------------------------------------------------
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE Batch Header Record     M3 PLB9CPP
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $writebatch   BEGSR
+     C* reset batch fields
+     C                   z-add     0             btchdramt
+     c*                  z-add     0             batndo
+     C*
+     C     m3keyvalue    IFNE      *blanks                                     keyvalue not blank
+     C                   z-add     m3cono        b9wja1                         company
+     C                   movel     m3divi        b9qxcd                         division
+     c                   movel     m3keyvalue    b9ait1                         key: yyyymmddnnnn
+     C                   movel(p)  wktemp        b9ajt1                         interface template
+     C                   movel(p)  wkdescm       b9akt1                         Description
+     C                   movel(p)  wkuser        b9abvn                         User
+     C                   move      wkccyymmdd    b9aedx                         M3 Entry Date
+     C                   move      wksyssyndt    b9abdt                         date added
+     C                   move      wkhhmmss      b9abtm                         time added
+     C                   move      '0'           b9g5ss                         erp process sts
+     C                   movel     sdpgm         b9agvn                         program updated
+      *
+     C                   write     @b9cpuj
+     C                   ENDIF                                                  BATCH# NOT 0
+     C                   ENDSR
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   Break Logic - setup save fields, re-set accumulators
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $newbreak     BEGSR
+     C*
+     C                   MOVE      bkcsst        SVcsst            2            payee type
+     C                   Z-ADD     bka4dt        SVASDT            7 0          gl date
+     C                   Z-ADD     bklwnb        svlwnb            5 0          batch
+     C                   Z-ADD     bkg9nb        svg9nb            5 0          batch header#
+     C                   movel     bkabvn        svusrnam         10
+     C*
+     C                   Z-ADD     bkhnnb        svco              3 0
+     C*
+     C*                  Z-ADD     0             ACTamt
+     C*                  Z-ADD     0             ACTunit
+      *
+      * RETRIEVE M3 COMPANY AND DIVISION EQUIVS
+      *
+     C                   CALL      'PDHGXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    SVCO                           COMP
+     C                   PARM      'M3COMPANY '  KMV8CD           10            DESC
+     C                   PARM                    KMM8NB           15 5          VALUE
+     c                   z-add     kmm8nb        m3cono            3 0
+     C                   CALL      'POMTXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    SVCO
+     C                   PARM      'M3DIVISION'  KMV8CD           10            DESC
+     C                   PARM                    kmbxtx           40            DIVISION
+     c                   movel     kmbxtx        m3divi            3
+     C*
+     C                   ENDSR
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   get M3 DIM EQUIVALENT FOR JDE COST CENTER/OBJ/SUB
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $getdim       BEGSR
+     C*
+      *  Translate JDE cost center/object/sub to M3 dimensions.
+      *      ....take cc/obj/sub and look up in table for new.....
+      *
+     C     key02         klist
+     C                   kfld                    svmcu
+     C                   kfld                    svobj
+     C                   kfld                    svsub
+      *
+     C     key02         chain     plb8rel3                           92
+      *
+     C                   if        *in92 = *off
+     C                   move      b8qpcd        dsdim1            8
+     C                   move      b8qqcd        dsdim2            8
+     C                   move      b8qrcd        dsdim3            8
+     C                   move      b8qscd        dsdim4            8
+     C                   move      b8qtcd        dsdim5            8
+     C                   move      b8qucd        dsdim6            8
+     C                   move      b8qvcd        dsdim7            8
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     C                   endif
+      *
+     C                   ENDSR
+     C*
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   get JDE Batch #'s
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $getbatchno   BEGSR
+     C*
+      * CALL PGM TO GENERATE NEXT AVAILABLE BATCH # FROM M3
+      *    get next voucher number from M3 voucher number series
+     C                   call      'PLW8XFR'
+     C                   PARM                    RTNCDE            7
+     C                   PARM      'ARS'         P1Q4CD            3            vchr nbr series
+     C                   PARM                    P1WVA1            8 0          NEXT NUMBER
+     C                   Z-ADD     P1WVA1        m3seriez          4 0          BATCH NUM
+     C                   move      m3seriez      m3series          4            BATCH NUM
+     C                   movel     m3series      m3series9         9            for Run Number
+     C*   Format M3 Key Value for this batch:   yyyymmmddnnnn where nnnn is the m3series #
+     C*    example:  201506220001,  then next key for that day would be 201506220002 ,...
+     c*
+     c*                  movel     m3keydt       m3keyvalue                     key value
+     c*                  move      m3series      m3keyvalue       15
+     C                   Z-ADD     SVASDT        GLYMD
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    SVASDT
+     C                   PARM                    WKASDT            8            yyyymmdd
+     c                   movel     wkccyymmdd    m3keydt                        always jobdate
+      *
+     C                   z-add     0             cawka1                         line number
+     C                   ENDSR
+     C*
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   Initial Subroutine - -
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     *inzsr        BEGSR
+     C*
+     c                   movel     'M3APINT   '  SDPGM            10
+     C*----------------------------------------------------------------
+     C*
+     C* KEY USED FOR BATCH HEADER IN JDE
+     C*
+     C     *ENTRY        PLIST
+     C                   PARM                    RETRN             7
+     C                   PARM                    ACO               3 0       company
+     C                   PARM                    p1lwnb            5 0       VCH Batch Numbe
+     C*
+     C                   MOVE      *ZEROS        WKCO              5
+     C                   MOVE      ACO           WKCO
+     C                   MOVE      ACO           p1hnnb            3 0
+      *
+      *
+      * Put system date into an 8,0 workfield for updating the change date
+      *
+     C     *mdy          move      udate         wkcymdiso
+     C                   move      wkcymdiso     wkccyymmdd        8 0
+      *
+      * Put system date into an 7,0 workfield for updating the synon tables
+      *
+     C                   z-add     wkccyymmdd    wkyymmdd
+     C                   if        wkccyymmdd >= 20000000
+     C     wkyymmdd      add       1000000       wksyssyndt
+     C                   else
+     C                   z-add     wkyymmdd      wksyssyndt
+     C                   endif
+      *
+      * Save the system time for populating fields.
+      *
+     C                   time                    wkhhmmss
+      *
+     C*
+     C* KEY USED FOR Company Values file
+     C*
+     C     KEYVAL        KLIST                                                  PDKMREL1
+     C                   KFLD                    CO
+     C                   KFLD                    WKVAL            10
+      *
+      * If company 350 is Live with m3 or is parallel, then create contraBatch entries
+      *
+     C                   Z-ADD     350           CO                3 0
+     C                   MOVEL     'M3HPEVCH'    WKVAL
+     C     KEYVAL        CHAIN     PDKMREL1                           90
+     C     *IN90         IFEQ      *OFF                                         90 = OFF
+     C                   MOVEL     KMBXTX        PINTER            1
+     C                   ELSE
+     C                   MOVEL     'N'           PINTER                         DO ALL NORMALLY
+     C                   ENDIF
+     C     Pinter        ifeq      'Y'
+     c     pinter        oreq      'P'
+     c                   move      'Y'           pinter
+     c                   endif
+     C*
+     C                   endsr

@@ -1,0 +1,3264 @@
+<<<<<<< HEAD
+      *****************************************************************
+      *
+      *  Program number:  M3ARMSCRB-- copied from m3armsc    --   for RB ONLY!
+      *  Program name:    CREATE J.E.s  IN M3 Stage Tables for FOR HOG A/R MISC ENTRIES
+      *  Programmer:      Rose Centonze
+      *  Date created:    03/12/17
+      *
+      *  Program purpose: CREATE J.E.s FOR A/R MISC ADJUSTMENTS.
+      *                   COMPANY WILL BE PASSED INTO THIS PROGRAM FOR
+      *                   FOR PROCESSING.  A SUMMARY RECORD FOR EACH
+      *                   ACCOUNT I.D. WILL BE WRITTEN AS UNPOSTED TO
+      *                   JDE.
+      *
+      *                   ONLY PROCESS RECORDS WITH A STATUS OF 'A'.
+      *                   THESE ARE SELECTED IN THE LOGICAL ARBECPL7.
+      *                   ONLY PROCESS RECORDS WITH BLANKS IN THE
+      *                   ORIGINATING PROGRAM FIELD.
+      *
+      *                   WILL UPDATE THE A/R DETAIL FILE WITH THE
+      *                   BATCH NUMBER, POST DATE AND A STATUS CODE OF E
+      *                   A 'P'. (PROCESSED)
+      *
+      *                   THE USER MUST THEN GO INTO M3  TO ACTUALLY
+      *                   POST THE BATCH OF JOURNAL ENTRIES.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      * 3/04/16   RMC  change interface template from AR_MSCUPL to GL_MSCUPL
+      * 8/30/16   JBB  do not process rebill records                   ???
+      * 3/23/17   RMC  changes for multi-company postingS -- USE DIFF LF OVER AR DETAIL
+      * 4/12/17   RMC  crt batch header if battot=yes, instead of using the debit amt. these = 0
+      *                so no details are written.
+      * 3/26/20   RMC  P16169 remove all refs to jde files and pgms - they arent needed
+      *                comment subr $julian that called x0028, file F0901
+      * 7/28/21    RMC SDN440 -  CHANGE COMPANY 362 TO 320 - everywhere, comments, subrs,...
+      /eject
+      *****************************************************************
+      * File specifications
+      ****************************************************************
+      *
+     FarbecplC  uf   e           k disk
+      * A/R Detail  by G/L posting CO, Deposit Date, Deposit Time, GL ID, sub ledger
+     F*arbecpl5  If   e           k disk
+      * A/R Detail  by company , Deposit Date, Deposit Time, GL ID, sub ledger
+      *             selects only Process Status = 'A' (bfajst)
+      *             and post adjustments flag = 'Y' (bfetsx)
+      *
+     F*f0011     uf a e           k disk
+      *   JDE batch header file
+      *
+     F*f0901     if   e           k disk                              P16169
+      *   JDE Account master
+      *   (This file is only used to define the fields that are used in what was a /Copy).
+      *
+     F*f0911     o    e             disk
+      * JDE G/L ledger
+      *
+      *
+      *
+     Fplb8rel3  if   e           k disk
+      * JDE M3 Cross Reference Table  (K=jde cost center/object/sub)
+      *
+     Fplb8rel5  if   e           k disk    rename(@b8reva:b8reva) prefix(p1)
+      * JDE M3 Cross Reference Table  (K=CGL code)
+     Fplb8rel8  if   e           k disk
+      * JDE M3 Cross Reference Table  (K=ACCT CO  GLID )
+      *
+     Fplb9cpp   o    e             disk
+      *   M3 G/L header staging file for Miscellaneous Post
+      *
+     Fplcacpp   o    e             disk
+      *   M3 G/L detail staging file for Miscellaneous Post
+      *
+      *
+     Fprint132  o    f  132        printer oflind(*inof)
+     F                                     usropn
+      *
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+     D gldct           c                   'UA'
+     D gllt            c                   'AA'
+     D glam            c                   '2'
+     D glpkco          c                   '00000'
+     D glokco          c                   '00000'
+     D glpsfx          c                   '000'
+     D glpost          c                   ' '
+      *
+      *---------------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------------
+      *
+      * Standard fields
+      *
+     d rtime           s              6  0
+     d return          s              7
+      *
+      *
+      * Control fields
+      *
+     d first           s              1    inz('Y')
+     d svc1ny          s                   like(bfc1ny)
+     d svacctco        s                   like(bfc1ny)
+     d svglid          s                   like(bfiztx)
+     d svdvdt          s                   like(bfdvdt)
+     d svdvdtjul       s                   like(bfdvdt)
+     d svtime          s                   like(bfyxnx)
+     d*svsbl           s                   like(glsbl)
+     d svglvl          s                   like(bfglvl)
+      *
+      * Accumulators
+      *
+     D acttot          s             17  2
+     D co#amt          s             17  2
+     D wkoffsetam      s             15  2
+     D batamt          s             15  0
+     D batndo          s              5  0
+     D dsamt           s             17
+     D battot          s              1
+      *
+      * Workfields
+      *
+     D RBInvoice#      s                   like(bfconb)
+     d wktype          s              2
+     d*wkco            s                   like(glco)
+     d wkco960         s                   like(bfaic3)                             dont init
+     d wkaid           s              8
+     d wkglcode        s              8
+     d wkani           s             29
+     d wkdesc          s             29
+     D wkvndr          s              9  0
+     D wkvndr8         s              8  0
+     D wksbl           s              9  0
+     D wksbl8          s              8  0
+     D wkmmddyy        s              6  0
+     d wksyssyndt      s              7  0
+     D wkcymdiso       s               d   datfmt(*iso)
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+     d wkhhmmss        s                   like(caabtm)
+     d wktime          s             12  0
+     d wkdate          s              6  0
+      *
+      *
+      * Parm fields
+      *
+     d xxtfflag        s              1
+      *
+     D xxmmddyy        s              6  0
+     D xxccyymmdd      s              8  0
+     D xxsyssyndt      s              7  0
+     D wk80dpdt        s              8  0
+      *
+     d xxcalc          s              1
+     d*xxpn            s                   like(glpn)
+     d*xxfy            s                   like(glfy)
+     d*xxctry          s                   like(glctry)
+     d xxedt           s              1
+     d xxdgsy          s              1
+      *
+     d xxsidat         s              6
+     d xxedat          s              8
+     d xxffmt          s              7
+     d xxtfmt          s              7
+     d xxsep           s              7
+     d xxertst         s              1
+     d xxctryalph      s              2
+      *
+      *
+     d*xxbatch         s                   like(glicu)
+     d xxsy            s              4
+     d xxidx           s              2
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxerrm          s              4
+      *
+     d*xxani           s                   like(glani)
+     d*xxicu           s                   like(glicu)
+     d*xxdoc           s                   like(gldoc)
+      *
+     D xxacctco        s              3  0
+     D xxnumco         s              3  0
+     d xxglcode        s              8
+     d xxsubtype       s              1
+     d xxbalsheet      s              1
+      *
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+     D                 DS
+     D  GLYMD                  1      7  0
+     D  YYGL                   2      3  0
+     D  MMGL                   4      5  0
+     D  DDGL                   6      7  0
+     D*
+     D***  G/L DATE MMDDYY
+     D*
+     D                 DS
+     D  GLMDY                  1      6  0
+     D  GLMM                   1      2  0
+     D  GLDD                   3      4  0
+     D  GLYY                   5      6  0
+     d*i0901ds         ds           500
+     d*xxco                                like(gmco)
+     d*xxaid                               like(gmaid)
+     d*xxmcu                               like(gmmcu)
+     d*xxobj                               like(gmobj)
+     d*xxsub                               like(gmsub)
+     d*xxans                               like(gmans)
+     d*xxdl01                              like(gmdl01)
+     d*xxlda                               like(gmlda)
+     d*xxbpc                               like(gmbpc)
+     d*xxpec                               like(gmpec)
+     d*xxbill                              like(gmbill)
+     d*xxcrcd                              like(gmcrcd)
+     d*xxum                                like(gmum)
+     d*xxr001                              like(gmr001)
+     d*xxr002                              like(gmr002)
+     d*xxr003                              like(gmr003)
+     d*xxr004                              like(gmr004)
+     d*xxr005                              like(gmr005)
+     d*xxr006                              like(gmr006)
+     d*xxr007                              like(gmr007)
+     d*xxr008                              like(gmr008)
+     d*xxr009                              like(gmr009)
+     d*xxr010                              like(gmr010)
+     d*xxr011                              like(gmr011)
+     d*xxr012                              like(gmr012)
+     d*xxr013                              like(gmr013)
+     d*xxr014                              like(gmr014)
+     d*xxr015                              like(gmr015)
+     d*xxr016                              like(gmr016)
+     d*xxr017                              like(gmr017)
+     d*xxr018                              like(gmr018)
+     d*xxr019                              like(gmr019)
+     d*xxr020                              like(gmr020)
+     d*xxr021                              like(gmr021)
+     d*xxr022                              like(gmr022)
+     d*xxr023                              like(gmr023)
+     d*xxobja                              like(gmobja)
+     d*xxsuba                              like(gmsuba)
+     d*xxwcmp                              like(gmwcmp)
+     d*xxcct                               like(gmcct)
+     d*xxerc                               like(gmerc)
+     d*xxhtc                               like(gmhtc)
+     d*xxqlda                              like(gmqlda)
+     d*xxccc                               like(gmccc)
+     d*xxfmod                              like(gmfmod)
+     d*xxuser                              like(gmuser)
+     d*xxpid                               like(gmpid)
+     d*xxjobn                              like(gmjobn)
+     d*xxupmj                              like(gmupmj)
+     d*xxupmt                              like(gmupmt)
+      *
+      *---------------------------------------------------------------
+     D* New for M3
+     D*   Format M3 Key Value for this batch:   yyyymmmddnnnn where nnnn is the m3series #
+     D*    example:  201506220001,  then next key for that day would be 201506220002 ,...
+     D*
+     D m3keyv          ds
+     D   m3keyvalue                  12
+     D   m3keydt                      8    overlay(m3keyvalue:1)
+     D   m3series                     4    overlay(m3keyvalue:9)
+      *
+      * Explanation
+     D                 ds
+     D  wkexa                  1     30
+     D  wk1                    1      3    inz('A/R')
+     D  wk2                    5      9    inz('MISC')
+     D  wk3dt                 11     18  0
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /eject
+      *----------------------------------------------------------------------------------
+      * Mainline
+      *----------------------------------------------------------------------------------
+      *
+      * Read records in the A/R Detail file.
+      *   appropriate records selected in Logical file
+      *
+     C     *loval        setll     arbecplc
+     C                   dou       *in80 = *on                                  Main do
+     C                   read      arbecplc                               80
+     C                   if        *in80 = *off                                  If not EOF
+     C*****              if        bfcest =  'RB'                                If =   RB
+     C                   if        bfuhcd =  'RB'  or bfconb = RBinvoice#        If = RB,or RB INV#
+     C                   eval      RBInvoice# = bfconb
+      * Break logic:
+      *  1) First time
+      *  2) When Posting Company # changes
+      *  3) When Deposit Date, or Deposit Time changes
+      *  4) When Account ID changes
+      *
+     C                   select
+      *  1) First time
+     C                   when      first = yes
+     C                   exsr      $setsave
+     C                   exsr      $first
+     C                   exsr      $trans
+      *
+      *  2) BREAK:   Posting company
+      *     1.  write the last post company record
+      *     2.  if not = 0, then write 1910 offset
+      *
+     C                   when      (bfc1ny <> svc1ny)                              any company break
+     C                   exsr      $writes
+      *
+     c* Write offset 1910 if company amount isnt zero. this will be for 300 and 360 comps.
+      *
+     c                   if        co#amt <>0
+     C                   exsr      $writeoffset
+     C                   z-add     0             CO#amt                         company total
+     c                   endif
+      *
+     c* Write header for posting company just completed
+      *
+     c                   exsr      $writebatch                                     write header
+     c*
+      *  Retrieve next number and new div for new company
+     c*
+     C                   close     print132
+     C                   exsr      $setsave
+     C                   exsr      $nextnbr                                       M3
+     C                   exsr      $trans
+     c                   open      print132
+     C                   except    hdg
+     C                   except    dochdg
+     C                   move      yes           xxtfflag
+     c*
+     c* Write offset for 960
+     c*
+     c**                 if        bfc1ny = 960
+     c**                 exsr      $writebatch                                     write header
+     C**                 exsr      $offsets                                        write detail
+     c*                  else
+     c*                  exsr      $writebatch                                     write header
+     c*                  endif
+     c*
+      *
+      *  3) When Deposit Date, or Deposit Time changes
+      *     1.  write the record to the GL
+      *     2.  setup save fields
+      *     3.  Get new document number     -- new voucher series
+      *     4.  Retrieve new julian date/year/period for deposit date
+      *     5.  Print document heading
+      *
+     C                   when      (bfdvdt <> svdvdt or bfyxnx <> svtime)
+     C                   exsr      $writes
+     C                   exsr      $setsave
+     C*                  exsr      $docnbr
+     C*                  exsr      $nextnbr                                       M3
+      *
+      *        Convert Deposit Date from CYYMMDD format to MMDDYY format.
+      *
+     C*                  exsr      $julian
+     C                   exsr      $synondt
+      *
+     C                   except    hdg
+     C                   except    dochdg
+     C                   endsl
+      *
+      *  4) When Account ID changes or sub ledger
+      *
+     C                   if        bfiztx <> svglid or bfglvl <> svglvl
+     C                   exsr      $writes
+     C                   exsr      $setsave
+     C                   endif
+      *
+      * Detail processing:
+      *   1) Accumulate Transaction Amount into Account.
+      *   2) Accumulate Transaction Amount into total for OFFSET if Transaction company
+      *              = 960 but Posting company <> 960.
+      *   3) Update the AR Detail record as "posted"
+      *
+     C                   add       bfbsva        acttot
+     C                   add       bfbsva        co#amt
+      *
+     C*                  if        bfaic3 = 960 and bfc1ny <> 960
+     C*                  add       bfbsva        wkoffsetam
+     C*                  endif
+      *
+     c*
+     C** Update ARBECPP if live with M3
+     c*
+     c     LivewM3       ifeq      'Y'
+     C                   move      'P'           bfajst
+     C                   z-add     m3seriez      bfcknb
+     C                   z-add     xxsyssyndt    bfhydt
+     C                   update    @becpzi                                      ar dtl with Posted
+     C                   endif                                                  If LivewM3 = 'Y'
+      *
+     C                   endif                                                  If =   RB
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *----------------------
+      * EOF processing
+      *----------------------
+      *
+      *
+     C                   select
+     C                   when      first = yes
+     C                   open      print132
+     C                   except    hdg
+     C                   except    norec
+     C                   other
+      *
+      * Write out last record to M3 (was JDE) and then
+      * Conditionally write a Batch record
+      *
+     C                   exsr      $writes
+      *
+     c* Write offset 1910 if company amount isnt zero
+      *
+     c                   if        co#amt <>0
+     C                   exsr      $writeoffset
+     c                   endif
+      *                                                                                   $ not 0
+     C**                 if        batamt <> 0                                  If batch $$ not 0
+     C                   if        battot = yes                                 If batch $$ not 0
+     C                   exsr      $writebatch
+     C                   endif                                                  If batch $$ not 0
+     C                   endsl
+      *
+      * This will close any files that were left open from any called programs.
+      *
+     C                   call      'UTRCRSC'
+     C                   close     print132
+      *
+     C                   seton                                        lr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Setup save fields and account description
+      *----------------------------------------------------------------------------------
+      *
+     C     $setsave      begsr
+      *
+     C                   z-add     bfc1ny        svc1ny
+     C                   z-add     bfc1ny        svacctco
+     C                   z-add     bfdvdt        svdvdt
+     C                   z-add     bfyxnx        svtime
+     C                   move      bfiztx        svglid
+      *
+      *
+     C                   z-add     bfglvl        svglvl
+     C                   movel     bfglvl        wkglvl            9 0
+     C                   move      wkglvl        prglvl            8 0
+      *
+     C                   z-add     0             acttot
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Format a date to Julian format
+      *----------------------------------------------------------------------------------
+      *
+     C*    $julian       begsr
+      *
+     C*                  move      bfdvdt        xxsidat
+      *
+     C*                  call      'X0028'
+     C*                  parm                    xxsidat
+     C*                  parm      *blank        xxedat
+     C*                  parm      '*YMD   '     xxffmt
+     C*                  parm      '*JUL   '     xxtfmt
+     C*                  parm      '*NONE  '     xxsep
+     C*                  parm      *blank        xxertst
+     C*                  parm      *blank        xxctryalph
+      *
+     C*                  move      xxsidat       svdvdtjul
+      *
+     C*                  endsr
+      *----------------------------------------------------------------------------------
+      * Write the M3 journal entry line to PLCACPP
+      *----------------------------------------------------------------------------------
+     C* Format sample for PARM field:
+     C* I12015072411       50011410            CS1
+     C* 00000000000000000USD                 00000013736271520150723  ACCOUNTS RECEIVABLE-TRADE
+     C* I12015072411       49013830            101
+     C* 00000000000000000USD                 -0000013736271520150723  DUE TO TF - CASH
+      *
+     C     $writes       begsr
+     C*
+     C                   move      acttot        glaa             15 2
+     C*                  move      svglid        wkaid
+     C*                  move      wkaid         glaid
+     C*
+     C                   move      *blanks       dsdim           200
+     c                   movel(p)  m3keyvalue    caait1                         key: yyyymmddnnnn
+     C                   ADD       1             CAWKA1                         LINE NUMBER
+     C*
+     C**  Retrieve new division number
+     C*
+     C                   EXSR      $trans
+     c                   move      m3cono        cawja1                         GL Posting Co
+     c***                movel     svdivi        caqxcd
+     c                   movel     m3divi        caqxcd
+     C*
+     C**** Translate JDE cost center/object/sub to M3 dimensions.
+     C*
+     C                   EXSR      $getdim
+      *
+     c*                  if        b8hgss='I'                can this happen with misc posts?????
+     c*                  if        dsdim5= *blanks
+     c*                  move      ARcust        work8             8
+     c*                  eval      dsdim5 =  %triml(work8)                      move cust to DIM5
+     c*                  endif
+     c*                  endif
+      *
+      *
+      *  M3  Set values in parameter field
+      *
+     C                   eval      dsamt = %triml(%editc(acttot:'Q'))
+     C                   z-add     0             wkqty             1 0          quantity
+     C                   move      wkqty         dsqty            17            quantity
+      *
+      *  Move 11.2 vendor (subledger) number into an 8.0 field and ultimately into an 8A.
+      *
+     C                   if        svglvl <> 0
+     C                   movel     svglvl        wksbl             9 0
+     C                   move      wksbl         wksbl8            8 0
+     C                   movel     wksbl8        svsbl             8
+     C                   endif
+      *
+     C                   if        svsbl <> *blanks                             have subledger
+     c                   evalr     dsdim7=%subst(svsbl:%check('0':svsbl))       left adj, remv 00-
+     C                   eval      dsdim7= %triml(dsdim7)
+     c                   endif
+     C*                  movel(p)  wkdesc        dsdescr          40            description
+      *
+     C*  CONVERT  DATE FROM YYMMDD TO MMDDYY
+     C*
+     C                   Z-ADD     SVdvDT        GLYMD
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    SVdvDT
+     C                   PARM                    dsacdt            8            yyyymmdd
+      *
+      *
+     C                   eval      dsdim = 'I1'                 +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     '1       '  +                         group nbr
+     C                                     m3divi      +                         division
+     C**                                   svdivi      +                         all 3nn divisions
+     C                                     '0'         +                         ext/int, ext=0
+     C                                            dsdim1  +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '1            ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             dsacdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter
+      *
+     C                   movel(p)  sdusr         caabvn                         RS User Added
+     C                   move      xxccyymmdd    caaedx                         entry date
+     C                   move      wksyssyndt    caabdt                         RS Date added
+     C                   move      wkhhmmss      caabtm                         RS time added
+     c                   movel     'ARMSCPST'    CAAHVN                         job
+     c                   movel     'M3ARMSC'     CAAGVN                         pgm
+      *
+     C                   if        glaa   <> 0
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+     C                   move      yes           battot                         battot write
+     C                   endif
+      *
+     c                   if        glaa  > 0
+     c                   add       glaa          batamt
+     C                   endif
+      *
+     C                   exsr      $l1dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+     C*   WRITE Batch Header Record     M3 PLB9CPP
+      *---------------------------------------------------------------
+      *
+     C     $writebatch   begsr
+     C     m3keyvalue    IFNE      *blanks                                     keyvalue not blank
+      *
+      * retrieve m3 company and division
+      *
+     C*                  exsr      $trans
+      *
+     C**                 z-add     m3cono        b9wja1                         company
+     C                   movel     m3divi        b9qxcd                         division
+     C                   z-add     m3cono        b9wja1                         company
+     c                   movel     svdivi        b9qxcd
+     c*
+     c                   movel(p)  m3keyvalue    b9ait1                         key: yyyymmddnnnn
+     C                   movel(p)  'GL_MSCUPL'   b9ajt1                         Interface template
+      *
+     C********           move      '001'         b9wga1                         Status
+      *
+      *  Setup explanation to be "A/R + MISC + deposit date".
+      *
+     C***                movel     wkmmddyy      wk3dt                          deposit date
+     C                   move      wk80dpdt      wk3dt                          deposit date
+     C                   movel(p)  wkexa         dsdescr          40            description
+     C                   movel(p)  dsdescr       b9akt1                         Description
+      *
+     C                   movel(p)  sdusr         b9abvn                         User
+     C                   move      xxccyymmdd    b9aedx                         M3 Entry Date
+     C                   move      wksyssyndt    b9abdt                         date added
+     C                   move      wkhhmmss      b9abtm                         time added
+     C                   move      '0'           b9g5ss                         erp process sts
+     C                   movel     sdpgm         b9agvn                         program updated
+      *
+     C                   write     @b9cpuj
+     C                   ENDIF                                                  BATCH# NOT 0
+      *
+      * reset batndo
+     C                   z-add     0             batndo
+     C                   z-add     0             batamt
+     C**                 z-add     0             cawka1                         plcacpp line#
+      *
+     C                   endsr
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE offset 1910 SUBROUTINE
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $WRITEoffset  BEGSR
+      *
+     C                   z-sub     co#amt        GLAA                           -(company total)
+     C                   z-add(h)  0             GLu              15 0          no decimals
+     C*
+     C*******************************************************************************
+      * Write the M3 journal entry line to PLCACPP
+     C*******************************************************************************
+     c                   movel     m3cono        cawja1
+     c*                  movel     m3cdivi       caqxcd
+     c                   movel     svdivi        caqxcd
+     c                   movel     m3keyvalue    caait1                         key: yyyymmddnnnn
+     C                   ADD       1             CaWKA1                         LINE NUMBER
+     C*
+     C*
+     C                   move      svc1ny        ommcu            12            Acct Posting CO
+     C                   move      '1910  '      omobj             6
+     C                   move      *blanks       omsub             8
+     C**** Translate JDE cost center/object/sub to M3 dimensions.
+     C                   EXSR      $getdim2
+     c*
+      *
+     C**** use act ship date of the Group
+      *
+     C**                 movel     m3keydt       WKacdt            8            m3 acctngDt=current
+      *
+      *  M3  Set values in parameter field
+      *
+     C                   eval      dsamt = %triml(%editc(glaa:'Q'))             leave left justf
+     c                   move      *blanks       wrk19            19
+     C**                 eval      wrk19 = %editc(glaa:'Q')                     right just
+     C**                 move      wrk19         dsamt                         right just
+     C*                  z-add     glu           wkqty            17 0          quantity UNITS
+     C                   move      '0'           dsqty            17            quantity
+     C                   move      *blanks       vatamt           17            vat amt
+     C*                  eval      dsqty = %triml(%editc(glu:'Z'))              quantity UNITS
+     C*    group number alpha
+     C***                eval      omgrpa= %triml(%editc(omgrpn:'Z'))             left justf
+      *
+     c                   movel(p)  wkicbal       dsdescr
+      *
+     C*                  movel(p)  wkuser        caaavn                         User changed
+     C**                 move      wkb4dt        caaedx                         M3 Entry Date
+     C                   move      wksyssyndt    caabdt                         date added
+     C                   move      wkhhmmss      caabtm                         time added
+     C***                MOVEL     svUSRNAM      caabvn                         USER ID added
+     C                   movel(p)  sdusr         caabvn                         RS User Added
+     C                   movel     sdpgm         caagvn                         program updated
+     C                   movel     m3seriez      dsrnno            9            run number
+     C                   movel(p)  '1'           dsgrnr            8            group number
+     C*
+     c                   movel     'I1'          dsiden            2
+     c*
+     C                   move      *blanks       dsdim
+     C                   eval      dsdim = dsiden               +                id
+     C                                     dsrnno      +                        rrno run number
+     C                                      dsgrnr  +                           grp #/Vchr # = 1
+     C***                                  m3cdivi     +                         division
+     C                                     svdivi      +                         division
+     C                                     '0'         +                         ext/int,ext=0
+     C                                             dsdim1        +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '1            ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             dsacdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter 200 long
+      *
+      *
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+      *
+     c                   movel(p)  dsdescr       dsdescp
+     c                   z-add     glaa          acttot
+     C                   exsr      $l1dtl                                       print report
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve the Account info
+      *---------------------------------------------------------------
+      *
+     C     $getdim       begsr
+      *
+      * Retrieve JDE cost center/object/subsidiary from the JDE Account ID
+      *
+     C*                  call      'X0901'
+     C*                  parm                    xxsym
+     C*                  parm      '9'           xxomod
+     C*                  parm      '1'           xximod
+     C*                  parm      svglid        xxaid
+     C*                  parm      *blank        xxmcu
+     C*                  parm      *blank        xxobj
+     C*                  parm      *blank        xxsub
+     C*                  parm      *blank        xxerrm
+     C*                  parm                    i0901ds
+      *
+     C*                  if        xxerrm = *blank
+      *
+      *  Translate JDE cost center/object/sub to M3 dimensions.
+      *      ....take cc/obj/sub and look up in table for new.....
+      *
+      *
+     C*    key07         chain     plb8rel3                           92
+     C     SVGLID        CHAIN     PLB8REL8                           92
+      *
+     C                   if        *in92 = *off
+     C                   move      b8qpcd        dsdim1            8
+     C                   move      b8qqcd        dsdim2            8
+     C                   move      b8qrcd        dsdim3            8
+     C                   move      b8qscd        dsdim4            8
+     C                   move      b8qtcd        dsdim5            8
+     C                   move      b8qucd        dsdim6            8
+     C                   move      b8qvcd        dsdim7            8
+     C                   movel     b8awt1        dsdescr
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     C                   eval      dsdescr = '*** Invalid Account ***'
+     C                   endif
+     c                   movel     dsdescr       dsdescp          24         desc for print
+     C*                  endif
+      *
+     C                   endsr
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   get M3 DIM EQUIVALENT FOR JDE COST CENTER/OBJ/SUB
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $getdim2      BEGSR
+     C*
+      *  Translate JDE cost center/object/sub to M3 dimensions.
+      *      ....take cc/obj/sub and look up in table for new.....
+      *
+     C     key1910       klist
+     C                   kfld                    ommcu
+     C                   kfld                    omobj
+     C                   kfld                    omsub
+      *   DAILYS ONLY
+     c     ommcu         ifeq      '         364'                           inval acct catch
+     c     omobj         andeq     '5030    '
+     c     omsub         andeq     '600     '
+     c                   movel     '010     '    omsub
+     c                   endif
+      *
+     C     key1910       chain     plb8rel3                           92
+      *
+     C                   if        *in92 = *off
+     C                   move      b8qpcd        dsdim1            8
+     C                   move      b8qqcd        dsdim2            8
+     C                   move      b8qrcd        dsdim3            8
+     C                   move      b8qscd        dsdim4            8
+     C                   move      b8qtcd        dsdim5            8
+     C                   move      b8qucd        dsdim6            8
+     C                   move      b8qvcd        dsdim7            8
+     c                   movel(p)  b8awt1        wkicbal          40               dscription
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     c                   move      *blanks       wkicbal
+     C                   endif
+      *
+     C                   ENDSR
+      *
+      *---------------------------------------------------------------
+      * Retrieve next number to pass into m3 to tie records together.
+      *---------------------------------------------------------------
+      *
+     C     $nextnbr      begsr
+      *
+      *    get next voucher number from M3 voucher number series
+      *
+     C                   call      'PLW8XFR'
+     C                   PARM                    RTNCDE            7
+     C                   PARM      'ARS'         P1Q4CD            3            vchr nbr series
+     C                   PARM                    P1WVA1            8 0          NEXT NUMBER
+     C                   Z-ADD     P1WVA1        m3seriez          4 0          BATCH NUM
+     C                   move      m3seriez      m3series                       BATCH NUM
+     C                   movel     m3seriez      m3series9         9            BATCH NUM
+     c                   z-add     0             cawka1                         line number
+     c*
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve M3 Division
+      *---------------------------------------------------------------
+      *
+     C     $trans        begsr
+      *
+      * RETRIEVE M3 DIVISION
+      *
+     C                   CALL      'PDHGXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    svacctco                       COMP
+     C                   PARM      'M3COMPANY '  KMV8CD           10            DESC
+     C                   PARM                    KMM8NB           15 5          VALUE
+     c                   z-add     kmm8nb        m3cono            3 0
+      *
+     C                   CALL      'POMTXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    svacctco                       co
+     C                   PARM      'M3DIVISION'  KMV8CD           10            DESC
+     C                   PARM                    kmbxtx           40            DIVISION
+     c                   movel     kmbxtx        m3divi            3
+     c     offset        ifeq      'N'
+     c                   movel     kmbxtx        svdivi            3
+     c                   endif
+     C*
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Write a Journal Record to JDE for the total of this account ID
+      *----------------------------------------------------------------------------------
+      *
+     C*    $writeold     begsr
+      *
+     C*                  move      svglid        wkaid
+     C*                  move      wkaid         glaid
+     C*                  move      acttot        glaa             15 2
+      *
+     C*                  move      0             wkco
+     C*                  move      svacctco      wkco
+     C*                  move      wkco          glco                           Company nbr
+      *
+     C*                  movel     wktype        glicut                         Batch type
+     C*                  z-add     xxbatch       glicu                          Batch number
+     C*                  move      'R'           glrcnd                         Reconciled code
+      *
+     C*                  movel     sdusr         gluser                         User ID
+     C*                  movel     sdusr         gltorg                         Trans Originator
+     C*                  movel     sdjob         gljobn                         Workstation ID
+     C*                  move      svdvdtjul     gldgj                          G/L date
+      *
+     C*                  move      *blank        glcn                           Check number
+     C*                  z-add     0             gldkj                          Check date
+     C*                  z-add     0             gldkc                          Check clear date
+      *
+     C*                  add       1             gljeln                         Line number
+     C*                  move      gldsyj        gldicj                         Batch date
+      *
+      * Retrieve JDE account ID for the cost center/object/subsidiary
+      *
+     C*                  exsr      $account
+      *
+      * Retrieve the structured Account Number.
+      *
+     C*                  move      *blank        wkani
+      *
+     C*                  call      'X0901'
+     C*                  parm                    xxsym
+     C*                  parm      '2'           xxomod
+     C*                  parm      '9'           xximod
+     C*    wkani         parm                    xxani
+     C*                  parm      glmcu         xxmcu
+     C*                  parm      globj         xxobj
+     C*                  parm      glsub         xxsub
+     C*                  parm                    xxerrm
+     C*                  parm                    i0901ds
+      *
+     C*                  if        xxerrm = *blank
+     C*                  movel     wkani         glani                          Account nbr
+     C*                  else
+     C*                  move      *blank        glani
+     C*                  endif
+      *
+     C*                  move      svdvdtjul     gldsvj                         Service/tax date
+      *
+     C*                  eval      glexa = 'A/R MISC DEP'                       Explanation
+     C*                  movel     sdusr         gluser                         User id
+     C*                  move      *blank        glre                           Reverse/void
+     C*                  move      0             glcrr                          Exchange rate
+     C*                  move      0             glhcrr                         Hist exch rate
+      *
+      *  E00039
+      *
+      *  BFGLVL is an 11.2 amount field that is being used to store the vendor number.  We do not
+      *  want the decimal portion of the amount field.  Ultimately the vendor number must be
+      *  8A, left zero filled.  (WKVNDR 9.0, WKVNDR8 is 8.0.)
+      *
+     C*                  if        svglvl <> 0
+     C*                  movel     svglvl        wksbl                          9.0
+     C*                  move      wksbl         wksbl8                         8.0
+     C*                  movel     wksbl8        glsbl
+     C*                  move      'A'           glsblt                         Subledger type
+     C*                  else
+     C*                  move      *blanks       glsbl
+     C*                  move      *blanks       glsblt
+     C*                  z-add     *zeros        wksbl
+     C*                  z-add     *zeros        wksbl8
+     C*                  endif
+      *
+      * only write the record to GL if the amount is not 0
+      *
+     C*                  if        glaa <> 0
+     C*                  write     i0911
+     C*                  endif
+      *
+      * Accumulate Debit Amounts for the Batch Header
+      *
+     C*                  if        glaa > 0
+     C*                  add       glaa          batamt
+     C*                  add       1             batndo
+     C*                  endif
+      *
+     C*                  exsr      $l1dtl
+      *
+     C*                  endsr
+      *eject
+      *---------------------------------------------------------------
+      * Print the detail line
+      *---------------------------------------------------------------
+      *
+     C     $l1dtl        begsr
+      *
+     C   of              except    hdg
+     C                   except    l1dtl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Create offsetting company entries for 960 transactions and create new batch
+      *----------------------------------------------------------------------------------
+      *
+     C     $offsets      begsr
+      *
+      * 1.  Write 3xx Offset Record        ($getglid and $write)
+      * 2.  Write 3xx Batch Record         ($writebatch)
+      * 3.  Setup for first 960 record/batch/document # etc.
+      * 4.  Setup generic user name for TF JDE GL batch posting
+      * 5.  Write 960 Offset Record          ($getglid and $write)
+      *
+      *
+      * Write 3xx Batch Record header before batch dtl
+      *
+     C**                 if        batamt <> 0
+     C                   if        battot = yes                                 If batch $$ not 0
+     C                   exsr      $writebatch
+     c                   endif
+      *
+      * Write 3xx Offset Record
+      *
+     C                   z-add     *zeros        svglvl                         Save Subledger
+     C*                  move      *blanks       glsbl                          Subledger
+     C*                  move      ' '           glsblt                         Subledger type
+      *
+     C                   eval      wkglcode = 'OFFAR320'
+     C                   exsr      $getglid
+      *
+      *  retrieve M3 dims based on OFFAR320 and company 960/440
+      *
+     c                   z-add     bfaic3        wkco960
+      *
+     C     key08         chain     plb8rel5                           92
+     C                   if        *in92 =  *off
+     C                   move      p1b8qpcd      dsdim1            8
+     C                   move      p1b8qqcd      dsdim2            8
+     C                   move      p1b8qrcd      dsdim3            8
+     C                   move      p1b8qscd      dsdim4            8
+     C                   move      p1b8qtcd      dsdim5            8
+     C                   move      p1b8qucd      dsdim6            8
+     C                   move      p1b8qvcd      dsdim7            8
+     C                   movel(p)  p1b8awt1      dsvtxt           40
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     C                   eval      dsvtxt = '*** Invalid Account ***'
+     C                   endif
+     C                   move      'Y'           offset                         offset processing?
+      *
+     C* NEW BATCH FOR 320 --> 490 DUE TO -- DUE FROM  ENTRIES
+      *
+     c                   eval      acttot = (wkoffsetam * -1)
+     C                   if        acttot <> 0
+     C                   exsr      $writes                                         320-> 490
+     c                   movel     m3divi        svdivi
+     c                   movel     '490'         svdivi                             test
+     c                   movel     'offset '     sdusr                              test
+     C                   move      m3cono        svc1ny                           Acct Posting CO
+     c                   z-add     acttot        co#amt
+     C                   exsr      $writeoffset                                   1910
+     C                   exsr      $writebatch                                    490 header
+     C                   endif
+      *
+      * Setup for first 960 record: get new batch/document number, etc.
+      *
+     C                   close     print132
+     C                   exsr      $first
+     c     bfaic3        ifeq      960
+     C                   move      *blanks       sdusr
+     C                   movel     'TFGLPOST'    sdusr
+     c                   endif
+     C*                  z-add     0             gljeln
+      *
+      * Write the 960 Offset record
+      *
+     c     bfaic3        ifeq      960
+     C                   eval      wkglcode = 'OFFAR960'
+     c                   endif
+     c     bfaic3        ifeq      440
+     C                   eval      wkglcode = 'OFFAR440'
+     c                   endif
+     c
+     C                   exsr      $getglid
+      *
+      *  retrieve M3 dims based on OFFAR960 and company 960/440
+      *
+     C     key08         chain     plb8rel5                           92
+     C                   if        *in92 =  *off
+     C                   move      p1b8qpcd      dsdim1            8
+     C                   move      p1b8qqcd      dsdim2            8
+     C                   move      p1b8qrcd      dsdim3            8
+     C                   move      p1b8qscd      dsdim4            8
+     C                   move      p1b8qtcd      dsdim5            8
+     C                   move      p1b8qucd      dsdim6            8
+     C                   move      p1b8qvcd      dsdim7            8
+     C                   movel(p)  p1b8awt1      dsvtxt
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     C                   eval      dsvtxt = '*** Invalid Account ***'
+     C                   endif
+      *
+     c                   eval      acttot = wkoffsetam
+     C                   if        acttot <> 0
+     C                   exsr      $writes
+     c                   z-add     wkoffsetam    co#amt
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * One-time routine for first time through
+      *---------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+     C                   move      no            first
+     C                   move      no            battot                         write hdr if dtl
+     C                   open      print132
+     C                   z-add     0             page
+     C                   move      'N'           offset            1            offset processing?
+      *
+      * Retrieve a Batch Number from JDE
+      *
+     C*                  exsr      $batnbr
+      *
+      * Retrieve the Julian format of the Deposit Date
+      *
+     C*                  exsr      $julian
+      *
+      * Convert Deposit Date from CYYMMDD format to MMDDYY format.
+      *
+     C                   exsr      $synondt
+     C                   time                    wkhhmmss
+      *
+      *
+      * Calculate the Period and Fiscal Year for the date
+      *
+     C*                  exsr      $period
+      *
+      * Generate a Document Number from JDE
+      *
+     C*                  exsr      $docnbr
+      *
+      * Retrieve next number  M3 voucher number series
+      *
+     C                   exsr      $nextnbr
+      *
+      *
+     C                   except    hdg
+     C                   except    dochdg
+      *
+     C*                  move      *zeros        glkco
+     C*                  move      bfaic3        glkco
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Convert Synon Deposit Date into MMDDYY format
+      *---------------------------------------------------------------
+      *
+     C     $synondt      begsr
+      *
+     C     *cymd         test(d)                 svdvdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C     *cymd         move      svdvdt        wkisodate
+     C     *iso          move      wkisodate     wk80dpdt
+     C     *mdy          move      wkisodate     wkmmddyy
+     C                   else
+     C                   z-add     0             wkmmddyy
+     C                   endif                                                  If OK date
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculate the Period and Fiscal Year for a date
+      *---------------------------------------------------------------
+      *
+     C*    $period       begsr
+      *
+     C*                  move      *zero         wkco
+     C*                  move      bfaic3        wkco
+     C*                  call      'X09031'
+     C*                  parm      '1'           xxcalc
+     C*                  parm      wkco          xxco
+     C*                  parm      wkmmddyy      wkdate
+     C*    glpn          parm      0             xxpn
+     C*    glfy          parm      0             xxfy
+     C*    glctry        parm      0             xxctry
+     C*                  parm      *blank        xxedt
+     C*                  parm      *blank        xxdgsy
+      *
+     C*                  endsr
+      *eject
+      *---------------------------------------------------------------
+      * Retrieve a Batch Number from JDE
+      *---------------------------------------------------------------
+      *
+     C*    $batnbr       begsr
+      *
+     C*                  call      'X0010 '
+     C*                  parm      '00  '        xxsy
+     C*                  parm      '01'          xxidx
+     C*                  parm      0             xxbatch
+      *
+     C*                  movel     'G'           wktype
+      *
+     C*                  endsr
+      *eject
+      *---------------------------------------------------------------
+      * Retrieve a Document Number from JDE
+      *---------------------------------------------------------------
+      *
+     C*    $docnbr       begsr
+      *
+     C*                  call      'X0010 '
+     C*                  parm      '09  '        xxsy
+     C*                  parm      '02'          xxidx
+     C*    gldoc         parm                    xxdoc
+      *
+     C*                  endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve the Account info
+      *---------------------------------------------------------------
+      *
+     C**   $account      begsr
+      **
+      **Retrieve JDE account ID for the cost center/object/subsidiary
+      **
+     C**                 call      'X0901'
+     C**                 parm                    xxsym
+     C**                 parm      '9'           xxomod
+     C**                 parm      '1'           xximod
+     C*                  parm      svglid        xxani
+     C*                  parm      *blank        xxmcu
+     C*                  parm      *blank        xxobj
+     C*                  parm      *blank        xxsub
+     C*                  parm      *blank        xxerrm
+     C*                  parm                    i0901ds
+      *
+     C*                  if        xxerrm = *blank
+     C*                  movel     xxdl01        wkdesc
+     C*                  movel     xxmcu         glmcu
+     C*                  movel     xxobj         globj
+     C*                  movel     xxsub         glsub
+     C*                  else
+     C*                  eval      wkdesc = '*** Invalid Account ***'
+     C*                  move      *blank        glmcu
+     C*                  move      *blank        globj
+     C*                  move      *blank        glsub
+     C*                  endif
+      *
+     C*                  endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * get the GLID code from PKCWREP for the Account Codes
+      *----------------------------------------------------------------------------------
+      *
+     C     $getglid      begsr
+      *
+      * Get account ID from pkcwrel5  based on the offset accounts
+      *
+     C                   eval      svglid  = *blank
+      *
+      * Retrieve Account I.D. associated with G/L Code.
+      *
+     C                   call      'PKTIXFR'
+     C                   parm                    return
+     C                   parm      wkco960       xxnumco
+     C                   parm      wkglcode      xxglcode
+     C     svglid        parm      *blank        xxaid             8
+     C                   parm      *blank        xxsubtype
+     C                   parm      *blank        xxbalsheet
+     C                   parm      *zeros        xxacctco
+      * Posting company
+     C                   z-add     xxacctco      svacctco
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write the Batch Record to JDE
+      *---------------------------------------------------------------
+      *
+     C*    $writebatch   begsr
+      *
+     C*    key01         chain     f0011                              92
+     C*                  if        *in92 = *off                                 If exists
+     C*                  except    hdg
+     C*                  except    norec
+      *
+     C*                  else
+     C*                  move      xxbatch       icicu
+     C*                  movel     wktype        icicut
+     C*                  move      batamt        icaicu
+     C*                  move      gldicj        icdicj
+     C*                  move      batndo        icndo
+     C*                  move      batamt        icame
+     C*                  move      batndo        icdocn
+     C*                  movel     sdusr         icuser
+     C*                  move      'A'           iciapp
+     C*                  move      'Y'           icbal
+     C*                  move      ' '           icbalj
+     C*                  move      ' '           icist
+     C*                  move      'N'           icpob
+     C*                  move      'Y'           iciboi
+     C*                  write     i0011
+      * reset batndo
+     C*                  z-add     0             batndo
+     C*                  z-add     0             batamt
+     C*                  endif                                                  If exists
+      *
+     C*                  endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm
+      *
+     C     *entry        plist
+     C                   parm                    return
+     C                   parm                    xxtfflag
+     C                   parm                    livewM3           1            Live with M3
+      *
+      * Key Lists
+      *
+     C*    key01         klist
+     C*                  kfld                    wktype
+     C*                  kfld                    xxbatch
+      *
+     C                   time                    rtime
+      *
+      * Put system date into an 8,0 field.
+      * Then, get it into Synon format of CYYMMDD to use in updating AR Detail file.
+      *
+     C     *mdy          movel     udate         wkisodate
+     C                   movel     wkisodate     xxccyymmdd
+     C                   call      'HP8008'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxsyssyndt
+      *
+     C                   move      xxccyymmdd    m3keydt                           M3
+      *
+      *
+      * Get system date into the format required by JDE by calling JDE's routine.
+      * Save the date for populating lots of fields.
+      *
+     C                   time                    wktime
+     C                   move      wkdate        xxsidat
+      *
+      * Put system date into an 7,0 workfield for updating the synon tables
+      *
+     C                   z-add     xxccyymmdd    wkyymmdd          6 0
+     C                   if        xxccyymmdd >= 20000000
+     C     wkyymmdd      add       1000000       wksyssyndt
+     C                   else
+     C                   z-add     wkyymmdd      wksyssyndt
+     C                   endif
+      *
+     C                   call      'X0028'
+     C                   parm                    xxsidat
+     C                   parm      *blank        xxedat
+     C                   parm      '*SYSVAL'     xxffmt
+     C                   parm      '*JUL   '     xxtfmt
+     C                   parm      '*NONE  '     xxsep
+     C                   parm      *blank        xxertst
+     C                   parm      *blank        xxctryalph
+      *
+     C*                  move      xxsidat       glupmj
+     C*                  move      xxsidat       gldsyj
+      *
+     C*                  time                    glticu
+     C*                  time                    glupmt
+      *
+     C*                  move      sdpgm         glpid
+     C*                  movel     sdjob         gljobn
+      *
+      *
+      * Retrieve JDE cost center/object/sub for JDE account id to use in retrieving M3
+      * equivalent.
+      *
+     C*    key07         klist                                    p16169
+     C*                  kfld                    xxmcu                          jde cost center
+     C*                  kfld                    xxobj                          jde object
+     C*                  kfld                    xxsub                          jde sub
+      *
+      * Retrieve M3 Dims based on company and GL account code
+      *
+     C     key08         klist
+     C                   kfld                    xxacctco
+     C                   kfld                    wkglcode
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oprint132  E            HDG            1 01
+     O                                           10 'M3ARMSCRB'
+     O                                           63 'ACCOUNTS RECEIVABLE'
+     O                                           70 'SYSTEM'
+     O                       UDATE         Y    131
+     O          E            HDG            1
+     O                       sdusr               10
+     O                                           68 'MISCELLANEOUS POST LIST'
+     O                       RTIME              131 '0 :  :  '
+     O          E            HDG            1
+     O                                          127 'PAGE'
+     O                       PAGE          Z    131
+      *
+     O          E            HDG            2
+      *                                  10 'SELECTION:'
+     O*                                          87 'JDE BATCH # .. :'
+     O*                      wktype              95
+     O*                      xxbatch       z    104
+     O                                           92 'M3 Key Value.. :'
+     O                       m3keyvalue         106
+      *
+     O          E            HDG            1
+     O*                                          18 'DOCUMENT  DEPOSIT'
+     O                                           18 'M3 Series DEPOSIT'
+     O                                           27 'DEPOSIT'
+     O*                                          55 'COST     OBJECT  SUB'
+     O*                                          73 'CODE  DESCRIPTION'
+     O*                                         101 'SUBLEDGER'
+     O*                                         118 'AMOUNT'
+     O                                           59 'Object   Facility CostCntr'
+     O                                           85 'SubAcct  Cust#    ProdGrp'
+     O                                           93 'Subldgr'
+     O                                          105 'Description'
+     O                                          126 'AMOUNT'
+      *
+     O          E            HDG            2
+     O                                           26 'DATE     TIME'
+     O                                           55 'DIM1     DIM2     DIM3'
+     O                                           80 'DIM4     DIM5     DIM6'
+     O                                           90 'DIM7'
+      *
+     O          E            DOCHDG      1  0
+     O*                      gldoc         Z      8
+     O                       m3series             8
+     O                       wkmmddyy            18 '  /  /  '
+     O                       BFYXNX              25 '0 :  '
+      *
+      *-------------------------------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------------------------------
+      *
+     O          e            l1dtl          1
+     O*                      glmcu               40
+     O*                      globj               48
+     O*                      glsub               58
+     O*                      wkdesc              91
+     O*                      GLSBL              101
+     O*                      acttot        j    125
+     O                       b8qpcd              41
+     O                       b8qqcd              50
+     O                       b8qrcd              59
+     O                       b8qscd              68
+     O                       b8qtcd              77
+     O                       b8qucd              86
+     O                       b8qvcd              95
+     O                       dsdescp            118
+     O                       ACTTOT        J    131
+      *
+      *-------------------------------------------------------------------------------------
+      * No data message
+      *-------------------------------------------------------------------------------------
+      *
+     O          e            norec       2
+     O                                           33 'No records selected'
+      *
+=======
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page   1
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+     Change bar date-*NONE     Print change date-*NO
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+    1.00       *****************************************************************
+    2.00       *
+    3.00       *  Program number:  M3ARMSCRB-- copied from m3armsc    --   for R
+    4.00       *  Program name:    CREATE J.E.s  IN M3 Stage Tables for FOR HOG
+    5.00       *  Programmer:      Rose Centonze
+    6.00       *  Date created:    03/12/17
+    7.00       *
+    8.00       *  Program purpose: CREATE J.E.s FOR A/R MISC ADJUSTMENTS.
+    9.00       *                   COMPANY WILL BE PASSED INTO THIS PROGRAM FOR
+   10.00       *                   FOR PROCESSING.  A SUMMARY RECORD FOR EACH
+   11.00       *                   ACCOUNT I.D. WILL BE WRITTEN AS UNPOSTED TO
+   12.00       *                   JDE.
+   13.00       *
+   14.00       *                   ONLY PROCESS RECORDS WITH A STATUS OF 'A'.
+   15.00       *                   THESE ARE SELECTED IN THE LOGICAL ARBECPL7.
+   16.00       *                   ONLY PROCESS RECORDS WITH BLANKS IN THE
+   17.00       *                   ORIGINATING PROGRAM FIELD.
+   18.00       *
+   19.00       *                   WILL UPDATE THE A/R DETAIL FILE WITH THE
+   20.00       *                   BATCH NUMBER, POST DATE AND A STATUS CODE OF
+   21.00       *                   A 'P'. (PROCESSED)
+   22.00       *
+   23.00       *                   THE USER MUST THEN GO INTO M3  TO ACTUALLY
+   24.00       *                   POST THE BATCH OF JOURNAL ENTRIES.
+   25.00       *
+   26.00       ****************************************************************
+   27.00       * MODIFICATIONS:
+   28.00       ****************************************************************
+   29.00       * DATE      PROGRAMMER
+   30.00       * 3/04/16   RMC  change interface template from AR_MSCUPL to GL_M
+   31.00       * 8/30/16   JBB  do not process rebill records
+   32.00       * 3/23/17   RMC  changes for multi-company postingS -- USE DIFF L
+   33.00       * 4/12/17   RMC  crt batch header if battot=yes, instead of using
+   34.00       *                so no details are written.
+   35.00       * 3/26/20   RMC  P16169 remove all refs to jde files and pgms - t
+   36.00       *                comment subr $julian that called x0028, file F09
+   37.00       * 7/28/21    RMC SDN440 -  CHANGE COMPANY 362 TO 320 - everywhere
+   38.00       /eject
+   39.00       *****************************************************************
+   40.00       * File specifications
+   41.00       ****************************************************************
+   42.00       *
+   43.00      FarbecplC  uf   e           k disk
+   44.00       * A/R Detail  by G/L posting CO, Deposit Date, Deposit Time, GL I
+   45.00      F*arbecpl5  If   e           k disk
+   46.00       * A/R Detail  by company , Deposit Date, Deposit Time, GL ID, sub
+   47.00       *             selects only Process Status = 'A' (bfajst)
+   48.00       *             and post adjustments flag = 'Y' (bfetsx)
+   49.00       *
+   50.00      F*f0011     uf a e           k disk
+   51.00       *   JDE batch header file
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page   2
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+   52.00       *
+   53.00      F*f0901     if   e           k disk                              P
+   54.00       *   JDE Account master
+   55.00       *   (This file is only used to define the fields that are used in
+   56.00       *
+   57.00      F*f0911     o    e             disk
+   58.00       * JDE G/L ledger
+   59.00       *
+   60.00       *
+   61.00       *
+   62.00      Fplb8rel3  if   e           k disk
+   63.00       * JDE M3 Cross Reference Table  (K=jde cost center/object/sub)
+   64.00       *
+   65.00      Fplb8rel5  if   e           k disk    rename(@b8reva:b8reva) prefi
+   66.00       * JDE M3 Cross Reference Table  (K=CGL code)
+   67.00      Fplb8rel8  if   e           k disk
+   68.00       * JDE M3 Cross Reference Table  (K=ACCT CO  GLID )
+   69.00       *
+   70.00      Fplb9cpp   o    e             disk
+   71.00       *   M3 G/L header staging file for Miscellaneous Post
+   72.00       *
+   73.00      Fplcacpp   o    e             disk
+   74.00       *   M3 G/L detail staging file for Miscellaneous Post
+   75.00       *
+   76.00       *
+   77.00      Fprint132  o    f  132        printer oflind(*inof)
+   78.00      F                                     usropn
+   79.00       *
+   80.00       ****************************************************************
+   81.00       * DEFINITION SPECIFICATIONS
+   82.00       ****************************************************************
+   83.00       *
+   84.00       *---------------------------------------------------------------
+   85.00       * Named Constants
+   86.00       *---------------------------------------------------------------
+   87.00       *
+   88.00      D yes             c                   'Y'
+   89.00      D no              c                   'N'
+   90.00       *
+   91.00      D gldct           c                   'UA'
+   92.00      D gllt            c                   'AA'
+   93.00      D glam            c                   '2'
+   94.00      D glpkco          c                   '00000'
+   95.00      D glokco          c                   '00000'
+   96.00      D glpsfx          c                   '000'
+   97.00      D glpost          c                   ' '
+   98.00       *
+   99.00       *----------------------------------------------------------------
+  100.00       * Standalone fields
+  101.00       *----------------------------------------------------------------
+  102.00       *
+  103.00       * Standard fields
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page   3
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  104.00       *
+  105.00      d rtime           s              6  0
+  106.00      d return          s              7
+  107.00       *
+  108.00       *
+  109.00       * Control fields
+  110.00       *
+  111.00      d first           s              1    inz('Y')
+  112.00      d svc1ny          s                   like(bfc1ny)
+  113.00      d svacctco        s                   like(bfc1ny)
+  114.00      d svglid          s                   like(bfiztx)
+  115.00      d svdvdt          s                   like(bfdvdt)
+  116.00      d svdvdtjul       s                   like(bfdvdt)
+  117.00      d svtime          s                   like(bfyxnx)
+  118.00      d*svsbl           s                   like(glsbl)
+  119.00      d svglvl          s                   like(bfglvl)
+  120.00       *
+  121.00       * Accumulators
+  122.00       *
+  123.00      D acttot          s             17  2
+  124.00      D co#amt          s             17  2
+  125.00      D wkoffsetam      s             15  2
+  126.00      D batamt          s             15  0
+  127.00      D batndo          s              5  0
+  128.00      D dsamt           s             17
+  129.00      D battot          s              1
+  130.00       *
+  131.00       * Workfields
+  132.00       *
+  133.00      D RBInvoice#      s                   like(bfconb)
+  134.00      d wktype          s              2
+  135.00      d*wkco            s                   like(glco)
+  136.00      d wkco960         s                   like(bfaic3)
+  137.00      d wkaid           s              8
+  138.00      d wkglcode        s              8
+  139.00      d wkani           s             29
+  140.00      d wkdesc          s             29
+  141.00      D wkvndr          s              9  0
+  142.00      D wkvndr8         s              8  0
+  143.00      D wksbl           s              9  0
+  144.00      D wksbl8          s              8  0
+  145.00      D wkmmddyy        s              6  0
+  146.00      d wksyssyndt      s              7  0
+  147.00      D wkcymdiso       s               d   datfmt(*iso)
+  148.00       *
+  149.00       * Workfields for date manipulation
+  150.00       *
+  151.00      D wkisodate       s               D   datfmt(*iso)
+  152.00       *
+  153.00      d wkhhmmss        s                   like(caabtm)
+  154.00      d wktime          s             12  0
+  155.00      d wkdate          s              6  0
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page   4
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  156.00       *
+  157.00       *
+  158.00       * Parm fields
+  159.00       *
+  160.00      d xxtfflag        s              1
+  161.00       *
+  162.00      D xxmmddyy        s              6  0
+  163.00      D xxccyymmdd      s              8  0
+  164.00      D xxsyssyndt      s              7  0
+  165.00      D wk80dpdt        s              8  0
+  166.00       *
+  167.00      d xxcalc          s              1
+  168.00      d*xxpn            s                   like(glpn)
+  169.00      d*xxfy            s                   like(glfy)
+  170.00      d*xxctry          s                   like(glctry)
+  171.00      d xxedt           s              1
+  172.00      d xxdgsy          s              1
+  173.00       *
+  174.00      d xxsidat         s              6
+  175.00      d xxedat          s              8
+  176.00      d xxffmt          s              7
+  177.00      d xxtfmt          s              7
+  178.00      d xxsep           s              7
+  179.00      d xxertst         s              1
+  180.00      d xxctryalph      s              2
+  181.00       *
+  182.00       *
+  183.00      d*xxbatch         s                   like(glicu)
+  184.00      d xxsy            s              4
+  185.00      d xxidx           s              2
+  186.00      d xxsym           s              1
+  187.00      d xxomod          s              1
+  188.00      d xximod          s              1
+  189.00      d xxerrm          s              4
+  190.00       *
+  191.00      d*xxani           s                   like(glani)
+  192.00      d*xxicu           s                   like(glicu)
+  193.00      d*xxdoc           s                   like(gldoc)
+  194.00       *
+  195.00      D xxacctco        s              3  0
+  196.00      D xxnumco         s              3  0
+  197.00      d xxglcode        s              8
+  198.00      d xxsubtype       s              1
+  199.00      d xxbalsheet      s              1
+  200.00       *
+  201.00       ****************************************************************
+  202.00       * Data structures
+  203.00       ****************************************************************
+  204.00       *
+  205.00      D                 DS
+  206.00      D  GLYMD                  1      7  0
+  207.00      D  YYGL                   2      3  0
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page   5
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  208.00      D  MMGL                   4      5  0
+  209.00      D  DDGL                   6      7  0
+  210.00      D*
+  211.00      D***  G/L DATE MMDDYY
+  212.00      D*
+  213.00      D                 DS
+  214.00      D  GLMDY                  1      6  0
+  215.00      D  GLMM                   1      2  0
+  216.00      D  GLDD                   3      4  0
+  217.00      D  GLYY                   5      6  0
+  218.00      d*i0901ds         ds           500
+  219.00      d*xxco                                like(gmco)
+  220.00      d*xxaid                               like(gmaid)
+  221.00      d*xxmcu                               like(gmmcu)
+  222.00      d*xxobj                               like(gmobj)
+  223.00      d*xxsub                               like(gmsub)
+  224.00      d*xxans                               like(gmans)
+  225.00      d*xxdl01                              like(gmdl01)
+  226.00      d*xxlda                               like(gmlda)
+  227.00      d*xxbpc                               like(gmbpc)
+  228.00      d*xxpec                               like(gmpec)
+  229.00      d*xxbill                              like(gmbill)
+  230.00      d*xxcrcd                              like(gmcrcd)
+  231.00      d*xxum                                like(gmum)
+  232.00      d*xxr001                              like(gmr001)
+  233.00      d*xxr002                              like(gmr002)
+  234.00      d*xxr003                              like(gmr003)
+  235.00      d*xxr004                              like(gmr004)
+  236.00      d*xxr005                              like(gmr005)
+  237.00      d*xxr006                              like(gmr006)
+  238.00      d*xxr007                              like(gmr007)
+  239.00      d*xxr008                              like(gmr008)
+  240.00      d*xxr009                              like(gmr009)
+  241.00      d*xxr010                              like(gmr010)
+  242.00      d*xxr011                              like(gmr011)
+  243.00      d*xxr012                              like(gmr012)
+  244.00      d*xxr013                              like(gmr013)
+  245.00      d*xxr014                              like(gmr014)
+  246.00      d*xxr015                              like(gmr015)
+  247.00      d*xxr016                              like(gmr016)
+  248.00      d*xxr017                              like(gmr017)
+  249.00      d*xxr018                              like(gmr018)
+  250.00      d*xxr019                              like(gmr019)
+  251.00      d*xxr020                              like(gmr020)
+  252.00      d*xxr021                              like(gmr021)
+  253.00      d*xxr022                              like(gmr022)
+  254.00      d*xxr023                              like(gmr023)
+  255.00      d*xxobja                              like(gmobja)
+  256.00      d*xxsuba                              like(gmsuba)
+  257.00      d*xxwcmp                              like(gmwcmp)
+  258.00      d*xxcct                               like(gmcct)
+  259.00      d*xxerc                               like(gmerc)
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page   6
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  260.00      d*xxhtc                               like(gmhtc)
+  261.00      d*xxqlda                              like(gmqlda)
+  262.00      d*xxccc                               like(gmccc)
+  263.00      d*xxfmod                              like(gmfmod)
+  264.00      d*xxuser                              like(gmuser)
+  265.00      d*xxpid                               like(gmpid)
+  266.00      d*xxjobn                              like(gmjobn)
+  267.00      d*xxupmj                              like(gmupmj)
+  268.00      d*xxupmt                              like(gmupmt)
+  269.00       *
+  270.00       *---------------------------------------------------------------
+  271.00      D* New for M3
+  272.00      D*   Format M3 Key Value for this batch:   yyyymmmddnnnn where nnn
+  273.00      D*    example:  201506220001,  then next key for that day would be
+  274.00      D*
+  275.00      D m3keyv          ds
+  276.00      D   m3keyvalue                  12
+  277.00      D   m3keydt                      8    overlay(m3keyvalue:1)
+  278.00      D   m3series                     4    overlay(m3keyvalue:9)
+  279.00       *
+  280.00       * Explanation
+  281.00      D                 ds
+  282.00      D  wkexa                  1     30
+  283.00      D  wk1                    1      3    inz('A/R')
+  284.00      D  wk2                    5      9    inz('MISC')
+  285.00      D  wk3dt                 11     18  0
+  286.00       *
+  287.00       *---------------------------------------------------------------
+  288.00       * Standard program status data structure
+  289.00       *---------------------------------------------------------------
+  290.00       *    externally defined as UTPGFR (record format: PGMDSR)
+  291.00      D pgmds         esds                  extname(utpgfr)
+  292.00       *
+  293.00       *
+  294.00       * The following is a dummy C-spec to keep the D-specs from
+  295.00       * running over into the C-specs on the compile listing. It
+  296.00       * serves no other purpose and can be deleted at any time.
+  297.00       *
+  298.00      C                   if        sdpgm = *blank
+  299.00      C                   endif
+  300.00       /eject
+  301.00       *----------------------------------------------------------------
+  302.00       * Mainline
+  303.00       *----------------------------------------------------------------
+  304.00       *
+  305.00       * Read records in the A/R Detail file.
+  306.00       *   appropriate records selected in Logical file
+  307.00       *
+  308.00      C     *loval        setll     arbecplc
+  309.00      C                   dou       *in80 = *on
+  310.00      C                   read      arbecplc
+  311.00      C                   if        *in80 = *off
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page   7
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  312.00      C*****              if        bfcest =  'RB'
+  313.00      C                   if        bfuhcd =  'RB'  or bfconb = RBinvoic
+  314.00      C                   eval      RBInvoice# = bfconb
+  315.00       * Break logic:
+  316.00       *  1) First time
+  317.00       *  2) When Posting Company # changes
+  318.00       *  3) When Deposit Date, or Deposit Time changes
+  319.00       *  4) When Account ID changes
+  320.00       *
+  321.00      C                   select
+  322.00       *  1) First time
+  323.00      C                   when      first = yes
+  324.00      C                   exsr      $setsave
+  325.00      C                   exsr      $first
+  326.00      C                   exsr      $trans
+  327.00       *
+  328.00       *  2) BREAK:   Posting company
+  329.00       *     1.  write the last post company record
+  330.00       *     2.  if not = 0, then write 1910 offset
+  331.00       *
+  332.00      C                   when      (bfc1ny <> svc1ny)
+  333.00      C                   exsr      $writes
+  334.00       *
+  335.00      c* Write offset 1910 if company amount isnt zero. this will be for
+  336.00       *
+  337.00      c                   if        co#amt <>0
+  338.00      C                   exsr      $writeoffset
+  339.00      C                   z-add     0             CO#amt
+  340.00      c                   endif
+  341.00       *
+  342.00      c* Write header for posting company just completed
+  343.00       *
+  344.00      c                   exsr      $writebatch
+  345.00      c*
+  346.00       *  Retrieve next number and new div for new company
+  347.00      c*
+  348.00      C                   close     print132
+  349.00      C                   exsr      $setsave
+  350.00      C                   exsr      $nextnbr
+  351.00      C                   exsr      $trans
+  352.00      c                   open      print132
+  353.00      C                   except    hdg
+  354.00      C                   except    dochdg
+  355.00      C                   move      yes           xxtfflag
+  356.00      c*
+  357.00      c* Write offset for 960
+  358.00      c*
+  359.00      c**                 if        bfc1ny = 960
+  360.00      c**                 exsr      $writebatch
+  361.00      C**                 exsr      $offsets
+  362.00      c*                  else
+  363.00      c*                  exsr      $writebatch
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page   8
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  364.00      c*                  endif
+  365.00      c*
+  366.00       *
+  367.00       *  3) When Deposit Date, or Deposit Time changes
+  368.00       *     1.  write the record to the GL
+  369.00       *     2.  setup save fields
+  370.00       *     3.  Get new document number     -- new voucher series
+  371.00       *     4.  Retrieve new julian date/year/period for deposit date
+  372.00       *     5.  Print document heading
+  373.00       *
+  374.00      C                   when      (bfdvdt <> svdvdt or bfyxnx <> svtim
+  375.00      C                   exsr      $writes
+  376.00      C                   exsr      $setsave
+  377.00      C*                  exsr      $docnbr
+  378.00      C*                  exsr      $nextnbr
+  379.00       *
+  380.00       *        Convert Deposit Date from CYYMMDD format to MMDDYY forma
+  381.00       *
+  382.00      C*                  exsr      $julian
+  383.00      C                   exsr      $synondt
+  384.00       *
+  385.00      C                   except    hdg
+  386.00      C                   except    dochdg
+  387.00      C                   endsl
+  388.00       *
+  389.00       *  4) When Account ID changes or sub ledger
+  390.00       *
+  391.00      C                   if        bfiztx <> svglid or bfglvl <> svglvl
+  392.00      C                   exsr      $writes
+  393.00      C                   exsr      $setsave
+  394.00      C                   endif
+  395.00       *
+  396.00       * Detail processing:
+  397.00       *   1) Accumulate Transaction Amount into Account.
+  398.00       *   2) Accumulate Transaction Amount into total for OFFSET if Tra
+  399.00       *              = 960 but Posting company <> 960.
+  400.00       *   3) Update the AR Detail record as "posted"
+  401.00       *
+  402.00      C                   add       bfbsva        acttot
+  403.00      C                   add       bfbsva        co#amt
+  404.00       *
+  405.00      C*                  if        bfaic3 = 960 and bfc1ny <> 960
+  406.00      C*                  add       bfbsva        wkoffsetam
+  407.00      C*                  endif
+  408.00       *
+  409.00      c*
+  410.00      C** Update ARBECPP if live with M3
+  411.00      c*
+  412.00      c     LivewM3       ifeq      'Y'
+  413.00      C                   move      'P'           bfajst
+  414.00      C                   z-add     m3seriez      bfcknb
+  415.00      C                   z-add     xxsyssyndt    bfhydt
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page   9
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  416.00      C                   update    @becpzi
+  417.00      C                   endif
+  418.00       *
+  419.00      C                   endif
+  420.00       *
+  421.00      C                   endif
+  422.00      C                   enddo
+  423.00       *
+  424.00       *----------------------
+  425.00       * EOF processing
+  426.00       *----------------------
+  427.00       *
+  428.00       *
+  429.00      C                   select
+  430.00      C                   when      first = yes
+  431.00      C                   open      print132
+  432.00      C                   except    hdg
+  433.00      C                   except    norec
+  434.00      C                   other
+  435.00       *
+  436.00       * Write out last record to M3 (was JDE) and then
+  437.00       * Conditionally write a Batch record
+  438.00       *
+  439.00      C                   exsr      $writes
+  440.00       *
+  441.00      c* Write offset 1910 if company amount isnt zero
+  442.00       *
+  443.00      c                   if        co#amt <>0
+  444.00      C                   exsr      $writeoffset
+  445.00      c                   endif
+  446.00       *
+  447.00      C**                 if        batamt <> 0
+  448.00      C                   if        battot = yes
+  449.00      C                   exsr      $writebatch
+  450.00      C                   endif
+  451.00      C                   endsl
+  452.00       *
+  453.00       * This will close any files that were left open from any called p
+  454.00       *
+  455.00      C                   call      'UTRCRSC'
+  456.00      C                   close     print132
+  457.00       *
+  458.00      C                   seton                                        l
+  459.00       /eject
+  460.00       *----------------------------------------------------------------
+  461.00       * Setup save fields and account description
+  462.00       *----------------------------------------------------------------
+  463.00       *
+  464.00      C     $setsave      begsr
+  465.00       *
+  466.00      C                   z-add     bfc1ny        svc1ny
+  467.00      C                   z-add     bfc1ny        svacctco
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  10
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  468.00      C                   z-add     bfdvdt        svdvdt
+  469.00      C                   z-add     bfyxnx        svtime
+  470.00      C                   move      bfiztx        svglid
+  471.00       *
+  472.00       *
+  473.00      C                   z-add     bfglvl        svglvl
+  474.00      C                   movel     bfglvl        wkglvl            9 0
+  475.00      C                   move      wkglvl        prglvl            8 0
+  476.00       *
+  477.00      C                   z-add     0             acttot
+  478.00       *
+  479.00      C                   endsr
+  480.00       /eject
+  481.00       *----------------------------------------------------------------
+  482.00       * Format a date to Julian format
+  483.00       *----------------------------------------------------------------
+  484.00       *
+  485.00      C*    $julian       begsr
+  486.00       *
+  487.00      C*                  move      bfdvdt        xxsidat
+  488.00       *
+  489.00      C*                  call      'X0028'
+  490.00      C*                  parm                    xxsidat
+  491.00      C*                  parm      *blank        xxedat
+  492.00      C*                  parm      '*YMD   '     xxffmt
+  493.00      C*                  parm      '*JUL   '     xxtfmt
+  494.00      C*                  parm      '*NONE  '     xxsep
+  495.00      C*                  parm      *blank        xxertst
+  496.00      C*                  parm      *blank        xxctryalph
+  497.00       *
+  498.00      C*                  move      xxsidat       svdvdtjul
+  499.00       *
+  500.00      C*                  endsr
+  501.00       *----------------------------------------------------------------
+  502.00       * Write the M3 journal entry line to PLCACPP
+  503.00       *----------------------------------------------------------------
+  504.00      C* Format sample for PARM field:
+  505.00      C* I12015072411       50011410            CS1
+  506.00      C* 00000000000000000USD                 00000013736271520150723  A
+  507.00      C* I12015072411       49013830            101
+  508.00      C* 00000000000000000USD                 -0000013736271520150723  D
+  509.00       *
+  510.00      C     $writes       begsr
+  511.00      C*
+  512.00      C                   move      acttot        glaa             15 2
+  513.00      C*                  move      svglid        wkaid
+  514.00      C*                  move      wkaid         glaid
+  515.00      C*
+  516.00      C                   move      *blanks       dsdim           200
+  517.00      c                   movel(p)  m3keyvalue    caait1
+  518.00      C                   ADD       1             CAWKA1
+  519.00      C*
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  11
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  520.00      C**  Retrieve new division number
+  521.00      C*
+  522.00      C                   EXSR      $trans
+  523.00      c                   move      m3cono        cawja1
+  524.00      c***                movel     svdivi        caqxcd
+  525.00      c                   movel     m3divi        caqxcd
+  526.00      C*
+  527.00      C**** Translate JDE cost center/object/sub to M3 dimensions.
+  528.00      C*
+  529.00      C                   EXSR      $getdim
+  530.00       *
+  531.00      c*                  if        b8hgss='I'                can this h
+  532.00      c*                  if        dsdim5= *blanks
+  533.00      c*                  move      ARcust        work8             8
+  534.00      c*                  eval      dsdim5 =  %triml(work8)
+  535.00      c*                  endif
+  536.00      c*                  endif
+  537.00       *
+  538.00       *
+  539.00       *  M3  Set values in parameter field
+  540.00       *
+  541.00      C                   eval      dsamt = %triml(%editc(acttot:'Q'))
+  542.00      C                   z-add     0             wkqty             1 0
+  543.00      C                   move      wkqty         dsqty            17
+  544.00       *
+  545.00       *  Move 11.2 vendor (subledger) number into an 8.0 field and ulti
+  546.00       *
+  547.00      C                   if        svglvl <> 0
+  548.00      C                   movel     svglvl        wksbl             9 0
+  549.00      C                   move      wksbl         wksbl8            8 0
+  550.00      C                   movel     wksbl8        svsbl             8
+  551.00      C                   endif
+  552.00       *
+  553.00      C                   if        svsbl <> *blanks
+  554.00      c                   evalr     dsdim7=%subst(svsbl:%check('0':svsbl
+  555.00      C                   eval      dsdim7= %triml(dsdim7)
+  556.00      c                   endif
+  557.00      C*                  movel(p)  wkdesc        dsdescr          40
+  558.00       *
+  559.00      C*  CONVERT  DATE FROM YYMMDD TO MMDDYY
+  560.00      C*
+  561.00      C                   Z-ADD     SVdvDT        GLYMD
+  562.00      C                   Z-ADD     YYGL          GLYY
+  563.00      C                   Z-ADD     MMGL          GLMM
+  564.00      C                   Z-ADD     DDGL          GLDD
+  565.00      C                   CALL      'PBRRUPC'
+  566.00      C                   PARM                    SVdvDT
+  567.00      C                   PARM                    dsacdt            8
+  568.00       *
+  569.00       *
+  570.00      C                   eval      dsdim = 'I1'                 +
+  571.00      C                                     m3series9    +
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  12
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  572.00      C                                     '1       '  +
+  573.00      C                                     m3divi      +
+  574.00      C**                                   svdivi      +
+  575.00      C                                     '0'         +
+  576.00      C                                            dsdim1  +
+  577.00      C                                             dsdim2        +
+  578.00      C                                             dsdim3        +
+  579.00      C                                             dsdim4        +
+  580.00      C                                             dsdim5        +
+  581.00      C                                             dsdim6        +
+  582.00      C                                             dsdim7        +
+  583.00      C                                             dsqty        +
+  584.00      C                                             'USD'        +
+  585.00      C                                             '1 '        +
+  586.00      C                                             '1            ' +
+  587.00      C                                             dsamt        +
+  588.00      C                                             dsacdt       +
+  589.00      C                                             '1 '        +
+  590.00      C                                             dsdescr
+  591.00      C                   movel     dsdim         caplt1
+  592.00       *
+  593.00      C                   movel(p)  sdusr         caabvn
+  594.00      C                   move      xxccyymmdd    caaedx
+  595.00      C                   move      wksyssyndt    caabdt
+  596.00      C                   move      wkhhmmss      caabtm
+  597.00      c                   movel     'ARMSCPST'    CAAHVN
+  598.00      c                   movel     'M3ARMSC'     CAAGVN
+  599.00       *
+  600.00      C                   if        glaa   <> 0
+  601.00      C                   write     @cacpuq
+  602.00      C                   move      yes           battot
+  603.00      C                   endif
+  604.00       *
+  605.00      c                   if        glaa  > 0
+  606.00      c                   add       glaa          batamt
+  607.00      C                   endif
+  608.00       *
+  609.00      C                   exsr      $l1dtl
+  610.00       *
+  611.00      C                   endsr
+  612.00       /EJECT
+  613.00       *---------------------------------------------------------------
+  614.00      C*   WRITE Batch Header Record     M3 PLB9CPP
+  615.00       *---------------------------------------------------------------
+  616.00       *
+  617.00      C     $writebatch   begsr
+  618.00      C     m3keyvalue    IFNE      *blanks
+  619.00       *
+  620.00       * retrieve m3 company and division
+  621.00       *
+  622.00      C*                  exsr      $trans
+  623.00       *
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  13
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  624.00      C**                 z-add     m3cono        b9wja1
+  625.00      C                   movel     m3divi        b9qxcd
+  626.00      C                   z-add     m3cono        b9wja1
+  627.00      c                   movel     svdivi        b9qxcd
+  628.00      c*
+  629.00      c                   movel(p)  m3keyvalue    b9ait1
+  630.00      C                   movel(p)  'GL_MSCUPL'   b9ajt1
+  631.00       *
+  632.00      C********           move      '001'         b9wga1
+  633.00       *
+  634.00       *  Setup explanation to be "A/R + MISC + deposit date".
+  635.00       *
+  636.00      C***                movel     wkmmddyy      wk3dt
+  637.00      C                   move      wk80dpdt      wk3dt
+  638.00      C                   movel(p)  wkexa         dsdescr          40
+  639.00      C                   movel(p)  dsdescr       b9akt1
+  640.00       *
+  641.00      C                   movel(p)  sdusr         b9abvn
+  642.00      C                   move      xxccyymmdd    b9aedx
+  643.00      C                   move      wksyssyndt    b9abdt
+  644.00      C                   move      wkhhmmss      b9abtm
+  645.00      C                   move      '0'           b9g5ss
+  646.00      C                   movel     sdpgm         b9agvn
+  647.00       *
+  648.00      C                   write     @b9cpuj
+  649.00      C                   ENDIF
+  650.00       *
+  651.00       * reset batndo
+  652.00      C                   z-add     0             batndo
+  653.00      C                   z-add     0             batamt
+  654.00      C**                 z-add     0             cawka1
+  655.00       *
+  656.00      C                   endsr
+  657.00      C/EJECT
+  658.00      C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+  659.00      C*   WRITE offset 1910 SUBROUTINE
+  660.00      C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+  661.00      C*
+  662.00      C     $WRITEoffset  BEGSR
+  663.00       *
+  664.00      C                   z-sub     co#amt        GLAA
+  665.00      C                   z-add(h)  0             GLu              15 0
+  666.00      C*
+  667.00      C*****************************************************************
+  668.00       * Write the M3 journal entry line to PLCACPP
+  669.00      C*****************************************************************
+  670.00      c                   movel     m3cono        cawja1
+  671.00      c*                  movel     m3cdivi       caqxcd
+  672.00      c                   movel     svdivi        caqxcd
+  673.00      c                   movel     m3keyvalue    caait1
+  674.00      C                   ADD       1             CaWKA1
+  675.00      C*
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  14
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  676.00      C*
+  677.00      C                   move      svc1ny        ommcu            12
+  678.00      C                   move      '1910  '      omobj             6
+  679.00      C                   move      *blanks       omsub             8
+  680.00      C**** Translate JDE cost center/object/sub to M3 dimensions.
+  681.00      C                   EXSR      $getdim2
+  682.00      c*
+  683.00       *
+  684.00      C**** use act ship date of the Group
+  685.00       *
+  686.00      C**                 movel     m3keydt       WKacdt            8
+  687.00       *
+  688.00       *  M3  Set values in parameter field
+  689.00       *
+  690.00      C                   eval      dsamt = %triml(%editc(glaa:'Q'))
+  691.00      c                   move      *blanks       wrk19            19
+  692.00      C**                 eval      wrk19 = %editc(glaa:'Q')
+  693.00      C**                 move      wrk19         dsamt
+  694.00      C*                  z-add     glu           wkqty            17 0
+  695.00      C                   move      '0'           dsqty            17
+  696.00      C                   move      *blanks       vatamt           17
+  697.00      C*                  eval      dsqty = %triml(%editc(glu:'Z'))
+  698.00      C*    group number alpha
+  699.00      C***                eval      omgrpa= %triml(%editc(omgrpn:'Z'))
+  700.00       *
+  701.00      c                   movel(p)  wkicbal       dsdescr
+  702.00       *
+  703.00      C*                  movel(p)  wkuser        caaavn
+  704.00      C**                 move      wkb4dt        caaedx
+  705.00      C                   move      wksyssyndt    caabdt
+  706.00      C                   move      wkhhmmss      caabtm
+  707.00      C***                MOVEL     svUSRNAM      caabvn
+  708.00      C                   movel(p)  sdusr         caabvn
+  709.00      C                   movel     sdpgm         caagvn
+  710.00      C                   movel     m3seriez      dsrnno            9
+  711.00      C                   movel(p)  '1'           dsgrnr            8
+  712.00      C*
+  713.00      c                   movel     'I1'          dsiden            2
+  714.00      c*
+  715.00      C                   move      *blanks       dsdim
+  716.00      C                   eval      dsdim = dsiden               +
+  717.00      C                                     dsrnno      +
+  718.00      C                                      dsgrnr  +
+  719.00      C***                                  m3cdivi     +
+  720.00      C                                     svdivi      +
+  721.00      C                                     '0'         +
+  722.00      C                                             dsdim1        +
+  723.00      C                                             dsdim2        +
+  724.00      C                                             dsdim3        +
+  725.00      C                                             dsdim4        +
+  726.00      C                                             dsdim5        +
+  727.00      C                                             dsdim6        +
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  15
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  728.00      C                                             dsdim7        +
+  729.00      C                                             dsqty        +
+  730.00      C                                             'USD'        +
+  731.00      C                                             '1 '        +
+  732.00      C                                             '1            ' +
+  733.00      C                                             dsamt        +
+  734.00      C                                             dsacdt       +
+  735.00      C                                             '1 '        +
+  736.00      C                                             dsdescr
+  737.00      C                   movel     dsdim         caplt1
+  738.00       *
+  739.00       *
+  740.00      C                   write     @cacpuq
+  741.00       *
+  742.00      c                   movel(p)  dsdescr       dsdescp
+  743.00      c                   z-add     glaa          acttot
+  744.00      C                   exsr      $l1dtl
+  745.00      C                   endsr
+  746.00       /EJECT
+  747.00       *---------------------------------------------------------------
+  748.00       * Retrieve the Account info
+  749.00       *---------------------------------------------------------------
+  750.00       *
+  751.00      C     $getdim       begsr
+  752.00       *
+  753.00       * Retrieve JDE cost center/object/subsidiary from the JDE Account
+  754.00       *
+  755.00      C*                  call      'X0901'
+  756.00      C*                  parm                    xxsym
+  757.00      C*                  parm      '9'           xxomod
+  758.00      C*                  parm      '1'           xximod
+  759.00      C*                  parm      svglid        xxaid
+  760.00      C*                  parm      *blank        xxmcu
+  761.00      C*                  parm      *blank        xxobj
+  762.00      C*                  parm      *blank        xxsub
+  763.00      C*                  parm      *blank        xxerrm
+  764.00      C*                  parm                    i0901ds
+  765.00       *
+  766.00      C*                  if        xxerrm = *blank
+  767.00       *
+  768.00       *  Translate JDE cost center/object/sub to M3 dimensions.
+  769.00       *      ....take cc/obj/sub and look up in table for new.....
+  770.00       *
+  771.00       *
+  772.00      C*    key07         chain     plb8rel3                           9
+  773.00      C     SVGLID        CHAIN     PLB8REL8                           9
+  774.00       *
+  775.00      C                   if        *in92 = *off
+  776.00      C                   move      b8qpcd        dsdim1            8
+  777.00      C                   move      b8qqcd        dsdim2            8
+  778.00      C                   move      b8qrcd        dsdim3            8
+  779.00      C                   move      b8qscd        dsdim4            8
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  16
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  780.00      C                   move      b8qtcd        dsdim5            8
+  781.00      C                   move      b8qucd        dsdim6            8
+  782.00      C                   move      b8qvcd        dsdim7            8
+  783.00      C                   movel     b8awt1        dsdescr
+  784.00      C                   else
+  785.00      C                   move      *blanks       dsdim1
+  786.00      C                   move      *blanks       dsdim2
+  787.00      C                   move      *blanks       dsdim3
+  788.00      C                   move      *blanks       dsdim4
+  789.00      C                   move      *blanks       dsdim5
+  790.00      C                   move      *blanks       dsdim6
+  791.00      C                   move      *blanks       dsdim7
+  792.00      C                   eval      dsdescr = '*** Invalid Account ***'
+  793.00      C                   endif
+  794.00      c                   movel     dsdescr       dsdescp          24
+  795.00      C*                  endif
+  796.00       *
+  797.00      C                   endsr
+  798.00      C/EJECT
+  799.00      C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+  800.00      C*   get M3 DIM EQUIVALENT FOR JDE COST CENTER/OBJ/SUB
+  801.00      C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+  802.00      C*
+  803.00      C     $getdim2      BEGSR
+  804.00      C*
+  805.00       *  Translate JDE cost center/object/sub to M3 dimensions.
+  806.00       *      ....take cc/obj/sub and look up in table for new.....
+  807.00       *
+  808.00      C     key1910       klist
+  809.00      C                   kfld                    ommcu
+  810.00      C                   kfld                    omobj
+  811.00      C                   kfld                    omsub
+  812.00       *   DAILYS ONLY
+  813.00      c     ommcu         ifeq      '         364'
+  814.00      c     omobj         andeq     '5030    '
+  815.00      c     omsub         andeq     '600     '
+  816.00      c                   movel     '010     '    omsub
+  817.00      c                   endif
+  818.00       *
+  819.00      C     key1910       chain     plb8rel3                           9
+  820.00       *
+  821.00      C                   if        *in92 = *off
+  822.00      C                   move      b8qpcd        dsdim1            8
+  823.00      C                   move      b8qqcd        dsdim2            8
+  824.00      C                   move      b8qrcd        dsdim3            8
+  825.00      C                   move      b8qscd        dsdim4            8
+  826.00      C                   move      b8qtcd        dsdim5            8
+  827.00      C                   move      b8qucd        dsdim6            8
+  828.00      C                   move      b8qvcd        dsdim7            8
+  829.00      c                   movel(p)  b8awt1        wkicbal          40
+  830.00      C                   else
+  831.00      C                   move      *blanks       dsdim1
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  17
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  832.00      C                   move      *blanks       dsdim2
+  833.00      C                   move      *blanks       dsdim3
+  834.00      C                   move      *blanks       dsdim4
+  835.00      C                   move      *blanks       dsdim5
+  836.00      C                   move      *blanks       dsdim6
+  837.00      C                   move      *blanks       dsdim7
+  838.00      c                   move      *blanks       wkicbal
+  839.00      C                   endif
+  840.00       *
+  841.00      C                   ENDSR
+  842.00       *
+  843.00       *---------------------------------------------------------------
+  844.00       * Retrieve next number to pass into m3 to tie records together.
+  845.00       *---------------------------------------------------------------
+  846.00       *
+  847.00      C     $nextnbr      begsr
+  848.00       *
+  849.00       *    get next voucher number from M3 voucher number series
+  850.00       *
+  851.00      C                   call      'PLW8XFR'
+  852.00      C                   PARM                    RTNCDE            7
+  853.00      C                   PARM      'ARS'         P1Q4CD            3
+  854.00      C                   PARM                    P1WVA1            8 0
+  855.00      C                   Z-ADD     P1WVA1        m3seriez          4 0
+  856.00      C                   move      m3seriez      m3series
+  857.00      C                   movel     m3seriez      m3series9         9
+  858.00      c                   z-add     0             cawka1
+  859.00      c*
+  860.00      C                   endsr
+  861.00       /EJECT
+  862.00       *---------------------------------------------------------------
+  863.00       * Retrieve M3 Division
+  864.00       *---------------------------------------------------------------
+  865.00       *
+  866.00      C     $trans        begsr
+  867.00       *
+  868.00       * RETRIEVE M3 DIVISION
+  869.00       *
+  870.00      C                   CALL      'PDHGXFR'
+  871.00      C                   PARM                    RTNCDE
+  872.00      C                   PARM                    svacctco
+  873.00      C                   PARM      'M3COMPANY '  KMV8CD           10
+  874.00      C                   PARM                    KMM8NB           15 5
+  875.00      c                   z-add     kmm8nb        m3cono            3 0
+  876.00       *
+  877.00      C                   CALL      'POMTXFR'
+  878.00      C                   PARM                    RTNCDE
+  879.00      C                   PARM                    svacctco
+  880.00      C                   PARM      'M3DIVISION'  KMV8CD           10
+  881.00      C                   PARM                    kmbxtx           40
+  882.00      c                   movel     kmbxtx        m3divi            3
+  883.00      c     offset        ifeq      'N'
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  18
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  884.00      c                   movel     kmbxtx        svdivi            3
+  885.00      c                   endif
+  886.00      C*
+  887.00      C                   endsr
+  888.00       /eject
+  889.00       *----------------------------------------------------------------
+  890.00       * Write a Journal Record to JDE for the total of this account ID
+  891.00       *----------------------------------------------------------------
+  892.00       *
+  893.00      C*    $writeold     begsr
+  894.00       *
+  895.00      C*                  move      svglid        wkaid
+  896.00      C*                  move      wkaid         glaid
+  897.00      C*                  move      acttot        glaa             15 2
+  898.00       *
+  899.00      C*                  move      0             wkco
+  900.00      C*                  move      svacctco      wkco
+  901.00      C*                  move      wkco          glco
+  902.00       *
+  903.00      C*                  movel     wktype        glicut
+  904.00      C*                  z-add     xxbatch       glicu
+  905.00      C*                  move      'R'           glrcnd
+  906.00       *
+  907.00      C*                  movel     sdusr         gluser
+  908.00      C*                  movel     sdusr         gltorg
+  909.00      C*                  movel     sdjob         gljobn
+  910.00      C*                  move      svdvdtjul     gldgj
+  911.00       *
+  912.00      C*                  move      *blank        glcn
+  913.00      C*                  z-add     0             gldkj
+  914.00      C*                  z-add     0             gldkc
+  915.00       *
+  916.00      C*                  add       1             gljeln
+  917.00      C*                  move      gldsyj        gldicj
+  918.00       *
+  919.00       * Retrieve JDE account ID for the cost center/object/subsidiary
+  920.00       *
+  921.00      C*                  exsr      $account
+  922.00       *
+  923.00       * Retrieve the structured Account Number.
+  924.00       *
+  925.00      C*                  move      *blank        wkani
+  926.00       *
+  927.00      C*                  call      'X0901'
+  928.00      C*                  parm                    xxsym
+  929.00      C*                  parm      '2'           xxomod
+  930.00      C*                  parm      '9'           xximod
+  931.00      C*    wkani         parm                    xxani
+  932.00      C*                  parm      glmcu         xxmcu
+  933.00      C*                  parm      globj         xxobj
+  934.00      C*                  parm      glsub         xxsub
+  935.00      C*                  parm                    xxerrm
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  19
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  936.00      C*                  parm                    i0901ds
+  937.00       *
+  938.00      C*                  if        xxerrm = *blank
+  939.00      C*                  movel     wkani         glani
+  940.00      C*                  else
+  941.00      C*                  move      *blank        glani
+  942.00      C*                  endif
+  943.00       *
+  944.00      C*                  move      svdvdtjul     gldsvj
+  945.00       *
+  946.00      C*                  eval      glexa = 'A/R MISC DEP'
+  947.00      C*                  movel     sdusr         gluser
+  948.00      C*                  move      *blank        glre
+  949.00      C*                  move      0             glcrr
+  950.00      C*                  move      0             glhcrr
+  951.00       *
+  952.00       *  E00039
+  953.00       *
+  954.00       *  BFGLVL is an 11.2 amount field that is being used to store the
+  955.00       *  want the decimal portion of the amount field.  Ultimately the
+  956.00       *  8A, left zero filled.  (WKVNDR 9.0, WKVNDR8 is 8.0.)
+  957.00       *
+  958.00      C*                  if        svglvl <> 0
+  959.00      C*                  movel     svglvl        wksbl
+  960.00      C*                  move      wksbl         wksbl8
+  961.00      C*                  movel     wksbl8        glsbl
+  962.00      C*                  move      'A'           glsblt
+  963.00      C*                  else
+  964.00      C*                  move      *blanks       glsbl
+  965.00      C*                  move      *blanks       glsblt
+  966.00      C*                  z-add     *zeros        wksbl
+  967.00      C*                  z-add     *zeros        wksbl8
+  968.00      C*                  endif
+  969.00       *
+  970.00       * only write the record to GL if the amount is not 0
+  971.00       *
+  972.00      C*                  if        glaa <> 0
+  973.00      C*                  write     i0911
+  974.00      C*                  endif
+  975.00       *
+  976.00       * Accumulate Debit Amounts for the Batch Header
+  977.00       *
+  978.00      C*                  if        glaa > 0
+  979.00      C*                  add       glaa          batamt
+  980.00      C*                  add       1             batndo
+  981.00      C*                  endif
+  982.00       *
+  983.00      C*                  exsr      $l1dtl
+  984.00       *
+  985.00      C*                  endsr
+  986.00       *eject
+  987.00       *---------------------------------------------------------------
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  20
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+  988.00       * Print the detail line
+  989.00       *---------------------------------------------------------------
+  990.00       *
+  991.00      C     $l1dtl        begsr
+  992.00       *
+  993.00      C   of              except    hdg
+  994.00      C                   except    l1dtl
+  995.00       *
+  996.00      C                   endsr
+  997.00       /eject
+  998.00       *----------------------------------------------------------------
+  999.00       * Create offsetting company entries for 960 transactions and crea
+ 1000.00       *----------------------------------------------------------------
+ 1001.00       *
+ 1002.00      C     $offsets      begsr
+ 1003.00       *
+ 1004.00       * 1.  Write 3xx Offset Record        ($getglid and $write)
+ 1005.00       * 2.  Write 3xx Batch Record         ($writebatch)
+ 1006.00       * 3.  Setup for first 960 record/batch/document # etc.
+ 1007.00       * 4.  Setup generic user name for TF JDE GL batch posting
+ 1008.00       * 5.  Write 960 Offset Record          ($getglid and $write)
+ 1009.00       *
+ 1010.00       *
+ 1011.00       * Write 3xx Batch Record header before batch dtl
+ 1012.00       *
+ 1013.00      C**                 if        batamt <> 0
+ 1014.00      C                   if        battot = yes
+ 1015.00      C                   exsr      $writebatch
+ 1016.00      c                   endif
+ 1017.00       *
+ 1018.00       * Write 3xx Offset Record
+ 1019.00       *
+ 1020.00      C                   z-add     *zeros        svglvl
+ 1021.00      C*                  move      *blanks       glsbl
+ 1022.00      C*                  move      ' '           glsblt
+ 1023.00       *
+ 1024.00      C                   eval      wkglcode = 'OFFAR320'
+ 1025.00      C                   exsr      $getglid
+ 1026.00       *
+ 1027.00       *  retrieve M3 dims based on OFFAR320 and company 960/440
+ 1028.00       *
+ 1029.00      c                   z-add     bfaic3        wkco960
+ 1030.00       *
+ 1031.00      C     key08         chain     plb8rel5                           9
+ 1032.00      C                   if        *in92 =  *off
+ 1033.00      C                   move      p1b8qpcd      dsdim1            8
+ 1034.00      C                   move      p1b8qqcd      dsdim2            8
+ 1035.00      C                   move      p1b8qrcd      dsdim3            8
+ 1036.00      C                   move      p1b8qscd      dsdim4            8
+ 1037.00      C                   move      p1b8qtcd      dsdim5            8
+ 1038.00      C                   move      p1b8qucd      dsdim6            8
+ 1039.00      C                   move      p1b8qvcd      dsdim7            8
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  21
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+ 1040.00      C                   movel(p)  p1b8awt1      dsvtxt           40
+ 1041.00      C                   else
+ 1042.00      C                   move      *blanks       dsdim1
+ 1043.00      C                   move      *blanks       dsdim2
+ 1044.00      C                   move      *blanks       dsdim3
+ 1045.00      C                   move      *blanks       dsdim4
+ 1046.00      C                   move      *blanks       dsdim5
+ 1047.00      C                   move      *blanks       dsdim6
+ 1048.00      C                   move      *blanks       dsdim7
+ 1049.00      C                   eval      dsvtxt = '*** Invalid Account ***'
+ 1050.00      C                   endif
+ 1051.00      C                   move      'Y'           offset
+ 1052.00       *
+ 1053.00      C* NEW BATCH FOR 320 --> 490 DUE TO -- DUE FROM  ENTRIES
+ 1054.00       *
+ 1055.00      c                   eval      acttot = (wkoffsetam * -1)
+ 1056.00      C                   if        acttot <> 0
+ 1057.00      C                   exsr      $writes
+ 1058.00      c                   movel     m3divi        svdivi
+ 1059.00      c                   movel     '490'         svdivi
+ 1060.00      c                   movel     'offset '     sdusr
+ 1061.00      C                   move      m3cono        svc1ny
+ 1062.00      c                   z-add     acttot        co#amt
+ 1063.00      C                   exsr      $writeoffset
+ 1064.00      C                   exsr      $writebatch
+ 1065.00      C                   endif
+ 1066.00       *
+ 1067.00       * Setup for first 960 record: get new batch/document number, etc.
+ 1068.00       *
+ 1069.00      C                   close     print132
+ 1070.00      C                   exsr      $first
+ 1071.00      c     bfaic3        ifeq      960
+ 1072.00      C                   move      *blanks       sdusr
+ 1073.00      C                   movel     'TFGLPOST'    sdusr
+ 1074.00      c                   endif
+ 1075.00      C*                  z-add     0             gljeln
+ 1076.00       *
+ 1077.00       * Write the 960 Offset record
+ 1078.00       *
+ 1079.00      c     bfaic3        ifeq      960
+ 1080.00      C                   eval      wkglcode = 'OFFAR960'
+ 1081.00      c                   endif
+ 1082.00      c     bfaic3        ifeq      440
+ 1083.00      C                   eval      wkglcode = 'OFFAR440'
+ 1084.00      c                   endif
+ 1085.00      c
+ 1086.00      C                   exsr      $getglid
+ 1087.00       *
+ 1088.00       *  retrieve M3 dims based on OFFAR960 and company 960/440
+ 1089.00       *
+ 1090.00      C     key08         chain     plb8rel5                           9
+ 1091.00      C                   if        *in92 =  *off
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  22
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+ 1092.00      C                   move      p1b8qpcd      dsdim1            8
+ 1093.00      C                   move      p1b8qqcd      dsdim2            8
+ 1094.00      C                   move      p1b8qrcd      dsdim3            8
+ 1095.00      C                   move      p1b8qscd      dsdim4            8
+ 1096.00      C                   move      p1b8qtcd      dsdim5            8
+ 1097.00      C                   move      p1b8qucd      dsdim6            8
+ 1098.00      C                   move      p1b8qvcd      dsdim7            8
+ 1099.00      C                   movel(p)  p1b8awt1      dsvtxt
+ 1100.00      C                   else
+ 1101.00      C                   move      *blanks       dsdim1
+ 1102.00      C                   move      *blanks       dsdim2
+ 1103.00      C                   move      *blanks       dsdim3
+ 1104.00      C                   move      *blanks       dsdim4
+ 1105.00      C                   move      *blanks       dsdim5
+ 1106.00      C                   move      *blanks       dsdim6
+ 1107.00      C                   move      *blanks       dsdim7
+ 1108.00      C                   eval      dsvtxt = '*** Invalid Account ***'
+ 1109.00      C                   endif
+ 1110.00       *
+ 1111.00      c                   eval      acttot = wkoffsetam
+ 1112.00      C                   if        acttot <> 0
+ 1113.00      C                   exsr      $writes
+ 1114.00      c                   z-add     wkoffsetam    co#amt
+ 1115.00      C                   endif
+ 1116.00       *
+ 1117.00      C                   endsr
+ 1118.00       /eject
+ 1119.00       *---------------------------------------------------------------
+ 1120.00       * One-time routine for first time through
+ 1121.00       *---------------------------------------------------------------
+ 1122.00       *
+ 1123.00      C     $first        begsr
+ 1124.00       *
+ 1125.00      C                   move      no            first
+ 1126.00      C                   move      no            battot
+ 1127.00      C                   open      print132
+ 1128.00      C                   z-add     0             page
+ 1129.00      C                   move      'N'           offset            1
+ 1130.00       *
+ 1131.00       * Retrieve a Batch Number from JDE
+ 1132.00       *
+ 1133.00      C*                  exsr      $batnbr
+ 1134.00       *
+ 1135.00       * Retrieve the Julian format of the Deposit Date
+ 1136.00       *
+ 1137.00      C*                  exsr      $julian
+ 1138.00       *
+ 1139.00       * Convert Deposit Date from CYYMMDD format to MMDDYY format.
+ 1140.00       *
+ 1141.00      C                   exsr      $synondt
+ 1142.00      C                   time                    wkhhmmss
+ 1143.00       *
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  23
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+ 1144.00       *
+ 1145.00       * Calculate the Period and Fiscal Year for the date
+ 1146.00       *
+ 1147.00      C*                  exsr      $period
+ 1148.00       *
+ 1149.00       * Generate a Document Number from JDE
+ 1150.00       *
+ 1151.00      C*                  exsr      $docnbr
+ 1152.00       *
+ 1153.00       * Retrieve next number  M3 voucher number series
+ 1154.00       *
+ 1155.00      C                   exsr      $nextnbr
+ 1156.00       *
+ 1157.00       *
+ 1158.00      C                   except    hdg
+ 1159.00      C                   except    dochdg
+ 1160.00       *
+ 1161.00      C*                  move      *zeros        glkco
+ 1162.00      C*                  move      bfaic3        glkco
+ 1163.00       *
+ 1164.00      C                   endsr
+ 1165.00       /eject
+ 1166.00       *---------------------------------------------------------------
+ 1167.00       * Convert Synon Deposit Date into MMDDYY format
+ 1168.00       *---------------------------------------------------------------
+ 1169.00       *
+ 1170.00      C     $synondt      begsr
+ 1171.00       *
+ 1172.00      C     *cymd         test(d)                 svdvdt
+ 1173.00      C                   if        *in92 = *off
+ 1174.00      C     *cymd         move      svdvdt        wkisodate
+ 1175.00      C     *iso          move      wkisodate     wk80dpdt
+ 1176.00      C     *mdy          move      wkisodate     wkmmddyy
+ 1177.00      C                   else
+ 1178.00      C                   z-add     0             wkmmddyy
+ 1179.00      C                   endif
+ 1180.00       *
+ 1181.00      C                   endsr
+ 1182.00       /eject
+ 1183.00       *---------------------------------------------------------------
+ 1184.00       * Calculate the Period and Fiscal Year for a date
+ 1185.00       *---------------------------------------------------------------
+ 1186.00       *
+ 1187.00      C*    $period       begsr
+ 1188.00       *
+ 1189.00      C*                  move      *zero         wkco
+ 1190.00      C*                  move      bfaic3        wkco
+ 1191.00      C*                  call      'X09031'
+ 1192.00      C*                  parm      '1'           xxcalc
+ 1193.00      C*                  parm      wkco          xxco
+ 1194.00      C*                  parm      wkmmddyy      wkdate
+ 1195.00      C*    glpn          parm      0             xxpn
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  24
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+ 1196.00      C*    glfy          parm      0             xxfy
+ 1197.00      C*    glctry        parm      0             xxctry
+ 1198.00      C*                  parm      *blank        xxedt
+ 1199.00      C*                  parm      *blank        xxdgsy
+ 1200.00       *
+ 1201.00      C*                  endsr
+ 1202.00       *eject
+ 1203.00       *---------------------------------------------------------------
+ 1204.00       * Retrieve a Batch Number from JDE
+ 1205.00       *---------------------------------------------------------------
+ 1206.00       *
+ 1207.00      C*    $batnbr       begsr
+ 1208.00       *
+ 1209.00      C*                  call      'X0010 '
+ 1210.00      C*                  parm      '00  '        xxsy
+ 1211.00      C*                  parm      '01'          xxidx
+ 1212.00      C*                  parm      0             xxbatch
+ 1213.00       *
+ 1214.00      C*                  movel     'G'           wktype
+ 1215.00       *
+ 1216.00      C*                  endsr
+ 1217.00       *eject
+ 1218.00       *---------------------------------------------------------------
+ 1219.00       * Retrieve a Document Number from JDE
+ 1220.00       *---------------------------------------------------------------
+ 1221.00       *
+ 1222.00      C*    $docnbr       begsr
+ 1223.00       *
+ 1224.00      C*                  call      'X0010 '
+ 1225.00      C*                  parm      '09  '        xxsy
+ 1226.00      C*                  parm      '02'          xxidx
+ 1227.00      C*    gldoc         parm                    xxdoc
+ 1228.00       *
+ 1229.00      C*                  endsr
+ 1230.00       /EJECT
+ 1231.00       *---------------------------------------------------------------
+ 1232.00       * Retrieve the Account info
+ 1233.00       *---------------------------------------------------------------
+ 1234.00       *
+ 1235.00      C**   $account      begsr
+ 1236.00       **
+ 1237.00       **Retrieve JDE account ID for the cost center/object/subsidiary
+ 1238.00       **
+ 1239.00      C**                 call      'X0901'
+ 1240.00      C**                 parm                    xxsym
+ 1241.00      C**                 parm      '9'           xxomod
+ 1242.00      C**                 parm      '1'           xximod
+ 1243.00      C*                  parm      svglid        xxani
+ 1244.00      C*                  parm      *blank        xxmcu
+ 1245.00      C*                  parm      *blank        xxobj
+ 1246.00      C*                  parm      *blank        xxsub
+ 1247.00      C*                  parm      *blank        xxerrm
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  25
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+ 1248.00      C*                  parm                    i0901ds
+ 1249.00       *
+ 1250.00      C*                  if        xxerrm = *blank
+ 1251.00      C*                  movel     xxdl01        wkdesc
+ 1252.00      C*                  movel     xxmcu         glmcu
+ 1253.00      C*                  movel     xxobj         globj
+ 1254.00      C*                  movel     xxsub         glsub
+ 1255.00      C*                  else
+ 1256.00      C*                  eval      wkdesc = '*** Invalid Account ***'
+ 1257.00      C*                  move      *blank        glmcu
+ 1258.00      C*                  move      *blank        globj
+ 1259.00      C*                  move      *blank        glsub
+ 1260.00      C*                  endif
+ 1261.00       *
+ 1262.00      C*                  endsr
+ 1263.00       /EJECT
+ 1264.00       *----------------------------------------------------------------
+ 1265.00       * get the GLID code from PKCWREP for the Account Codes
+ 1266.00       *----------------------------------------------------------------
+ 1267.00       *
+ 1268.00      C     $getglid      begsr
+ 1269.00       *
+ 1270.00       * Get account ID from pkcwrel5  based on the offset accounts
+ 1271.00       *
+ 1272.00      C                   eval      svglid  = *blank
+ 1273.00       *
+ 1274.00       * Retrieve Account I.D. associated with G/L Code.
+ 1275.00       *
+ 1276.00      C                   call      'PKTIXFR'
+ 1277.00      C                   parm                    return
+ 1278.00      C                   parm      wkco960       xxnumco
+ 1279.00      C                   parm      wkglcode      xxglcode
+ 1280.00      C     svglid        parm      *blank        xxaid             8
+ 1281.00      C                   parm      *blank        xxsubtype
+ 1282.00      C                   parm      *blank        xxbalsheet
+ 1283.00      C                   parm      *zeros        xxacctco
+ 1284.00       * Posting company
+ 1285.00      C                   z-add     xxacctco      svacctco
+ 1286.00       *
+ 1287.00      C                   endsr
+ 1288.00       /eject
+ 1289.00       *---------------------------------------------------------------
+ 1290.00       * Write the Batch Record to JDE
+ 1291.00       *---------------------------------------------------------------
+ 1292.00       *
+ 1293.00      C*    $writebatch   begsr
+ 1294.00       *
+ 1295.00      C*    key01         chain     f0011                              9
+ 1296.00      C*                  if        *in92 = *off
+ 1297.00      C*                  except    hdg
+ 1298.00      C*                  except    norec
+ 1299.00       *
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  26
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+ 1300.00      C*                  else
+ 1301.00      C*                  move      xxbatch       icicu
+ 1302.00      C*                  movel     wktype        icicut
+ 1303.00      C*                  move      batamt        icaicu
+ 1304.00      C*                  move      gldicj        icdicj
+ 1305.00      C*                  move      batndo        icndo
+ 1306.00      C*                  move      batamt        icame
+ 1307.00      C*                  move      batndo        icdocn
+ 1308.00      C*                  movel     sdusr         icuser
+ 1309.00      C*                  move      'A'           iciapp
+ 1310.00      C*                  move      'Y'           icbal
+ 1311.00      C*                  move      ' '           icbalj
+ 1312.00      C*                  move      ' '           icist
+ 1313.00      C*                  move      'N'           icpob
+ 1314.00      C*                  move      'Y'           iciboi
+ 1315.00      C*                  write     i0011
+ 1316.00       * reset batndo
+ 1317.00      C*                  z-add     0             batndo
+ 1318.00      C*                  z-add     0             batamt
+ 1319.00      C*                  endif
+ 1320.00       *
+ 1321.00      C*                  endsr
+ 1322.00       /eject
+ 1323.00       *---------------------------------------------------------------
+ 1324.00       * Initialization subroutine
+ 1325.00       *---------------------------------------------------------------
+ 1326.00       *
+ 1327.00      C     *inzsr        begsr
+ 1328.00       *
+ 1329.00       * Parm
+ 1330.00       *
+ 1331.00      C     *entry        plist
+ 1332.00      C                   parm                    return
+ 1333.00      C                   parm                    xxtfflag
+ 1334.00      C                   parm                    livewM3           1
+ 1335.00       *
+ 1336.00       * Key Lists
+ 1337.00       *
+ 1338.00      C*    key01         klist
+ 1339.00      C*                  kfld                    wktype
+ 1340.00      C*                  kfld                    xxbatch
+ 1341.00       *
+ 1342.00      C                   time                    rtime
+ 1343.00       *
+ 1344.00       * Put system date into an 8,0 field.
+ 1345.00       * Then, get it into Synon format of CYYMMDD to use in updating AR
+ 1346.00       *
+ 1347.00      C     *mdy          movel     udate         wkisodate
+ 1348.00      C                   movel     wkisodate     xxccyymmdd
+ 1349.00      C                   call      'HP8008'
+ 1350.00      C                   parm                    xxccyymmdd
+ 1351.00      C                   parm      0             xxsyssyndt
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  27
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+ 1352.00       *
+ 1353.00      C                   move      xxccyymmdd    m3keydt
+ 1354.00       *
+ 1355.00       *
+ 1356.00       * Get system date into the format required by JDE by calling JDE'
+ 1357.00       * Save the date for populating lots of fields.
+ 1358.00       *
+ 1359.00      C                   time                    wktime
+ 1360.00      C                   move      wkdate        xxsidat
+ 1361.00       *
+ 1362.00       * Put system date into an 7,0 workfield for updating the synon ta
+ 1363.00       *
+ 1364.00      C                   z-add     xxccyymmdd    wkyymmdd          6 0
+ 1365.00      C                   if        xxccyymmdd >= 20000000
+ 1366.00      C     wkyymmdd      add       1000000       wksyssyndt
+ 1367.00      C                   else
+ 1368.00      C                   z-add     wkyymmdd      wksyssyndt
+ 1369.00      C                   endif
+ 1370.00       *
+ 1371.00      C                   call      'X0028'
+ 1372.00      C                   parm                    xxsidat
+ 1373.00      C                   parm      *blank        xxedat
+ 1374.00      C                   parm      '*SYSVAL'     xxffmt
+ 1375.00      C                   parm      '*JUL   '     xxtfmt
+ 1376.00      C                   parm      '*NONE  '     xxsep
+ 1377.00      C                   parm      *blank        xxertst
+ 1378.00      C                   parm      *blank        xxctryalph
+ 1379.00       *
+ 1380.00      C*                  move      xxsidat       glupmj
+ 1381.00      C*                  move      xxsidat       gldsyj
+ 1382.00       *
+ 1383.00      C*                  time                    glticu
+ 1384.00      C*                  time                    glupmt
+ 1385.00       *
+ 1386.00      C*                  move      sdpgm         glpid
+ 1387.00      C*                  movel     sdjob         gljobn
+ 1388.00       *
+ 1389.00       *
+ 1390.00       * Retrieve JDE cost center/object/sub for JDE account id to use i
+ 1391.00       * equivalent.
+ 1392.00       *
+ 1393.00      C*    key07         klist                                    p1616
+ 1394.00      C*                  kfld                    xxmcu
+ 1395.00      C*                  kfld                    xxobj
+ 1396.00      C*                  kfld                    xxsub
+ 1397.00       *
+ 1398.00       * Retrieve M3 Dims based on company and GL account code
+ 1399.00       *
+ 1400.00      C     key08         klist
+ 1401.00      C                   kfld                    xxacctco
+ 1402.00      C                   kfld                    wkglcode
+ 1403.00      C                   endsr
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  28
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+ 1404.00       /eject
+ 1405.00       *-------------------------------------------------------------
+ 1406.00       * Report heading lines
+ 1407.00       *-------------------------------------------------------------
+ 1408.00       *
+ 1409.00      Oprint132  E            HDG            1 01
+ 1410.00      O                                           10 'M3ARMSCRB'
+ 1411.00      O                                           63 'ACCOUNTS RECEIVABL
+ 1412.00      O                                           70 'SYSTEM'
+ 1413.00      O                       UDATE         Y    131
+ 1414.00      O          E            HDG            1
+ 1415.00      O                       sdusr               10
+ 1416.00      O                                           68 'MISCELLANEOUS POST
+ 1417.00      O                       RTIME              131 '0 :  :  '
+ 1418.00      O          E            HDG            1
+ 1419.00      O                                          127 'PAGE'
+ 1420.00      O                       PAGE          Z    131
+ 1421.00       *
+ 1422.00      O          E            HDG            2
+ 1423.00       *                                  10 'SELECTION:'
+ 1424.00      O*                                          87 'JDE BATCH # .. :'
+ 1425.00      O*                      wktype              95
+ 1426.00      O*                      xxbatch       z    104
+ 1427.00      O                                           92 'M3 Key Value.. :'
+ 1428.00      O                       m3keyvalue         106
+ 1429.00       *
+ 1430.00      O          E            HDG            1
+ 1431.00      O*                                          18 'DOCUMENT  DEPOSIT'
+ 1432.00      O                                           18 'M3 Series DEPOSIT'
+ 1433.00      O                                           27 'DEPOSIT'
+ 1434.00      O*                                          55 'COST     OBJECT  S
+ 1435.00      O*                                          73 'CODE  DESCRIPTION'
+ 1436.00      O*                                         101 'SUBLEDGER'
+ 1437.00      O*                                         118 'AMOUNT'
+ 1438.00      O                                           59 'Object   Facility
+ 1439.00      O                                           85 'SubAcct  Cust#
+ 1440.00      O                                           93 'Subldgr'
+ 1441.00      O                                          105 'Description'
+ 1442.00      O                                          126 'AMOUNT'
+ 1443.00       *
+ 1444.00      O          E            HDG            2
+ 1445.00      O                                           26 'DATE     TIME'
+ 1446.00      O                                           55 'DIM1     DIM2
+ 1447.00      O                                           80 'DIM4     DIM5
+ 1448.00      O                                           90 'DIM7'
+ 1449.00       *
+ 1450.00      O          E            DOCHDG      1  0
+ 1451.00      O*                      gldoc         Z      8
+ 1452.00      O                       m3series             8
+ 1453.00      O                       wkmmddyy            18 '  /  /  '
+ 1454.00      O                       BFYXNX              25 '0 :  '
+ 1455.00       *
+
+
+
+
+
+   9/12/25   5:42:26  SBFDEV       Print Source File - PRTSRCF    Page  29
+Member - M3ARMSCRB    File - QRPGLESRC    Lib - PRKSYNSRC    Src typ - RPGLE
+
+  SEQNBR *...+... 1 ...+... 2 ...+... 3 ...+... 4 ...+... 5 ...+... 6 ...+... 7
+
+ 1456.00       *----------------------------------------------------------------
+ 1457.00       * Detail line
+ 1458.00       *----------------------------------------------------------------
+ 1459.00       *
+ 1460.00      O          e            l1dtl          1
+ 1461.00      O*                      glmcu               40
+ 1462.00      O*                      globj               48
+ 1463.00      O*                      glsub               58
+ 1464.00      O*                      wkdesc              91
+ 1465.00      O*                      GLSBL              101
+ 1466.00      O*                      acttot        j    125
+ 1467.00      O                       b8qpcd              41
+ 1468.00      O                       b8qqcd              50
+ 1469.00      O                       b8qrcd              59
+ 1470.00      O                       b8qscd              68
+ 1471.00      O                       b8qtcd              77
+ 1472.00      O                       b8qucd              86
+ 1473.00      O                       b8qvcd              95
+ 1474.00      O                       dsdescp            118
+ 1475.00      O                       ACTTOT        J    131
+ 1476.00       *
+ 1477.00       *----------------------------------------------------------------
+ 1478.00       * No data message
+ 1479.00       *----------------------------------------------------------------
+ 1480.00       *
+ 1481.00      O          e            norec       2
+ 1482.00      O                                           33 'No records selecte
+ 1483.00       *
+
+
+
+     Number of records- 1483
+>>>>>>> 073ae9afd8421ea7f2cdac1e9c9de0087a5f4713

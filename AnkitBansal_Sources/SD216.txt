@@ -1,0 +1,348 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Margin Management
+      * PROGRAM:     SD216 - Signal Demand: Aged Inventory
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     03/05/08
+      *
+      * FUNCTION: This program builds the Aged Inventory file.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * Date      Programmer
+      *
+      * 05/05/08  LeAnne Ramsey
+      *           For the Frozen warehouses only:
+      *           Added new logic based on Warehouse, Sold 100% Frozen, Make to Order.
+      *
+      *           A longer lead time is required when there is a demand for:
+      *            1) items that are sold frozen that are not normally sold frozen or
+      *            2) frozen "make to order" items
+      *           The availability of fresh product must be adjusted on the appropriate
+      *           day for the production of this frozen demand.
+      *
+      *           So, availability logic here will accumulate Quantity/Weight scheduled on
+      *           Open Orders when:
+      *             1) the warehouse is a Frozen warehouse and the Item is:
+      *                 a) Sold 100% Frozen=No  or
+      *                 b) Sold 100% Frozen=Yes and Make to Order=Yes
+      *
+      * 03/02/10  LeAnne Ramsey
+      *           Recompile only. The Synon folks changed file OPBGWKP-Order Detail for
+      *           Phase 1 of the Age Code project.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fcaadrel3  if   e           k disk
+      *   Warehouse               (LF selects only Active records)
+      *
+      *
+     Fcab1rel2  if   e           k disk
+      *   IC Item balance detail
+      *
+      *
+     Fcab0relc  if   e           k disk
+      *   IC Item balance
+      *
+      *
+     Fombyrel1  if   e           k disk
+      *  Item default
+      *
+      *
+     Fopbfcpl1  if   e           k disk
+      *   PO order header
+      *
+      *
+     Fopbgwkmf  if   e           k disk
+      *   PO order detail
+      *
+      *
+     Fsdp216    uf a e           k disk
+      *    Signal Demand: Aged inventory
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *---------------------------------------------------------------
+      *  Standalone fields
+      *---------------------------------------------------------------
+      *
+      * Workfields
+      *
+     D wkdays          s              3  0
+     D wkagecd         s                   like(aiagecd)
+     D wkqt            s                   like(omccqt)
+     D wkwg            s                   like(omauwg)
+      *
+      *
+      * Fields for date manipulation
+      *
+     D wksysdt7        s              7  0
+     D wkisodate       s               d   datfmt(*iso)
+      *
+      ****************************************************************
+      * Data Structures
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * Mainline
+      ***************************************************************************************
+      *
+      * Process each Warehouse record (LF selects only Active warehouses).
+      * (We expect records to always have a Shipping Company; but, just to be safe,
+      * do not process any record that does not have a value in Shipping Company.)
+      *
+     C     *loval        setll     caadrel3
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      caadrel3                               90
+      *
+     C                   select
+     C                   when      *in90 = *on or adbwc3 = 0
+      *
+     C                   when      adwpst = 'FR'
+     C                   exsr      $fresh
+      *
+     C                   when      adwpst = 'FZ'
+     C                   exsr      $frozen
+     C                   endsl
+      *
+     C                   enddo                                                  Main do
+      *
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * For FRESH warehouses, process Item Balance Detail records
+      *---------------------------------------------------------------
+      *
+      * Read all records for this Company/Warehouse.
+      *
+     C     $fresh        begsr
+      *
+     C     key01         setll     cab1rel2
+      *
+     C                   dou       *in91 = *on                                  Do fresh
+     C     key01         reade     cab1rel2                               91
+     C                   if        *in91 = *off and b1acwg > 0                  If on-hand wgt
+      *
+      * Determine Age Code
+     C                   exsr      $agecd
+      *
+      * Update/write a record for this Company/Warehouse/Item/Age Code
+      *
+     C     key02         chain     sdp216                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   add       b1acwg        aiohwg
+     C                   add       b1arqt        aiohqt
+     C                   update    airec
+     C                   else
+      *
+     C                   z-add     adbwc3        aibwc3
+     C                   move      adajcd        aiajcd
+     C                   move      adwpst        aiwpst
+     C                   move      adt0st        ait0st
+     C                   z-add     b1hgcd        aihgcd
+     C                   z-add     b1acwg        aiohwg
+     C                   z-add     b1arqt        aiohqt
+     C                   move      wkagecd       aiagecd
+     C                   write     airec
+     C                   endif                                                  If hit
+      *
+     C                   endif                                                  If on-hand wgt
+     C                   enddo                                                  Do fresh
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Determine the Age Code for Fresh Items
+      *---------------------------------------------------------------
+      *
+     C     $agecd        begsr
+      *
+     C     wksysdt7      sub       b1eldt        wkdays
+      *
+     C                   select
+     C                   when      wkdays <= 0
+     C                   move      'A'           wkagecd
+      *
+     C                   when      wkdays = 1
+     C                   move      'B'           wkagecd
+      *
+     C                   when      wkdays = 2
+     C                   move      'C'           wkagecd
+      *
+     C                   when      wkdays = 3
+     C                   move      'D'           wkagecd
+      *
+     C                   when      wkdays = 4
+     C                   move      'E'           wkagecd
+      *
+     C                   when      wkdays = 5
+     C                   move      'F'           wkagecd
+      *
+     C                   when      wkdays = 6
+     C                   move      'G'           wkagecd
+     C                   other
+      *
+     C                   move      'H'           wkagecd
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * For FROZEN warehouses, process Item Balance records
+      *---------------------------------------------------------------
+      *
+     C     $frozen       begsr
+      *
+      * Populate fields that will not change with values from the Warehouse file.
+      *
+     C                   z-add     adbwc3        aibwc3                         Shipping company
+     C                   move      adajcd        aiajcd                         Warehouse code
+     C                   move      adwpst        aiwpst                         Warehouse type
+     C                   move      adt0st        ait0st                         Warehouse location
+     C                   move      'H'           aiagecd                        Age code
+      *
+      * Read Item Balance records for this:
+      *   Shipping Company
+      *   Warehouse Code
+      *
+     C     key01         setll     cab0relc
+      *
+     C                   dou       *in91 = *on                                  Do frozen
+     C     key01         reade     cab0relc                               91
+     C                   if        *in91 = *off and b0bowg > 0                  If on-hand wgt
+      *
+      * Clear accmulators
+      *   1) Quantity scheduled
+      *   2) Weight scheduled
+      *
+     C                   z-add     0             wkqt
+     C                   z-add     0             wkwg
+      *
+      * Retrieve Item Default values. Then,
+      * Accumulate Open Order values for "demand" items where:
+      *   1) Sold 100% Frozen=No or
+      *   2) Sold 100% Frozen=Yes and Make to Order=Yes
+      *
+     C     b0hgcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off and                             If demand
+     C                             (bys4st = no or
+     C                             (bys4st = yes and byxxst = yes))
+     C                   exsr      $orders
+     C                   endif                                                  If demand
+      *
+      * If your on-hand quantity is greater than the "demand", write a
+      * record (since you have some 'available' product).
+      *
+     C                   if        b0ddqt > wkqt                                If available
+     C                   z-add     b0hgcd        aihgcd
+     C                   eval      aiohqt = b0ddqt - wkqt
+     C                   eval      aiohwg = b0bowg - wkwg
+     C                   write     airec
+     C                   endif                                                  If available
+      *
+     C                   endif                                                  If on-hand wgt
+     C                   enddo                                                  Do frozen
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Accumulate Open Order Detail quantities for an Item/Warehouse
+      *---------------------------------------------------------------------------------------
+      *
+      * This subroutine is performed only for "demand" items in Frozen Warehouses.
+      *
+     C     $orders       begsr
+      *
+      * Read all Order Detail records for this Item/Warehouse.
+      *
+     C     key03         setll     opbgwkmf
+      *
+     C                   dou       *in93 = *on                                  Do detail
+     C     key03         reade     opbgwkmf                               93
+     C                   if        *in93 = *off                                 If not EOF
+      *
+      * Retrieve the Order Header; continue when the order is:
+      *    1.  NOT in a Complete Status  (begwst = "C")
+      *    2.  NOT in a Cancelled Status (begwst = "X")
+      *    3.  A Sales Order             (bejncd = "OR")
+      *
+     C     key04         chain     opbfcpl1                           92
+     C                   if        *in92 = *off and                             If header
+     C                             begwst <> 'C' and
+     C                             begwst <> 'X' and
+     C                             bejncd = 'OR'
+      * Accumulate:
+      *   Quantity scheduled
+      *   Weight scheduled
+     C                   add       omccqt        wkqt
+     C                   add       omauwg        wkwg
+     C                   endif                                                  If header
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do detail
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    adbwc3
+     C                   kfld                    adajcd
+      *
+     C     key02         klist
+     C                   kfld                    b1aic3
+     C                   kfld                    b1ajcd
+     C                   kfld                    b1hgcd
+     C                   kfld                    wkagecd
+      *
+     C     key03         klist
+     C                   kfld                    b0hgcd
+     C                   kfld                    b0ajcd
+      *
+     C     key04         klist
+     C                   kfld                    omaic3
+     C                   kfld                    omc4nb
+      *
+      *
+      * Put system date into Synon format of CYYMMDD.
+      *
+     C     *mdy          movel     udate         wkisodate
+     C     *cymd         movel     wkisodate     wksysdt7
+      *
+     C                   endsr
+      /EJECT

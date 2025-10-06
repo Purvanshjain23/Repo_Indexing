@@ -1,0 +1,483 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF314 - Workfile: Missing Cost/Yield Report
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     02/03/09
+      *
+      * Function:    Build the workfile for the report.
+      *
+      *        Note: We have had the Missing Cost/Yield Report since 2006.
+      *              But, with our new Weekly Yield Reports, Damon G. needed to
+      *              know if he was missing the Yield % for some WPs.
+      *              So, we went to workfile logic.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/15/12  LeAnne Ramsey (E2337)
+      *           Recompile only.
+      *           Rose had to increase the price/cwt field sizes in PPBTCPP-Inventory
+      *           Value file and PPBSCPP-Inventory Stock Closing.
+      *
+      * 11/14/17  Danny Nguyen  (R12011A-Weekly Product Revenue)
+      *           Recompile only. Added 25 STF fields to TFP010 file.
+      *
+      * 05/17/22  Danny Nguyen  (DO2484 - WI 479 STF Variance Reporting)
+      *           Recompile only. Added 2 STF fields to TFP010 file.
+      *           PRXYPC   - STF STD YIELD %
+      *           PRXPMPPC - STF PUMP %
+      *
+      * W105621 RMC 10/10/2022 INCREASE FIELD SIZES TO HANDLE PRICES > 999.99
+      *         CHANGE @@ANPRPR TO SIZE 10.6
+      *           CHANGES PRANPRPR IN TFP010
+      *
+      /eject
+      *********************************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fombyrel1  if   e           k disk
+      *    Item Default
+      *
+      *
+     Fppaorel1  if   e           k disk
+      *  TF margin adjustment group detail
+      *
+      *
+     Fppbscpl3  if   e           k disk
+      *    Inventory stock closing
+      *
+      *
+     Fpoaxcpl1  if   e           k disk
+      *  Item standard cost
+      *
+      *
+     Ftfl010f   if   e           k disk
+      *  Weekly product revenue detail  (records selected by open query)
+      *
+      *
+     Ftfl019b   if   e           k disk
+      *  Product exceptions
+      *
+      *
+     Ftfp314    uf a e           k disk
+      *  Workfile: Missing Cost/Yield Report
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D svprcd          s                   like(w1prcd)
+      *
+      *
+      * Work fields
+      *
+     D wklb            s                   like(prasllb)
+     D wkmixfl         s                   like(pemixfl)
+     D wkvolfl         s                   like(pevolfl)
+     D wkcocd          s                   like(axaic3)   inz(360)
+      *
+      *
+      * Parms
+      *
+     D xxprcd          s                   like(w1prcd)
+     D xxprdcmp        s              3
+     D xxcgcd          s              4
+     D xxmixgrp        s              1
+     D xxsumlev        s             22
+     D xxistycd        s                   like(w1istycd)
+     D xxisgrcd        s              3  0
+     D xxisclcd        s              3  0
+     D xxtfclcd        s              3
+     D xxtfcgcd        s              2
+     D xxitycd         s              2
+     D xxcoownfl       s              1
+     D xxglsub         s              3
+     D xxedfl          s              1
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *
+      *---------------------------------------------------------------
+      *  Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwedt                29     36  0
+     D  ldwesyn               37     43  0
+     D  ldwemdy               44     49  0
+      *
+     D  ldrpt                113    113
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * Process Weekly Product Revenue Detail records
+      *
+     C                   exsr      $revenue
+      *
+      * Process WPs from Inventory files
+      * Note: We added this logic to catch certain WP Items that need a Yield % to
+      *       allow us to calc Starting Pounds on the new Weekly Yield Reports.
+      *       No "ByProduct" WP on the new Weekly Yield Reports needs a Yield %.
+      *       So, we only need to do this processing if the user is running the
+      *           "No ByProduct" version of this report.
+      *
+     C                   if        ldrpt = 'N'
+     C                   exsr      $inventory
+     C                   endif
+      *
+      * EOF processing
+     C                   seton                                        lr
+      /eject
+      *------------------------------------------------------------------------------------
+      * Process all Weekly Product Revenue Detail records selected by the Open Query
+      *------------------------------------------------------------------------------------
+      *
+     C     $revenue      begsr
+      *
+     C                   dou       *in91 = *on                                  Do revenue
+     C                   read      tfl010f                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * Determine if Product is Excluded/Included in processing.
+      *
+     C                   exsr      $excluded
+      *
+      * If the Product is completely excluded, do not continue.
+      *
+     C                   if        wkmixfl = no and wkvolfl = no and
+     C                             prtfcgcd <> 'VA'
+     C                   else
+     C                   exsr      $check
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do revenue
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * Determine if Product is Excluded/Included in Processing (logic for Revenue records)
+      *------------------------------------------------------------------------------------
+      *
+     C     $excluded     begsr
+      *
+      * Retrieve the following values from the TF Margin Adjustment Group Detail file:
+      *         Mix flag
+      *         Volume flag
+      * Using a key of:
+      *         TF Classification Code
+      *         Item Structure Type Code
+      *         Item Structure Group Code
+      *         Item Structure Class Code
+      *
+     C     key01         chain     ppaorel1                           92
+     C                   if        *in92 = *off
+     C                   move      aoswsx        wkmixfl
+     C                   move      aosxsx        wkvolfl
+     C                   endif
+      *
+      * Overlay these values with the values from the Product Exception records
+      * Key:
+      *   Week-ending date
+      *   Product
+      *
+     C     key03         setll     tfl019b
+      *
+     C                   dou       *in93 = *on                                  Do excepts
+     C     key03         reade     tfl019b                                93
+     C                   if        *in93 = *off
+      *
+     C                   if        pemixfl <> wkmixfl
+     C                   move      pemixfl       wkmixfl
+     C                   endif
+      *
+     C                   if        pevolfl <> wkvolfl
+     C                   move      pevolfl       wkvolfl
+     C                   endif
+      *
+     C                   endif
+     C                   enddo                                                  Do excepts
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------
+      * Check for missing records/data (logic for Revenue records) and write workfile recs
+      *-------------------------------------------------------------------------------------
+      *
+     C     $check        begsr
+      *
+      * Set up fields that will not change
+      *
+     C                   clear                   w1rec
+      *
+     C                   z-add     prprcd        w1prcd
+     C                   z-add     pristycd      w1istycd
+     C                   move      prtfclcd      w1tfclcd
+     C                   move      pritycd       w1itycd
+     C                   z-add     prasllb       w1asllb
+     C     prspulb       add       prtpulb       w1apulb
+      *
+     C     prprcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      w1prds = byavna
+     C                   endif
+      *
+      * Perform validations/write workfile records (1 for each message)
+      *
+     C     key02         chain     poaxcpl1                           92
+      *
+     C                   select                                                 Select 1
+     C                   when      *in92 = *on
+     C                   eval      w1msg = 'No record exists in POAXCPP-Item +
+     C                                      Standard Cost.'
+     C                   write     w1rec
+     C                   other
+      * Yield %
+     C                   if        axfcpc = 0
+     C                   eval      w1msg = 'Yield in POAXCPP-Item Standard +
+     C                                      Cost is zero.'
+     C                   write     w1rec
+     C                   endif
+      *
+      * Meat and Packaging Costs
+      *
+     C                   eval      wklb = prasllb + prspulb + prtpulb
+      *
+      * Report: Byproduct
+     C                   select                                                 Select 2
+     C                   when      ldrpt = 'B' and axedpr = 0
+     C                   if        pritycd <> 'WP'
+     C                   eval      w1msg = 'Std Packaging Cost/LB in POAXCPP-+
+     C                                      Item Standard Cost is zero.'
+     C                   write     w1rec
+     C                   endif
+      *
+      * Report: No Byproducts
+      *  Note: Do not perform this check when:
+      *    1) It is a VA
+      *    2) It is an NV with zero Sold/Produced pounds
+      *    3) It is a CV with zero Sold/Produced Pounds and it is excluded
+      *       from Volume processing
+      *
+     C                   when      ldrpt = 'N'
+     C                   if        prtfcgcd = 'VA' or                           If don't perform
+     C                             (prtfcgcd = 'NV' and wklb = 0) or
+     C                             (prtfcgcd = 'CV' and wklb = 0 and
+     C                              wkvolfl = no)
+     C                   else
+      *       Meat Cost
+     C                   if        axfrpr = 0
+     C                   eval      w1msg = 'Std Meat Cost/LB in POAXCPP-Item +
+     C                                      Standard Cost is zero.'
+     C                   write     w1rec
+     C                   endif
+      *
+      *   Packaging Cost
+     C                   if        axedpr = 0 and pritycd <> 'WP'
+     C                   eval      w1msg = 'Std Packaging Cost/LB in POAXCPP-+
+     C                                      Item Standard Cost is zero.'
+     C                   write     w1rec
+     C                   endif
+     C                   endif                                                  If don't perform
+     C                   endsl                                                  Select 2
+     C                   endsl                                                  Select 1
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * Process WP records from the Inventory Stock Closing file
+      *------------------------------------------------------------------------------------
+      *
+      * We added this WP processing when we developed the Weekly Yield Reports.
+      * Damon G. needed to know when WPs on the Weekly Yield Reports were missing
+      * Yield Percent in the Standard Cost file.
+      * So, in our processing here, we are using the WP rules from the Weekly Yield
+      * Reporting to determine which WPs to include/validate.
+      *
+     C     $inventory    begsr
+      *
+     C     ldwedt        setll     ppbscpl3
+      *
+     C                   dou       *in91 = *on                                  Do WIPs
+     C     ldwedt        reade     ppbscpl3                               91
+     C                   if        *in91 = *off and bsw1sx = 'WP '              If not EOF
+      *
+      * The file will have a Seaboard record and a Triumph record for each Item.
+      * So, we want to get both records before we write our Workfile records.
+      *
+     C                   select
+     C                   when      first = yes
+     C                   z-add     bsejc7        svprcd
+     C                   move      no            first
+      *
+     C                   when      bsejc7 <> svprcd
+     C                   if        w1apulb <> 0
+     C                   exsr      $validate
+     C                   endif
+     C                   clear                   w1rec
+     C                   z-add     bsejc7        svprcd
+     C                   endsl
+      *
+      * Detail processing
+      *
+     C                   if        bsb2c3 = 360 or bsb2c3 = 960
+     C                   add       bsmtwg        w1apulb
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do WIPs
+      *
+      * Last Item
+     C                   if        first = no and w1apulb <> 0
+     C                   exsr      $validate
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------
+      * Validate this WIP Item
+      *-------------------------------------------------------------------------------------
+      *
+     C     $validate     begsr
+      *
+     C                   z-add     svprcd        w1prcd
+      *
+      * Retrieve TF Classification and Item Structure stuff
+      *
+     C                   call      'TF813'
+     C                   parm      w1prcd        xxprcd
+     C     w1istycd      parm      0             xxistycd
+     C                   parm      0             xxisgrcd
+     C                   parm      0             xxisclcd
+     C     w1tfclcd      parm      *blank        xxtfclcd
+     C                   parm      *blank        xxtfcgcd
+     C                   parm      *blank        xxglsub
+     C     w1itycd       parm      *blank        xxitycd
+     C                   parm      *blank        xxcoownfl
+     C                   parm      *blank        xxprdcmp
+     C                   parm      *blank        xxedfl
+      *
+      * If the WIP Item:
+      *  1) has a TF Classification
+      *  2) is not a BP
+      *  3) is not a Co-Pack
+      *     Note: These "rules" address the WPs that need a Starting Weight
+      *           calculated on the Weekly Yield Reports.
+      *
+     C                   if        xxtfclcd <> *blank and                       If processing
+     C                             xxtfcgcd <> 'BP' and
+     C                             xxistycd <> 900
+      *
+      * If the Item is already in the workfile, don't validate it again.
+      * I don't think it will be in the workfile. But, we do have some WPs in
+      * the Revenue file. So, who knows, it might already have been validated
+      * in the Revenue routine.
+      *
+     C     key04         chain(n)  tfp314                             92
+     C                   if        *in92 = *on                                  If continue
+      *
+      * Retrieve Item Description
+      *
+     C     w1prcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      w1prds = byavna
+     C                   endif
+      *
+      * Check Standard Cost file for:
+      *   1) record exists
+      *   2) yield percent
+      *
+     C     key02         chain     poaxcpl1                           92
+      *
+     C                   select
+     C                   when      *in92 = *on
+     C                   eval      w1msg = 'No record exists in POAXCPP-Item +
+     C                                      Standard Cost.'
+     C                   write     w1rec
+     C                   other
+      * Yield %
+     C                   if        axfcpc = 0
+     C                   eval      w1msg = 'Yield in POAXCPP-Item Standard +
+     C                                      Cost is zero.'
+     C                   write     w1rec
+     C                   endif
+     C                   endsl
+     C                   endif                                                  If continue
+     C                   endif                                                  If processing
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    prtfclcd
+     C                   kfld                    pristycd
+     C                   kfld                    prisgrcd
+     C                   kfld                    prisclcd
+      *
+     C     key02         klist
+     C                   kfld                    wkcocd
+     C                   kfld                    w1prcd
+     C                   kfld                    ldwesyn
+      *
+     C     key03         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    prprcd
+      *
+     C     key04         klist
+     C                   kfld                    w1tfclcd
+     C                   kfld                    w1istycd
+     C                   kfld                    w1prcd
+      *
+      *
+     C                   endsr
+      /eject

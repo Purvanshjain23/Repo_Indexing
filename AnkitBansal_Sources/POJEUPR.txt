@@ -1,0 +1,1320 @@
+     H****************************************************************
+     H* Program: POJEUPR                                             *
+     H*   Title: Breakup & Distribute the Lockbox Transmission File  *
+     H*    Date: 02/03/98                                            *
+     H*    Desc: - Breaks down the different record types and writes *
+     H*            the data into its appropriate file.               *
+     H****************************************************************
+     H* Modifications:                                               *
+     H*                                                              *
+     H*   Date     Pgmr     Description                              *
+     H* -------- ---------- ---------------------------------------- *
+     H* 02/03/98 ISBLAWS    Copied from the poultry Lock Box Pgm     *
+     H*                     ARS204.                                  *
+     H*                                                              *
+     H* 08/25/98 ISBLAWS    Year 2000 Compliance                     *
+     H*                                                              *
+     H* 11/16/00 ISPPATE    YCHANGED NBLCKBOX TO BALCKBOX            *
+     H* 05/25/01 ISRCENT    CHANGE FIRST SUBR TO LOCKBOX BREAK INSTEAD
+     H*                     OF A FIRST TIME ONLY SUBR.               *
+     H* 06/18/01 ISRCENT    IN VALTYP SUBR, WHEN RCDTYP IS 5,A PRIOR *
+     H*                     RECORD COULD ALSO BE 8, SINCE THEY'RE    *
+     H*                     SENDING 2 DEPOSITS IN ONE FILE.          *
+     H* 09/13/01 ISRCENT    CALL PDI9XFR AT RCD TYPE 8.(PROCESS      *
+     H*                     DEPOSITS AND CRT SYSTEM GEN WRITEOFFS &  *
+     H*                     CHARGEBACKS.)                            *
+     H*                     ALLOW FOR TWO -8- RECORDS IN A ROW IF THE
+     H*                     2ND -8- RCD HAS NO $ & NO CHECKS.
+     H*                                                              *
+     H* 08/16/02 ISRCENT    CHG SNDDST TO SNDPGRMSG                  *
+     H* 04/06/05 ISRCENT    Changes for multiple lockbox per day:    *
+     H*          Read the '1' record for the deposit time, which is  *
+     H*          now part of the key in the deposit files.           *
+     H*          REMOVED Company from the keys in the deposit files. *
+     H*   note:  The deposit date is in this record, but its already *
+     H*          being used from other records.
+     H* 12/20/05 ISRCENT    PUT COMPANY BACK INTO A/R LOCKBOX INV &  *
+     H*                     A/R ADJ TYPE FILES.                      *
+     H*                     GET COMPANY FROM A/R HDR INVOICE RCD     *
+     H* 05/27/10 ISBGUTI    Migrating to Bank of New York.  Need to  *
+     H*                     keep current umb process in tact until we*
+     H*                     know it has been turned off.             *
+     H*                                                              *
+     H*                     Also, Dailys lockboxes are now going to  *
+     H*                     be combined into one instead of          *
+     H*                     individual for each company.  New        *
+     H*                     location code is DPM instead of SLC and  *
+     H*                     MMT.                                     *
+     H* 11/17/15 ISRCENT    STMT 714 WAS COMMENTED, ERRONEOUSLY YEARS AGO,
+     H*     C4238           SO THE 2ND INV$ WASNT GETTING OUTPUT TO LOCKBOX INV
+     H****************************************************************
+     H*
+     F*----------------------------------------------------------*
+     F*------------------- Transmission File --------------------*
+     F*----------------------------------------------------------*
+     FBALCKBOXIF  E                    DISK
+     F*
+     F*----------------------------------------------------------*
+     F*---------------- A/R HEADER FILE FOR COMPANY NMB RTVAL---*
+     F*----------------------------------------------------------*
+     FARBDCPLGIF  E           K        DISK
+     F*----------------------------------------------------------*
+     F*---------------- A/R Lockbox Deposit File ----------------*
+     F*----------------------------------------------------------*
+     FPDMACPL0UF  E           K        DISK                      A
+     F*
+     F*----------------------------------------------------------*
+     F*----------------- A/R Lockbox Batch File -----------------*
+     F*----------------------------------------------------------*
+     FPDMBCPL0UF  E           K        DISK                      A
+     F*
+     F*----------------------------------------------------------*
+     F*----------------- A/R Lockbox Check File -----------------*
+     F*----------------------------------------------------------*
+     FPDMCCPL0UF  E           K        DISK                      A
+     F*
+      /EJECT
+     F*----------------------------------------------------------*
+     F*---------------- A/R Lockbox Invoice File ----------------*
+     F*----------------------------------------------------------*
+     FPDMDCPL0O   E           K        DISK                      A
+     F*
+     F*----------------------------------------------------------*
+     F*------------------ Error Printer File --------------------*
+     F*----------------------------------------------------------*
+     FPDIRUPR$O   E                    PRINTER
+     F*
+      /EJECT
+     E*----------------------------------------------------------*
+     E*----------------- Define program tables ------------------*
+     E*----------------------------------------------------------*
+     E                    MSGTBL  1  10 80
+     E                    CN         30  1
+     I*
+     I*--- Error Message Data Area ---*
+     ICMD         DS
+     I                                        1  80 CMD1
+     I                                       81 160 CMD2
+      /EJECT
+     I*----------------------------------------------------------*
+     I*------------- Define Input Record Formats ----------------*
+     I*----------------------------------------------------------*
+     I*
+     I*--------------------------------------------*
+     I*--- Lockbox Batch Record - Generic Rcd   ---*
+     I*--------------------------------------------*
+     I*
+     ITRANS       DS
+     I                                        1   1 RCDTYP
+     I                                        2  80 FILL1
+     I*
+     I*
+     I*---------------------------------------------------*
+     I*--- Lockbox Batch Record - Record Code 1 (RCD1) ---*
+     I*---------------------------------------------------*
+     I*        char    description       num
+     I*       ------   --------------   ------
+     I*       R1TYPE - Record Type
+     I*       R1FIL1 - Filler 1
+     I*       R1DATE - DEPOSIT DATE
+     I*       R1TIME - DEPOSIT TIME
+     I*
+     IREC1        DS
+     I                                        1   1 R1TYPE
+     I                                        2  23 R1FIL1
+     I                                       24  29 R1DATE
+     I                                       30  33 R1TIME
+     I                                       34  80 R1FIL2
+     I*--- numeric versions of fields
+     I                                       24  290R1DAT@
+     I                                       30  330R1TIM@
+     I*---------------------------------------------------*
+     I*--- Lockbox Batch Record - Record Code 5 (RCD5) ---*
+     I*---------------------------------------------------*
+     I*        char    description       num
+     I*       ------   --------------   ------
+     I*       R5TYPE - Record Type
+     I*       R5BTCH - Batch Number   - R5BTC@
+     I*       R5FIL1 - Filler 1
+     I*       R5LKBX - Lockbox Number - R5LKB@
+     I*       R5DDTE - Deposit Date   - R5DDT@
+     I*       R5DEST - Destination
+     I*       R5ORIG - Origin
+     I*       R5LOC  - Location
+     I*       R5FIL2 - Filler 2
+     I*
+     IREC5        DS
+     I                                        1   1 R5TYPE
+     I                                        2   4 R5BTCH
+     I                                        5   7 R5FIL1
+     I                                        8  14 R5LKBX
+     I                                       15  20 R5DDTE
+     I                                       21  30 R5DEST
+     I                                       31  40 R5ORIG
+     I                                       41  43 R5LOC
+     I                                       44  80 R5FIL2
+     I*--- numeric versions of fields
+     I                                        2   40R5BTC@
+     I                                        8  140R5LKB@
+     I                                       15  200R5DDT@
+     I*
+      /EJECT
+     I*---------------------------------------------------*
+     I*--- Lockbox Check Record - Record Code 6 (RCD6) ---*
+     I*---------------------------------------------------*
+     I*        char    description       num
+     I*       ------   --------------   ------
+     I*       R6TYPE - Record Type
+     I*       R6BTCH - Batch Number    - R6BTC@
+     I*       R6ITEM - Item Number     - R6ITE@
+     I*       R6CHK$ - Check Amount    - R6CHK@
+     I*       R6CHK# - Check Number
+     I*       R6CDTE - Check Date      - R6CDT@
+     I*       R6CSTN - Customer Name
+     I*       R6FIL1 - Filler 1
+     I*
+     IREC6        DS
+     I                                        1   1 R6TYPE
+     I                                        2   4 R6BTCH
+     I                                        5   7 R6ITEM
+     I                                        8  17 R6CHK$
+     I                                       18  27 R6CHK#
+     I                                       28  33 R6CDTE
+     I                                       34  63 R6CSTN
+     I                                       64  80 R6FIL1
+     I*--- numeric versions of fields
+     I                                        2   40R6BTC@
+     I                                        5   70R6ITE@
+     I                                        8  172R6CHK@
+     I                                       28  330R6CDT@
+     I*
+      /EJECT
+     I*-----------------------------------------------------*
+     I*--- Lockbox Invoice Record - Record Code 4 (RCD4) ---*
+     I*-----------------------------------------------------*
+     I*        char    description       num
+     I*       ------   --------------   ------
+     I*       R4TYPE - Record Type
+     I*       R4BTCH - Batch Number    - R4BTC@
+     I*       R4ITEM - Item Number     - R4ITE@
+     I*       R4OVRF - Overflow Type
+     I*       R4SEQ# - Sequence Number - R4SEQ@
+     I*       R4LSTO - Last Overflow
+     I*       R4CST# - Customer Number - R4CST@
+     I*       R4IV#1 - Inv Number 1    - R4I#1@
+     I*       R4IV$1 - Inv Amount 1    - R4I$1@
+     I*       R4FIL1 - Filler 1
+     I*       R4IV#2 - Inv Number 2    - R4I#2@
+     I*       R4IV$2 - Inv Amount 2    - R4I$2@
+     I*       R4FIL2 - Filler 2
+     I*
+     IREC4        DS
+     I                                        1   1 R4TYPE
+     I                                        2   4 R4BTCH
+     I                                        5   7 R4ITEM
+     I                                        8   8 R4OVRF
+     I                                        9  10 R4SEQ#
+     I                                       11  11 R4LSTO
+     I                                       12  17 R4CST#
+     I                                       18  26 R4IV#1
+     I                                       27  36 R4IV$1
+     I                                       37  42 R4FIL1
+     I                                       43  51 R4IV#2
+     I                                       52  61 R4IV$2
+     I                                       62  80 R4FIL2
+     I*--- numeric versions of fields
+     I                                        2   40R4BTC@
+     I                                        5   70R4ITE@
+     I                                        9  100R4SEQ@
+     I                                       12  170R4CST@
+     I                                       18  260R4I#1@
+     I                                       27  362R4I$1@
+     I                                       43  510R4I#2@
+     I                                       52  612R4I$2@
+     I*
+      /EJECT
+     I*------------------------------------------*
+     I*--- Batch Total - Record Code 7 (RCD7) ---*
+     I*------------------------------------------*
+     I*        char    description       num
+     I*       ------   --------------   ------
+     I*       R7TYPE - Record Type
+     I*       R7BTCH - Batch Number   - R7BC#@
+     I*       R7FIL1 - Filler 1
+     I*       R7LKBX - Lockbox Number - R7LKB@
+     I*       R7DDTE - Deposit Date   - R7DDT@
+     I*       R7CHK# - Nbr of Chks    - R7CHK@
+     I*       R7BTC$ - Batch Amount   - R7BTC@
+     I*       R7LOC  - Location
+     I*       R7FIL2 - Filler 2
+     I*
+     IREC7        DS
+     I                                        1   1 R7TYPE
+     I                                        2   4 R7BTCH
+     I                                        5   7 R7FIL1
+     I                                        8  14 R7LKBX
+     I                                       15  20 R7DDTE
+     I                                       21  23 R7CHK#
+     I                                       24  33 R7BTC$
+     I                                       34  36 R7LOC
+     I                                       37  80 R7FIL2
+     I*--- numeric versions of fields
+     I                                        2   40R7BC#@
+     I                                        8  140R7LKB@
+     I                                       15  200R7DDT@
+     I                                       21  230R7CHK@
+     I                                       24  332R7BTC@
+     I*
+      /EJECT
+     I*--------------------------------------------*
+     I*--- Lockbox Total - Record Code 8 (RCD8) ---*
+     I*--------------------------------------------*
+     I*        char    description       num
+     I*       ------   --------------   ------
+     I*       R8TYPE - Record Type
+     I*       R8BTCH - Nbr of Batches - R8BTC@
+     I*       R8FIL1 - Filler 1
+     I*       R8LKBX - Lockbox Number - R8LKB@
+     I*       R8DDTE - Deposit Date   - R8DDT@
+     I*       R8CHK# - Nbr of Checks  - R8CHK@
+     I*       R8DPT$ - Deposit Amount - R8DPT@
+     I*       R8LOC  - Location
+     I*       R8FIL2 - Filler 2
+     I*
+     IREC8        DS
+     I                                        1   1 R8TYPE
+     I                                        2   4 R8BTCH
+     I                                        5   7 R8FIL1
+     I                                        8  14 R8LKBX
+     I                                       15  20 R8DDTE
+     I                                       21  24 R8CHK#
+     I                                       25  34 R8DPT$
+     I                                       35  37 R8LOC
+     I                                       38  80 R8FIL2
+     I*--- numeric versions of fields
+     I                                        2   40R8BTC@
+     I                                        8  140R8LKB@
+     I                                       15  200R8DDT@
+     I                                       21  240R8CHK@
+     I                                       25  342R8DPT@
+     I*
+      /EJECT
+     I*--------------------------------*
+     I*--- Sign Test Data Structure ---*
+     I*--------------------------------*
+     I*-- Sign Test Data Structure for BOA --*
+     ISIGNTS      DS
+     I                                        1   92FIRST9
+     I                                       10  10 SIGN
+     I*
+     I*-- Sign Test Data Structure for UMB --*
+     ISIGNDL      DS
+     I                                        1   1 SIGND
+     I                                        2  102LAST9
+     I*--------------------------*
+     I*--- Century Conversion ---*
+     I*--------------------------*
+     ICCFLDS      DS
+     I                                        1   70@CYMD
+     I                                        1   10@C
+     I                                        2   30@YY
+      /EJECT
+     C***************************************************************
+     C***   Parameter List                                        ***
+     C***************************************************************
+     C*
+     C*--- I/O Parameters ---*
+     C           *ENTRY    PLIST
+     C                     PARM           RETURN  1
+     C********             PARM           COMPNY  3        comment 4/6/05
+     C                     PARM           LCKBOX  7
+     C                     PARM           DDATE   7
+     C                     PARM           DTIME   4        new 4/6/05
+      /EJECT
+     C***************************************************************
+     C***  Define all key List                                    ***
+     C***************************************************************
+     C*
+     C*--- A/R Lockbox Batch ---*
+     C           KEY1      KLIST
+     C***************      KFLD           MBAIC3
+     C                     KFLD           MBBEC3
+     C                     KFLD           MBLWDT
+     C                     KFLD           MBYWNX           deposit time
+     C                     KFLD           MBBFC3
+     C*
+     C*--- A/R Lockbox Deposit ---*
+     C           KEY2      KLIST
+     C*************        KFLD           MAAIC3
+     C                     KFLD           MABEC3
+     C                     KFLD           MALWDT
+     C                     KFLD           MAYWNX           deposit time
+     C*
+     C*--- A/R Lockbox Check ---*
+     C           KEY3      KLIST
+     C*****************    KFLD           MCAIC3
+     C                     KFLD           MCBEC3
+     C                     KFLD           MCLWDT
+     C                     KFLD           MCYWNX           deposit time
+     C                     KFLD           MCBFC3
+     C                     KFLD           MCBGC3
+     C*
+      /EJECT
+     C***************************************************************
+     C***  0000 - Mainline Processing Paragraph                   ***
+     C***************************************************************
+     C*
+     C*--- Initial variable setup ---*
+     C                     MOVEL'Y'       RETURN
+     C                     MOVEL'N'       ERROR   1
+     C                     MOVEL*BLANKS   SAVTYP  1
+     C                     MOVEL*BLANKS   SAVTY2  1
+     C                     Z-ADD1         RCDNBR
+     C                     MOVE *BLANKS   ERRMSG
+     C*                    MOVEL'0'       ONETIM  1
+     C                     Z-ADD0         SAVLCK  70
+     C*
+     C*--- Primary read ---*
+     C                     READ LCKBXRCD                 90
+     C*
+     C*--- Loop until EOF or Error ---*
+     C           *IN90     DOWEQ'0'                                     Y
+     C           ERROR     ANDEQ'N'                                     Y
+     C*
+     C*--- Validate Record Type Sequence ---*
+     C                     EXSR VALTYP
+     C*
+     C*--- Continue if no errors ---*
+     C           ERROR     IFEQ 'N'                                     Y
+     C*
+     C*--- Based on record type,              ---*
+     C*--- perform the appropriate subrouting ---*
+     C           RCDTYP    CASEQ'1'       RCD1             new 4/6/05
+     C           RCDTYP    CASEQ'5'       RCD5
+     C           RCDTYP    CASEQ'6'       RCD6
+     C           RCDTYP    CASEQ'4'       RCD4
+     C           RCDTYP    CASEQ'7'       RCD7
+     C           RCDTYP    CASEQ'8'       RCD8
+     C                     ENDCS
+     C*
+     C                     MOVE RCDTYP    SAVTY2
+     C*
+     C*--- Read next ---*
+     C           ERROR     IFEQ 'N'                                     Y
+     C                     READ LCKBXRCD                 90
+     C                     ADD  1         RCDNBR
+     C                     END
+     C*
+     C                     END
+     C*
+     C                     ENDDO
+     C*
+     C*--- Shut down program ---*
+     C                     SETON                     LR
+     C*
+     C/EJECT
+     C***************************************************************
+     C*** Subroutine for Record Type 1 - Deposit Time             ***
+     C***************************************************************
+     C           RCD1      BEGSR
+     C*
+     C*--- Move transmission record to record 1 data structure ---*
+     C                     MOVE TRANS     REC1
+     C*
+     C*--- Test for numeric data ---*
+     C*
+     C*                    *--- deposit date ---*
+     C                     SETOF                     75
+     C                     TESTN          R1DATE     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R1DATE
+     C                     ENDIF
+     C*
+     C*                    *--- deposit time ---*
+     C                     SETOF                     75
+     C                     TESTN          R1TIME     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R1TIME
+     C                     ENDIF
+     C*
+     C* Set up Deposit Time key field for all the files.
+     C*
+     C                     Z-ADDR1TIM@    DEPTIM  40
+     C*
+     C                     ENDSR
+     C*
+     C/EJECT
+     C***************************************************************
+     C*** Subroutine for Record Type 5 - Deposit/Batch            ***
+     C***************************************************************
+     C           RCD5      BEGSR
+     C*
+     C*--- Move transmission record to record 5 data structure ---*
+     C                     MOVE TRANS     REC5
+     C*
+     C*--- Test for numeric data ---*
+     C*
+     C*                    *--- batch number ---*
+     C                     SETOF                     75
+     C                     TESTN          R5BTCH     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R5BTCH
+     C                     ENDIF
+     C*
+     C*                    *--- lockbox number ---*
+     C                     SETOF                     75
+     C                     TESTN          R5LKBX     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R5LKBX
+     C                     ENDIF
+     C*
+     C*                    *--- deposit date ---*
+     C                     SETOF                     75
+     C                     TESTN          R5DDTE     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R5DDTE
+     C                     ENDIF
+     C*
+     C*--- First time through, Create "A/R Lockbox Deposit Wrkf" ---*
+     C*          ONETIM    IFEQ '0'
+     C*                    EXSR FIRST
+     C*                    MOVEL'1'       ONETIM
+     C*                    ENDIF
+     C*--- LOCKBOX NUMBER BREAK, Create "A/R Lockbox Deposit Wrkf" ---*
+     C           R5LKB@    IFNE SAVLCK
+     C                     EXSR FIRST
+     C                     Z-ADDR5LKB@    SAVLCK
+     C                     ENDIF
+     C*
+     C*--- Create "A/R Lockbox Batch Wrkf" record ---*
+     C*
+     C*                    *--- Load batch record ---*
+     C*                    Z-ADD360       MBAIC3
+     C*                                   company number *
+     C*
+     C                     Z-ADDR5LKB@    MBBEC3
+     C*                                   lockbox number *
+     C*
+     C                     Z-ADDR5DDT@    @CYMD
+     C                     EXSR CNTURY
+     C                     Z-ADD@CYMD     MBLWDT
+     C*                                   deposit date *
+     C*
+     C                     Z-ADDR5BTC@    MBBFC3
+     C*                                   batch number *
+     C*
+     C                     Z-ADD*ZEROS    MBNMC0
+     C*                                   nbr of checks *
+     C*
+     C                     Z-ADD*ZEROS    MBZYVA
+     C*                                   batch amount *
+     C*
+     C                     MOVELR5LOC     MBYWCD
+     C*                                   location *
+     C*                                   location *
+     C*
+     C                     Z-ADDDEPTIM    MBYWNX
+     C*                                   deposit time   *
+     C*
+     C*                    *--- Write batch record ---*
+     C                     WRITE@MBCPTU
+     C*
+     C                     ENDSR
+     C*
+      /EJECT
+     C***************************************************************
+     C*** Subroutine for record type 6 - Check                    ***
+     C***************************************************************
+     C           RCD6      BEGSR
+     C*
+     C*--- Move transmission record to record 6 data structure ---*
+     C                     MOVE TRANS     REC6
+     C*
+     C*--- Test for numeric data ---*
+     C*
+     C*                    *--- batch number ---*
+     C                     SETOF                     75
+     C                     TESTN          R6BTCH     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R6BTCH
+     C                     ENDIF
+     C*
+     C*                    *--- item number ---*
+     C                     SETOF                     75
+     C                     TESTN          R6ITEM     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R6ITEM
+     C                     ENDIF
+     C*
+     C*                    *--- check amount ---*
+     C                     SETOF                     75
+     C                     TESTN          R6CHK$     75
+     C           *IN75     IFEQ *OFF
+     C*
+     C*                    *--- negative amount ---*
+     C*                      *--- check in last position ---*
+     C           R5LOC     IFEQ 'PRK'
+     C           R5LOC     OREQ 'DPM'
+     C                     MOVELR6CHK$    SIGNTS
+     C           SIGN      IFEQ '-'
+     C           FIRST9    MULT -1        R6CHK@
+     C                     ELSE
+     C                     MOVEL*ZEROS    R6CHK$
+     C                     ENDIF
+     C                     ELSE
+     C*                      *--- check in first position ---*
+     C                     MOVELR6CHK$    SIGNDL
+     C           SIGND     IFEQ '-'
+     C           LAST9     MULT -1        R6CHK@
+     C                     ELSE
+     C                     MOVEL*ZEROS    R6CHK$
+     C                     ENDIF
+     C                     ENDIF
+     C*
+     C                     ENDIF
+     C*
+     C*                    *--- check date ---*
+     C                     SETOF                     75
+     C                     TESTN          R6CDTE     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R6CDTE
+     C                     ENDIF
+     C*
+     C*--- Create "A/R Lockbox Check Wrkf" record ---*
+     C*
+     C*                    *--- Load check record ---*
+     C*                    Z-ADD360       MCAIC3
+     C*                                   company number *
+     C*
+     C                     Z-ADDR5LKB@    MCBEC3
+     C*                                   lockbox number *
+     C*
+     C                     Z-ADDR5DDT@    @CYMD
+     C                     EXSR CNTURY
+     C                     Z-ADD@CYMD     MCLWDT
+     C*                                   deposit date *
+     C*
+     C                     Z-ADDR6BTC@    MCBFC3
+     C*                                   batch number *
+     C*
+     C                     Z-ADDR6ITE@    MCBGC3
+     C*                                   item number *
+     C*
+     C                     MOVELR6CHK#    MCO1TX
+     C*                                   check number *
+     C*  4/7/05 Comes in as MMDDYY.. so it needs to be reversed before
+     C*         adding the century digit.......   check number *
+     C                     MULT 10000.01  R6CDT@
+     C                     Z-ADDR6CDT@    @CYMD
+     C                     EXSR CNTURY
+     C                     Z-ADD@CYMD     MCLXDT
+     C*                                   check date *
+     C*
+     C                     Z-ADDR6CHK@    MCZZVA
+     C*                                   check amount *
+     C*
+     C                     Z-ADD*ZEROS    MCCWC7
+     C*                                   customer number *
+     C*
+     C                     EXSR TRAIL
+     C                     MOVELR6CSTN    MCO2TX
+     C*                                   customer name *
+     C*
+     C                     MOVEL'N'       MCABSX
+     C*                                   invoice flag *
+     C*
+     C                     MOVEL'N'       MCADSX
+     C*                                   hold flag *
+     C*
+     C                     Z-ADDDEPTIM    MCYWNX
+     C*                                   deposit time   *
+     C*
+     C*                    *--- Write check record ---*
+     C                     WRITE@MCCPTX
+     C*
+     C                     ENDSR
+     C*
+      /EJECT
+     C***************************************************************
+     C*** Subroutine for record type 4 - Invoice                  ***
+     C***************************************************************
+     C           RCD4      BEGSR
+     C*
+     C*--- Move transmission record to record 4 data structure ---*
+     C                     MOVE TRANS     REC4
+     C*
+     C*--- Test for numeric data ---*
+     C*
+     C*                    *--- batch number ---*
+     C                     SETOF                     75
+     C                     TESTN          R4BTCH     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R4BTCH
+     C                     ENDIF
+     C*
+     C*                    *--- item number ---*
+     C                     SETOF                     75
+     C                     TESTN          R4ITEM     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R4ITEM
+     C                     ENDIF
+     C*
+     C*                    *--- sequence number ---*
+     C                     SETOF                     75
+     C                     TESTN          R4SEQ#     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R4SEQ#
+     C                     ENDIF
+     C*
+     C*                    *--- customer number ---*
+     C                     SETOF                     75
+     C                     TESTN          R4CST#     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R4CST#
+     C                     ENDIF
+     C*
+     C*                    *--- invoice number 1 ---*
+     C                     SETOF                     75
+     C                     TESTN          R4IV#1     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R4IV#1
+     C                     ENDIF
+     C*
+     C*                    *--- invoice amount 1 ---*
+     C                     SETOF                     75
+     C                     TESTN          R4IV$1     75
+     C           *IN75     IFEQ *OFF
+     C*
+     C*                    *--- negative invoice amount 1 ---*
+     C           R5LOC     IFEQ 'PRK'
+     C           R5LOC     OREQ 'DPM'
+     C                     MOVELR4IV$1    SIGNTS
+     C           SIGN      IFEQ '-'
+     C           FIRST9    MULT -1        R4I$1@
+     C                     ELSE
+     C                     MOVEL*ZEROS    R4IV$1
+     C                     ENDIF
+     C                     ELSE
+     C                     MOVELR4IV$1    SIGNDL
+     C           SIGND     IFEQ '-'
+     C           LAST9     MULT -1        R4I$1@
+     C                     ELSE
+     C                     MOVEL*ZEROS    R4IV$1
+     C                     ENDIF
+     C                     ENDIF
+     C                     ENDIF
+     C*
+     C*                    *--- invoice number 2 ---*
+     C                     SETOF                     75
+     C                     TESTN          R4IV#2     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R4IV#2
+     C                     ENDIF
+     C*
+     C*                    *--- invoice amount 2 ---*
+     C                     SETOF                     75
+     C                     TESTN          R4IV$2     75
+     C           *IN75     IFEQ *OFF
+     C*
+     C*                    *--- negative invoice amount 2 ---*
+     C           R5LOC     IFEQ 'PRK'
+     C           R5LOC     OREQ 'DPM'
+     C                     MOVELR4IV$2    SIGNTS
+     C           SIGN      IFEQ '-'
+     C           FIRST9    MULT -1        R4I$2@
+     C                     ELSE
+     C                     MOVEL*ZEROS    R4IV$2
+     C                     ENDIF
+     C                     ELSE
+     C                     MOVELR4IV$2    SIGNDL
+     C           SIGND     IFEQ '-'
+     C           LAST9     MULT -1        R4I$2@
+     C                     ELSE
+     C                     MOVEL*ZEROS    R4IV$2
+     C                     ENDIF
+     C                     ENDIF
+     C                     ENDIF
+     C*
+     C*--- Create "A/R Lockbox Invoice Wrkf" record ---*
+     C*
+     C*                    *--- Load invoice record ---*
+     C*                    Z-ADD360       MDAIC3
+     C*                                   company number *
+     C*
+     C                     Z-ADDR5LKB@    MDBEC3
+     C*                                   lockbox number *
+     C*
+     C                     Z-ADDR5DDT@    @CYMD
+     C                     EXSR CNTURY
+     C                     Z-ADD@CYMD     MDLWDT
+     C*                                   deposit date *
+     C*
+     C                     Z-ADDDEPTIM    MDYWNX
+     C*                                   deposit time   *
+     C*
+     C                     Z-ADDR4BTC@    MDBFC3
+     C*                                   batch number *
+     C*
+     C                     Z-ADDR4ITE@    MDBGC3
+     C*                                   item number *
+     C*
+     C                     MOVELR4SEQ#    MDNMC5
+     C*                                   sequence number *
+     C*
+     C                     Z-ADD*ZEROS    MDNMC4
+     C*                                   zero seq counter *
+     C*
+     C                     MOVEL'PAY'     MDUHCD
+     C*                                   adjustment type *
+     C*
+     C                     MOVEL'L'       MDAFSX
+     C*                                   source *
+     C*
+     C*                    *--- Initialize Invoice Flag ---*
+     C                     MOVEL'0'       INVFLG  1
+     C*
+     C*                    *-------------------------*
+     C*                    *--- Check invoice one ---*
+     C*                    *-------------------------*
+     C           R4I#1@    IFEQ *ZEROS
+     C           R4I$1@    ANDEQ*ZEROS
+     C*                    *--- Continue ---*
+     C                     ELSE
+     C*
+     C                     ADD  1         MDNMC4
+     C*                                   seq counter *
+     C*
+     C                     Z-ADDR4I#1@    MDNMC3
+     C*                                   invoice number *
+     C* RMC 12/20/05
+     C* Get company from a/r header, if not found output 360.
+     C*
+     C                     Z-ADDMDNMC3    BDCONB
+     C           BDCONB    CHAINARBDCPLG             50
+     C           *IN50     IFEQ '0'
+     C                     Z-ADDBDAIC3    MDAIC3
+     C                     ELSE
+      *
+     C                     SELEC
+     C           R5LOC     WHEQ 'MMT'
+     C                     Z-ADD363       MDAIC3
+     C           R5LOC     WHEQ 'SLC'
+     C                     Z-ADD364       MDAIC3
+     C           R5LOC     WHEQ 'DPM'
+     C                     Z-ADD364       MDAIC3
+     C                     OTHER
+     C                     Z-ADD360       MDAIC3
+     C                     ENDSL
+     C                     END
+     C*
+     C                     Z-ADDR4I$1@    MDZ0VA
+     C*                                   invoice amount *
+     C*
+     C*                    *--- Write invoice record ---*
+     C                     WRITE@MDCPT0
+     C                     MOVEL'1'       INVFLG  1
+     C*
+     C                     ENDIF
+     C*
+     C*                    *-------------------------*
+     C*                    *--- Check invoice two ---*
+     C*                    *-------------------------*
+     C           R4I#2@    IFEQ *ZEROS
+     C           R4I$2@    ANDEQ*ZEROS
+     C*                    *--- Continue ---*
+     C                     ELSE
+     C*
+     C                     ADD  1         MDNMC4
+     C*                                   seq counter *
+     C*
+     C                     Z-ADDR4I#2@    MDNMC3
+     C*                                   invoice number *
+     C* RMC 12/20/05
+     C* Get company from a/r header, if not found output 360.
+     C*
+     C                     Z-ADDMDNMC3    BDCONB
+     C           BDCONB    CHAINARBDCPLG             50
+     C           *IN50     IFEQ '0'
+     C                     Z-ADDBDAIC3    MDAIC3
+     C                     ELSE
+      *
+     C                     SELEC
+     C           R5LOC     WHEQ 'MMT'
+     C                     Z-ADD363       MDAIC3
+     C           R5LOC     WHEQ 'SLC'
+     C                     Z-ADD364       MDAIC3
+     C           R5LOC     WHEQ 'DPM'
+     C                     Z-ADD364       MDAIC3
+     C                     OTHER
+     C                     Z-ADD360       MDAIC3
+     C                     ENDSL
+     C                     END
+     C*
+     C                     Z-ADDR4I$2@    MDZ0VA
+     C*                                   invoice amount *
+     C*
+     C*                    *--- Write invoice record ---*
+     C                     WRITE@MDCPT0
+     C                     MOVEL'1'       INVFLG  1
+     C*
+     C                     ENDIF
+     C*
+     C*                    *--- Update invoice flag in check file ---*
+     C           INVFLG    IFEQ '1'
+     C                     EXSR UPDCHK
+     C                     ENDIF
+     C*
+     C                     ENDSR
+     C*
+      /EJECT
+     C***************************************************************
+     C*** Subroutine for record type 7 - Update Batch Totals      ***
+     C***************************************************************
+     C           RCD7      BEGSR
+     C*
+     C*--- Move transmission record to record 7 data structure ---*
+     C                     MOVE TRANS     REC7
+     C*
+     C*--- Test for numeric data ---*
+     C*
+     C*                    *--- batch number ---*
+     C                     SETOF                     75
+     C                     TESTN          R7BTCH     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R7BTCH
+     C                     ENDIF
+     C*
+     C*                    *--- lockbox number ---*
+     C                     SETOF                     75
+     C                     TESTN          R7LKBX     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R7LKBX
+     C                     ENDIF
+     C*
+     C*                    *--- deposit date ---*
+     C                     SETOF                     75
+     C                     TESTN          R7DDTE     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R7DDTE
+     C                     ENDIF
+     C*
+     C*                    *--- nbr of chks ---*
+     C                     SETOF                     75
+     C                     TESTN          R7CHK#     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R7CHK#
+     C                     ENDIF
+     C*
+     C*                    *--- batch amount ---*
+     C                     SETOF                     75
+     C                     TESTN          R7BTC$     75
+     C           *IN75     IFEQ *OFF
+     C*
+     C*                    *--- negative batch amount ---*
+     C           R5LOC     IFEQ 'PRK'
+     C           R5LOC     OREQ 'DPM'
+     C                     MOVELR7BTC$    SIGNTS
+     C           SIGN      IFEQ '-'
+     C           FIRST9    MULT -1        R7BTC@
+     C                     ELSE
+     C                     MOVEL*ZEROS    R7BTC$
+     C                     ENDIF
+     C                     ELSE
+     C                     MOVELR7BTC$    SIGNDL
+     C           SIGND     IFEQ '-'
+     C           LAST9     MULT -1        R7BTC@
+     C                     ELSE
+     C                     MOVEL*ZEROS    R7BTC$
+     C                     ENDIF
+     C                     ENDIF
+     C                     ENDIF
+     C*
+     C*--- Retrieve batch record for update ---*
+     C*
+     C*                    *--- Load key for batch file ---*
+     C*                    Z-ADD360       MBAIC3
+     C                     Z-ADDR7LKB@    MBBEC3
+     C                     Z-ADDR7DDT@    @CYMD
+     C                     EXSR CNTURY
+     C                     Z-ADD@CYMD     MBLWDT
+     C                     Z-ADDDEPTIM    MBYWNX
+     C                     Z-ADDR7BC#@    MBBFC3
+     C*
+     C*                    *--- Retrieve batch file record ---*
+     C           KEY1      CHAINPDMBCPL0             9191
+     C           *IN91     IFEQ '0'
+     C*
+     C*                    *--- Load totals in batch record ---*
+     C*
+     C                     Z-ADDR7CHK@    MBNMC0
+     C*                                   nbr of checks *
+     C*
+     C                     Z-ADDR7BTC@    MBZYVA
+     C*                                   batch amount *
+     C*
+     C*                    *--- Update batch record ---*
+     C                     UPDAT@MBCPTU
+     C*
+     C                     ELSE
+     C*
+     C*                    *--- send error message & stop pgm ---*
+     C                     MOVEAMSGTBL,3  ERRMSG
+     C                     EXSR $ERR
+     C*
+     C                     ENDIF
+     C*
+     C                     ENDSR
+     C*
+     C/EJECT
+     C***************************************************************
+     C*** Subroutine for record type 8 - Update Deposit Totals    ***
+     C***************************************************************
+     C           RCD8      BEGSR
+     C*
+     C*
+     C*--- Move transmission record to record 8 data structure ---*
+     C                     MOVE TRANS     REC8
+     C* 9/13/01
+     C* IF 2ND '8' RCD, CHECK FOR TOTALS IN THE RCD AND CRT ERRMSG,
+     C*  AND FALL OUT OF SUBR RCD8
+     C*
+     C           RCDTYP    IFEQ '8'                        RMC 9/13/01
+     C           SAVTY2    ANDEQ'8'
+     C           R8CHK#    IFNE '0000'
+     C           R8DPT$    ANDNE*ALL'0'
+     C*                    *--- senD error message & stop pgm ---*
+     C                     MOVEAMSGTBL,10 ERRMSG
+     C                     EXSR $ERR
+     C                     ENDIF
+     C                     GOTO ERCD8
+     C                     ENDIF
+     C*
+     C*--- Test for numeric data ---*
+     C*
+     C*                    *--- nbr of batches ---*
+     C                     SETOF                     75
+     C                     TESTN          R8BTCH     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R8BTCH
+     C                     ENDIF
+     C*
+     C*                    *--- lockbox number ---*
+     C                     SETOF                     75
+     C                     TESTN          R8LKBX     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R8LKBX
+     C                     ENDIF
+     C*
+     C*                    *--- deposit date ---*
+     C                     SETOF                     75
+     C                     TESTN          R8DDTE     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R8DDTE
+     C                     ENDIF
+     C*
+     C*                    *--- nbr of chks ---*
+     C                     SETOF                     75
+     C                     TESTN          R8CHK#     75
+     C           *IN75     IFEQ *OFF
+     C                     MOVEL*ZEROS    R8CHK#
+     C                     ENDIF
+     C*
+     C*                    *--- deposit amount ---*
+     C                     SETOF                     75
+     C                     TESTN          R8DPT$     75
+     C           *IN75     IFEQ *OFF
+     C*
+     C*                    *--- negative deposit amount ---*
+     C           R5LOC     IFEQ 'PRK'
+     C           R5LOC     OREQ 'DPM'
+     C                     MOVELR8DPT$    SIGNTS
+     C           SIGN      IFEQ '-'
+     C           FIRST9    MULT -1        R8DPT@
+     C                     ELSE
+     C                     MOVEL*ZEROS    R8DPT$
+     C                     ENDIF
+     C                     ELSE
+     C                     MOVELR8DPT$    SIGNDL
+     C           SIGND     IFEQ '-'
+     C           LAST9     MULT -1        R8DPT@
+     C                     ELSE
+     C                     MOVEL*ZEROS    R8DPT$
+     C                     ENDIF
+     C                     ENDIF
+     C                     ENDIF
+     C*
+     C*--- Retrieve deposit record for update ---*
+     C*
+     C*                    *--- Load key for deposit file ---*
+     C*******************  Z-ADD360       MAAIC3
+     C                     Z-ADDR8LKB@    MABEC3
+     C                     Z-ADDR8DDT@    @CYMD
+     C                     EXSR CNTURY
+     C                     Z-ADD@CYMD     MALWDT
+     C                     Z-ADDDEPTIM    MAYWNX
+     C*
+     C*                    *--- Retrieve deposit file record ---*
+     C           KEY2      CHAINPDMACPL0             9191
+     C           *IN91     IFEQ '0'
+     C*
+     C*                    *--- Load totals in deposit record ---*
+     C*
+     C                     Z-ADDR8BTC@    MANMC1
+     C*                                   nbr of batches *
+     C*
+     C                     Z-ADDR8CHK@    MANMC2
+     C*                                   nbr of checks *
+     C*
+     C                     Z-ADDR8DPT@    MAZXVA
+     C*                                   deposit amount *
+     C*
+     C*                    *--- Update deposit record ---*
+     C                     UPDAT@MACPTR
+     C*
+     C*  *--- Create system gen chargebacks and write offs  ----
+     C                     CALL 'PDI9XFR'                   RMC 9/13/01
+     C                     PARM           RETRN7  7
+     C*******************  PARM           COMPNY
+     C                     PARM           LCKBOX
+     C                     PARM           DDATE
+     C                     PARM           DTIME
+     C*
+     C                     ELSE
+     C*
+     C*                    *--- send error message & stop pgm ---*
+     C                     MOVEAMSGTBL,4  ERRMSG
+     C                     EXSR $ERR
+     C*
+     C                     ENDIF
+     C*
+     C           ERCD8     ENDSR
+     C*
+      /EJECT
+     C***************************************************************
+     C*** Subroutine to validate record type                      ***
+     C***************************************************************
+     C           VALTYP    BEGSR
+     C*
+     C*--- Record Type 5 ---*
+     C           RCDTYP    IFEQ '5'
+     C           SAVTYP    ANDNE' '
+     C           SAVTYP    ANDNE'1'
+     C           SAVTYP    ANDNE'7'
+     C           SAVTYP    ANDNE'8'                        6/18/01 RMC
+     C*                    *--- send error message & stop pgm ---*
+     C                     MOVEAMSGTBL,6  ERRMSG
+     C                     EXSR $ERR
+     C                     ENDIF
+     C*
+     C*--- Record Type 6 ---*
+     C           RCDTYP    IFEQ '6'
+     C           SAVTYP    ANDNE'4'
+     C           SAVTYP    ANDNE'5'
+     C           SAVTYP    ANDNE'6'
+     C*                    *--- send error message & stop pgm ---*
+     C                     MOVEAMSGTBL,7  ERRMSG
+     C                     EXSR $ERR
+     C                     ENDIF
+     C*
+     C*--- Record Type 4 ---*
+     C           RCDTYP    IFEQ '4'
+     C           SAVTYP    ANDNE'4'
+     C           SAVTYP    ANDNE'6'
+     C*                    *--- send error message & stop pgm ---*
+     C                     MOVEAMSGTBL,8  ERRMSG
+     C                     EXSR $ERR
+     C                     ENDIF
+     C*
+     C*--- Record Type 7 ---*
+     C           RCDTYP    IFEQ '7'
+     C           SAVTYP    ANDNE'4'
+     C           SAVTYP    ANDNE'6'
+     C*                    *--- send error message & stop pgm ---*
+     C                     MOVEAMSGTBL,9  ERRMSG
+     C                     EXSR $ERR
+     C                     ENDIF
+     C*
+     C*--- Record Type 8 ---*
+     C           RCDTYP    IFEQ '8'
+     C           SAVTYP    ANDNE'7'
+     C           SAVTYP    ANDNE'8'
+     C*                    *--- send error message & stop pgm ---*
+     C                     MOVEAMSGTBL,10 ERRMSG
+     C                     EXSR $ERR
+     C                     ENDIF
+     C*
+     C*          RCDTYP    IFEQ '1'                        comment  4/6/05
+     C*          RCDTYP    OREQ '2'                        comment  4/6/05
+     C           RCDTYP    IFEQ '2'                        new      4/6/05
+     C           RCDTYP    OREQ '9'
+     C*                    *--- continue ---*
+     C                     ELSE
+     C                     MOVELRCDTYP    SAVTYP
+     C                     ENDIF
+     C*
+     C                     ENDSR
+     C*
+      /EJECT
+     C***************************************************************
+     C*** Subroutine to create Deposit/Batch                      ***
+     C***************************************************************
+     C           FIRST     BEGSR
+     C*
+     C*--- Create "A/R Lockbox Deposit Wrkf" record ---*
+     C*
+     C*                    *--- Load deposit record ---*
+     C*************        Z-ADD360       MAAIC3
+     C*                                   company number *
+     C*
+     C                     Z-ADDR5LKB@    MABEC3
+     C*                                   lockbox number *
+     C*
+     C                     Z-ADDR5DDT@    @CYMD
+     C                     EXSR CNTURY
+     C                     Z-ADD@CYMD     MALWDT
+     C*                                   deposit date *
+     C*
+     C                     Z-ADDDEPTIM    MAYWNX
+     C*                                   deposit time *
+     C*
+     C                     Z-ADD*ZEROS    MANMC1
+     C*                                   nbr of batches *
+     C*
+     C                     Z-ADD*ZEROS    MANMC2
+     C*                                   nbr of checks *
+     C*
+     C                     Z-ADD*ZEROS    MAZXVA
+     C*                                   deposit amount *
+     C*
+     C                     MOVE 'O'       MAAWSX
+     C*                                   lockbox deposit status *
+     C*
+     C*                    *--- Write deposit record ---*
+     C                     WRITE@MACPTR
+     C*
+     C*                    *--- Load output parameters ---*
+     C************         MOVE MAAIC3    COMPNY
+     C                     MOVE MABEC3    LCKBOX
+     C                     MOVE MALWDT    DDATE
+     C                     MOVE MAYWNX    DTIME
+     C*
+     C                     ENDSR
+     C*
+      /EJECT
+     C***************************************************************
+     C*** Subroutine to update invoice flag in Check file         ***
+     C***************************************************************
+     C           UPDCHK    BEGSR
+     C*
+     C*--- Retrieve check record for update ---*
+     C*
+     C*                    *--- Load key for check file ---*
+     C**************       Z-ADD360       MCAIC3
+     C                     Z-ADDMDBEC3    MCBEC3
+     C                     Z-ADDMDLWDT    MCLWDT
+     C                     Z-ADDDEPTIM    MCYWNX
+     C                     Z-ADDMDBFC3    MCBFC3
+     C                     Z-ADDMDBGC3    MCBGC3
+     C*
+     C*                    *--- Retrieve check file record ---*
+     C           KEY3      CHAINPDMCCPL0             9191
+     C           *IN91     IFEQ '0'
+     C*
+     C*                    *--- update customer nbr in check rcd ---*
+     C                     Z-ADDR4CST@    MCCWC7
+     C*                                   customer number *
+     C*
+     C*                    *--- update flag in check record ---*
+     C                     MOVEL'Y'       MCABSX
+     C*                                   invoice flag *
+     C*
+     C*                    *--- Update check record ---*
+     C                     UPDAT@MCCPTX
+     C*
+     C                     ELSE
+     C*
+     C*                    *--- send error message & stop pgm ---*
+     C                     MOVEAMSGTBL,5  ERRMSG
+     C                     EXSR $ERR
+     C*
+     C                     ENDIF
+     C*
+     C                     ENDSR
+     C*
+      /EJECT
+     C***************************************************************
+     C*** Subroutine to remove trailing 0 from customer name      ***
+     C***************************************************************
+     C           TRAIL     BEGSR
+     C*
+     C                     MOVEAR6CSTN    CN
+     C                     Z-ADD30        X       20
+     C           X         DOWGT0
+     C           CN,X      IFEQ '0'
+     C                     MOVE ' '       CN,X
+     C                     ELSE
+     C                     Z-ADD1         X
+     C                     ENDIF
+     C                     SUB  1         X
+     C                     ENDDO
+     C                     MOVEACN        R6CSTN
+     C*
+     C                     ENDSR
+     C*
+      /EJECT
+     C***************************************************************
+     C*** Convert 6 digit date to 7 digit date                    ***
+     C***************************************************************
+     C           CNTURY    BEGSR
+     C*
+     C           @YY       IFLT 40
+     C                     Z-ADD1         @C
+     C                     ELSE
+     C                     Z-ADD0         @C
+     C                     ENDIF
+     C*
+     C                     ENDSR
+     C*
+      /EJECT
+     C***************************************************************
+     C*** Subroutine to execute external cl commands              ***
+     C***************************************************************
+     C           $ERR      BEGSR
+     C*
+     C*--- Print error message ---*
+     C                     WRITEHEADING
+     C                     WRITEDETAIL
+     C                     WRITEENDING
+     C*
+     C*--- Send message ---*
+     C*                    MOVE *BLANKS   CMD
+     C*                    MOVEAMSGTBL,1  CMD1
+     C*                    MOVEAMSGTBL,2  CMD2
+     C*                    Z-ADD160       LEN    155
+     C*                    CALL 'QCMDEXC'
+     C*                    PARM           CMD
+     C*                    PARM           LEN    155
+     C*
+      * SND Pager Msg (MPLUS) UP - /UT User Programs  *    RMC 8/16/02
+     C                     MOVEAMSGTBL,2  ERR   132
+     C                     CALL 'POMSUPC'              90  SND Pager Msg (
+     C                     PARM 'PRKARERR'WQ0104 10        DL List ID
+     C                     PARM ERR       WQ0105132        Office Message
+     C*--- Set flag to stop program ---*
+     C                     MOVEL'Y'       ERROR
+     C                     MOVEL'N'       RETURN
+     C*
+     C                     ENDSR
+     C*
+      /EJECT
+**
+SNDDST TYPE(*MSG) TOUSRID((ARLB.ERR DISTLIST)) DSTD('A/R Lockbox Failure')
+Lockbox program failed. Check report.
+Missing batch record, can't perform update.
+Missing deposit record, can't perform update.
+Missing check record, can't perform update.
+Sequence Error - Rcd Type(5) not proceeded by Rcd Type(blank,1,7)
+Sequence Error - Rcd Type(6) not proceeded by Rcd Type(4,5,6)
+Sequence Error - Rcd Type(4) not proceeded by Rcd Type(4,6)
+Sequence Error - Rcd Type(7) not proceeded by Rcd Type(4,6)
+Sequence Error - Rcd Type(8) not proceeded by Rcd Type(7)

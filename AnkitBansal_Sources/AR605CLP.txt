@@ -1,0 +1,395 @@
+/***************************************************************** */
+/*                                                                 */
+/*  ENVIRONMENT -----> PORK                                        */
+/*  SYSTEM ----------> ACCOUNTS RECEIVABLE SYSTEM                  */
+/*  PROGRAM NUMBER --> AR605CLP                                    */
+/*  PROGRAM NAME ----> CUSTOMER STATEMENT                          */
+/*  PROGRAMMER ------> LEANNE FEDOR                                */
+/*  DATE ------------> 03/12/98                                    */
+/*                                                                 */
+/*  PROGRAM PURPOSE -> GENERATE A CUSTOMER STATEMENT.  THIS        */
+/*                     NEW REPORT WAS REQUESTED BY DENNIS HUMMEL.  */
+/*                                                                 */
+/***************************************************************** */
+/* MODIFICATIONS                                                   */
+/* RMC 8/02/02 ------> ADDED PARM FOR STMT TYPE:N=NOT AGED,A=AGED  */
+/*     8/13/02 ------> ADDED PARM FOR PRINT OR FAX STMT TO CONTROL */
+/*                     PRTOVR THAT IS EXECUTED                     */
+/* RMC 4/28/05 ------> REMOVED COMPANY PARM  -- ! NOT YET !        */
+/* RMC 7/21/05 ------> POQZPFR - CHANGE TO NEW PGM WHEN CO IS REMVD*/
+/* SAZ 8/26/05 ------> ADD PARM TO INDICATE PRINT CO ON STATEMENT  */
+/*                     CREATE QRY TO SELECT ONE COMPANY OR ALL     */
+/*                     COMPANIES.                                  */
+/* SAZ 8/26/05 ------> ADD PARM &DRAWER, SO THAT MSL CAN PRINT     */
+/*                     OUT OF DRAWER 3. THE NUMBER WILL BE PASSED  */
+/*                     IN FROM THE JOB SCHEDULER JOB OR FROM THE   */
+/*                     PGM THAT CALLS THIS FROM THE PROMPT.        */
+/*                     OUTQ, COPIES, AND HOLD ARE NOW PASSED IN    */
+/*                     ALSO.                                       */
+/* RMC 12/16/5 ------> POQZPFR - CHANGE TO NEW PGM NOW.            */
+/* LJB 07/07/2006      ADD COMPANY NUMBER PARM TO CALL TO AGE RPT. */
+/*                     NEEDED TO PASS TO THE AGING PROGRAM TO      */
+/*                     TEST FOR ZEROS FOR *ALL, FOR PPRKPFR        */
+/* LJB 04/20/2010 P000198  CHANGE PRINTER FILE OVERRIDES TO =      */
+/*                     HOLD(YES) AND SAVE(*YES) FOR FAX OR EMAIL   */
+/*                     TO MULTIPLE RECIPIENTS                      */
+/* LJB 05/04/2012 E000909  PASS COMPANY ORG AND A/R OUTQ. IF NOT   */
+/*        DAILY'S THEN DUP SPLF TO A/R'S OUTPUT QUEUE. THAT OUTQ   */
+/*        IS DEFINED IN SYSTEM VALUES: ARSTMTOUTQ                  */
+/* LJB 05/10/2012 E002085  USE THE HOLD AND SAVE VALUE PASSED IN.  */
+/*        COMMENT OUT THE HARD CODED VALUES OF *YES FOR BOTH.      */
+/* LJB 05/31/2012 E002121  NEW PARMS FOR PRINT FAX AND EMAIL FLAGS */
+/*        ALSO PASS A JOB SCHEDULER FLAG WHICH WILL BE "Y" IF      */
+/*        THIS IS CALLED FROM PORGXFR. ADD CALL TO POQ2XFR FOR     */
+/*        EMAIL AND FOR FAX. REMOVE DUPSPLF. ADD REC STATUS.       */
+/*   ** COPY BEFORE CHANGES CREATED (AR605CLPSV) SO THERE ARE      */
+/*   ** NOT SO MANY COMMENTED STATEMENTS                           */
+/* RMC  2/10/2014 E003013  NEW LF FOR PPRKPFR - ARBDCPQR INSTEAD OF ARBDCPLZ */
+/*          TO SEQ SUFFIX 'CB' AFTER SUFFIX 'IN' ; OVRRDE KEY FIELDS FOR   */
+/*          ARBDCPL6 OPNQRY                                               */
+/* JBB 06/14/2016   Add Include Rebills to the parm list, and      */
+/*                  use the parm when calling programs.            */
+/* PIO 04/30/24  REPLACE OPNQRYF WITH OPNSQLF FOR ARBDCPL6 FILE    */
+/*               ADDED NEEDED OVRDBF AROUND THE COMMAND            */
+/*               CHANGE *AND TO AND, *EQ TO =, *GE TO >=, *LE TO <=*/
+/*               *GT TO > IN &QDATA                                */
+/* PIO 04/30/24  REPLACE OPNQRYF WITH OPNSQLF FOR ARBDCPQR FILE    */
+/*               ADDED NEEDED OVRDBF AROUND THE COMMAND            */
+/*               CHANGE *AND TO AND, *EQ TO =, *GE TO >=, *LE TO <=*/
+/*               *GT TO > IN &QDATA                                */
+/***************************************************************** */
+             PGM        PARM(&COMPANY &CUSTNBR &COPYN &AROUTQ +
+                          &CUSTNM &CREDIT &CHARGE &REBILL &STMTTP +
+                          &OUTQ &HOLD &SAVE &FAX &PRINT &EMAIL +
+                          &PRTCO &COMPORG &JOBSCHED &DRAWER)
+
+/* DEFINE THE VARIABLE REQUIRED IN THE COMMAND TO OVERRIDE THE     */
+/* PRINT FILE TO A LASER PRINTER                                   */
+             DCL        VAR(&CMD) TYPE(*CHAR) LEN(512)
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(150)
+
+/* PARMS DEFINED AS SENT IN BY SYNON FUNCTION                      */
+
+             DCL  VAR(&COMPANY) TYPE(*DEC)
+             DCL  VAR(&CUSTNBR) TYPE(*DEC)
+             DCL  VAR(&CUSTNM)  TYPE(*CHAR) LEN(30)
+             DCL  VAR(&COMPORG) TYPE(*CHAR) LEN(1)
+             DCL  VAR(&CREDIT)  TYPE(*CHAR) LEN(1)
+             DCL  VAR(&CHARGE)  TYPE(*CHAR) LEN(1)
+             DCL  VAR(&REBILL)  TYPE(*CHAR) LEN(1)
+             DCL  VAR(&STMTTP)  TYPE(*CHAR) LEN(1)
+             DCL  VAR(&FAX)     TYPE(*CHAR) LEN(1)
+             DCL  VAR(&EMAIL)   TYPE(*CHAR) LEN(1)
+             DCL  VAR(&PRINT)   TYPE(*CHAR) LEN(1)
+             DCL  VAR(&JOBSCHED) TYPE(*CHAR) LEN(1)
+
+             DCL  VAR(&COPYN)   TYPE(*DEC)
+             DCL  VAR(&OUTQ)    TYPE(*CHAR) LEN(10)
+             DCL  VAR(&AROUTQ)  TYPE(*CHAR) LEN(10)
+             DCL  VAR(&HOLD)    TYPE(*CHAR) LEN(4)
+             DCL  VAR(&SAVE)    TYPE(*CHAR) LEN(4)
+             DCL  VAR(&PRTCO)    TYPE(*CHAR) LEN(1)
+
+/* PARMS DEFINED WITH ACTUAL LENGTHS FOR PASSING WITH CALLED PROGRAMS */
+
+             DCL  VAR(&COMP)   TYPE(*DEC) LEN(3 0)
+             DCL  VAR(&CUST)   TYPE(*DEC) LEN(7 0)
+             DCL  VAR(&CUSTA)  TYPE(*CHAR) LEN(7)
+             DCL  VAR(&COPIES) TYPE(*DEC) LEN(3 0)
+             DCL  VAR(&DRAWER) TYPE(*CHAR) LEN(1)
+             DCL  VAR(&FILE) TYPE(*CHAR) LEN(10)
+             DCL  VAR(&SELECT) TYPE(*CHAR) LEN(10)
+             DCL  VAR(&STARTP) TYPE(*DEC) LEN(3 0)
+
+             CHGJOB     LOG(4 0 *SECLVL) LOGCLPGM(*YES)
+
+/* CHANGE INCOMING PARMS TO BE ACTUAL LENGTHS                         */
+
+             CHGVAR    VAR(&COMP) VALUE(&COMPANY)
+             CHGVAR    VAR(&CUST) VALUE(&CUSTNBR)
+             CHGVAR    VAR(&CUSTA) VALUE(&CUST)
+             CHGVAR    VAR(&COPIES) VALUE(&COPYN)
+
+/*-----------------------------------------------------------------*/
+/*  SET UP QUERY FOR SELECTED COMPANY                              */
+/*-----------------------------------------------------------------*/
+             CHGVAR    VAR(&QDATA) VALUE(' ')
+
+/* ONLY SELECT RECORDS FOR THE USER'S SELECTED COMPANY             */
+             IF         COND(&COMP *GT 0) THEN(DO)
+  /*PIO      CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BDAIC3 *EQ')  */
+  /*PIO*/    CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BDAIC3  = ')
+             CHGVAR     VAR(%SST(&QDATA 12 3)) VALUE(&COMP)
+
+/* ONLY SELECT RECORDS FOR THE USER'S SELECTED CUSTOMER               */
+  /*PIO      CHGVAR     VAR(%SST(&QDATA 16 15)) VALUE('*AND BDANC7 *EQ') */
+  /*PIO*/    CHGVAR     VAR(%SST(&QDATA 16 15)) VALUE(' AND BDANC7  = ')
+             CHGVAR     VAR(%SST(&QDATA 32 7)) VALUE(&CUST)
+
+/* ALWAYS OMIT RECORDS WITH A ZERO BALANCE DUE                       */
+   /*PIO     CHGVAR     VAR(%SST(&QDATA 40 17)) VALUE('*AND BDBGVA + +
+                          *NE 0')                                  */
+   /*PIO*/   CHGVAR     VAR(%SST(&QDATA 40 17)) VALUE(' AND BDBGVA +
+                          <>  0')
+
+/* ALWAYS OMIT RECORDS WITH AN ADJUSTMENT TYPE OF ARM OR ARC.        */
+  /*PIO      CHGVAR     VAR(%SST(&QDATA 58 43)) VALUE('*AND BDUHCD + +
+                          *NE "ARC" *AND BDUHCD *NE "ARM"')         */
+  /*PIO*/    CHGVAR     VAR(%SST(&QDATA 58 43)) VALUE(' AND BDUHCD +
+                          <>  "ARC"  AND BDUHCD  <> "ARM"')
+
+/* OMIT CHARGEBACKS IF THE USER DOES NOT WANT TO SEE THEM       */
+             CHGVAR     VAR(&STARTP) VALUE(103)
+             IF         COND(&CHARGE *EQ 'N') THEN(DO)
+   /*PIO     CHGVAR     VAR(%SST(&QDATA 103 21)) VALUE(' *AND BDCEST + +
+                          *NE "CB"')                                  */
+   /*PIO*/   CHGVAR     VAR(%SST(&QDATA 103 21)) VALUE('  AND BDCEST +
+                           <> "CB"')
+             CHGVAR     VAR(&STARTP) VALUE(125)
+             ENDDO
+
+/* OMIT REBILLS IF THE USER DOES NOT WANT TO SEE THEM           */
+             IF         COND(&REBILL *EQ 'N') THEN(DO)
+   /*PIO     CHGVAR     VAR(%SST(&QDATA &STARTP 21)) VALUE(' *AND +  +
+                          BDCEST *NE "RB"')                         */
+   /*PIO*/   CHGVAR     VAR(%SST(&QDATA &STARTP 21)) VALUE('  AND +
+                          BDCEST  <> "RB"')
+             ENDDO
+
+             ENDDO      /* COMPANY NOT ZEROS */
+
+/*------------------------------------------------------------------*/
+/*  SET UP QUERY IF NO COMPANY SELECTED                             */
+/*------------------------------------------------------------------*/
+/*B:SZ050826             */
+ /*ALL COMPANIES */
+             IF         COND(&COMP *EQ 0) THEN(DO)
+
+/* ONLY SELECT RECORDS FOR THE USER'S SELECTED CUSTOMER               */
+  /*PIO      CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BDANC7 *EQ')  */
+  /*PIO*/    CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BDANC7  = ')
+             CHGVAR     VAR(%SST(&QDATA 12 7)) VALUE(&CUST)
+
+/* ALWAYS OMIT RECORDS WITH A ZERO BALANCE DUE                       */
+   /*PIO     CHGVAR     VAR(%SST(&QDATA 20 17)) VALUE('*AND BDBGVA + +
+                          *NE 0')                                   */
+   /*PIO*/   CHGVAR     VAR(%SST(&QDATA 20 17)) VALUE(' AND BDBGVA +
+                           <> 0')
+
+/* ALWAYS OMIT RECORDS WITH AN ADJUSTMENT TYPE OF ARM OR ARC.        */
+   /*PIO     CHGVAR     VAR(%SST(&QDATA 38 43)) VALUE('*AND BDUHCD + +
+                          *NE "ARC" *AND BDUHCD *NE "ARM"')        */
+   /*PIO*/   CHGVAR     VAR(%SST(&QDATA 38 43)) VALUE(' AND BDUHCD +
+                           <> "ARC"  AND BDUHCD  <> "ARM"')
+
+/* OMIT CHARGEBACKS IF THE USER DOES NOT WANT TO SEE THEM       */
+             CHGVAR     VAR(&STARTP) VALUE(81)
+             IF         COND(&CHARGE *EQ 'N') THEN(DO)
+  /*PIO      CHGVAR     VAR(%SST(&QDATA 81 21)) VALUE(' *AND BDCEST + +
+                          *NE "CB"')                                */
+  /*PIO*/    CHGVAR     VAR(%SST(&QDATA 81 21)) VALUE('  AND BDCEST +
+                          <>  "CB"')
+             CHGVAR     VAR(&STARTP) VALUE(103)
+             ENDDO
+
+/* OMIT REBILLS IF THE USER DOES NOT WANT TO SEE THEM           */
+             IF         COND(&REBILL *EQ 'N') THEN(DO)
+   /*PIO     CHGVAR     VAR(%SST(&QDATA &STARTP 21)) VALUE(' *AND + +
+                          BDCEST *NE "RB"')                       */
+   /*PIO*/   CHGVAR     VAR(%SST(&QDATA &STARTP 21)) VALUE('  AND +
+                          BDCEST <>  "RB"')
+             ENDDO
+
+             ENDDO      /* COMPANY = 0 */
+/*E:SZ050826             */
+
+/* FOR JOB SCHEDULER JOBS, USE THE PASSED IN OUTPUT QUEUE           */
+/* WHICH WILL BE BLANKS IF THE PRINT RECORD STATUS IS INACTIVE      */
+             IF         COND(&JOBSCHED *EQ 'Y') THEN(DO)
+             CHGVAR     VAR(&PRINT) VALUE('Y')
+/****        CHGVAR     VAR(&OUTQ) VALUE(&AROUTQ)    ********/
+             ENDDO
+/*------------------------------------------------------------------*/
+/* PRINT NOT AGED REPORT                                            */
+/*------------------------------------------------------------------*/
+ NOTAGED:    IF         COND(&STMTTP = 'N') THEN(DO)
+
+      /*PIO  OVRDBF     FILE(ARBDCPL6) SHARE(*YES)    */
+    /*       OPNQRYF    FILE((ARBDCPL6)) QRYSLT(&QDATA) +
+                          KEYFLD((BDANC7) (BDCONB) (BDCEST)) +
+                          SEQONLY(*YES)                           */
+  /* RMC 2/11/14 OVERRIDE KEY FIELDS TO HAVE SUFFIX(D) THEN INVOICE# */
+      /*PIO  OPNQRYF    FILE((ARBDCPL6)) QRYSLT(&QDATA) +    +
+                          KEYFLD((BDANC7) (BDCEST *DESCEND) (BDCONB + +
+                          *ASCEND)) SEQONLY(*YES)                */
+
+    /*PIO*/    OVRDBF     FILE(ARBDCPP) TOFILE(ARBDCPP) LVLCHK(*NO)
+             OPNSQLF    SQL('Select * from ARBDCPP Where  ' *BCAT +
+                          &QDATA  *BCAT ' Order by BDAIC3 asc, +
+                          BDANC7 asc, BDCONB asc, BDCEST asc') +
+                          OPNID(ARBDCPL6) OPTION(*ALL) SEQONLY(*NO) +
+                          RCDFMT(@BDCPGB) ALWCPY(*IFRQD) /*PIO*/
+    /*PIO*/  OVRDBF     FILE(ARBDCPL6) TOFILE(ARBDCPP) LVLCHK(*NO) +
+                        OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+
+/* USE THE CUSTOMIZED SEABOARD COMMAND TO OVERRIDE THE PRINT FILE   */
+/* TO PRINTER OUTPUT QUEUE AND THEN CREATE A PRTF IN THAT OUTQ.     */
+/* CALLING PGM HAS ALREADY CALLED PBDUXFR TO DETERMINE IF THIS      */
+/* RECORD STATUS IS ACTIVE AND RETURNS BLANKS IF IT IS INACTIVE.    */
+             IF         COND(&PRINT = 'Y') THEN(DO)
+             IF         COND(&OUTQ *NE '          ') THEN(DO)
+             SBDPRTOVR  CMDVAR(&CMD) FILE(QPRINT) OUTQ(&OUTQ) +
+                          WIDTH(84) LANDSCAPE(*NO) DRAWER(&DRAWER) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE) +
+                          USRDTA(&CUSTA)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+             CALL       PGM(AR605) PARM(&CUST &CUSTNM &CREDIT &PRTCO +
+                          &COMP)
+             ENDDO      /* END OUTQ = BLANKS */
+             ENDDO      /* END PRINT = Y FOR NOT AGED*/
+
+/* OVERRIDE THE PRINT FILE TO FAXQ OUTPUT QUEUE SO IT DOESN'T       */
+/* DISAPPEAR BEFORE THE FAXING AND/OR EMAILING IS COMPLETE SINCE    */
+/* THE FILE CAN CONTAIN SEVERAL EMAIL OR FAX NUMBERS.               */
+/* CALL PROGRAM TO CREATE A PRTF IN FAX OUTQ                        */
+/* DEFAULT JOB SCHEDULER JOBS TO &FAX = 'Y'                         */
+             IF         COND(&JOBSCHED *EQ 'Y') THEN(DO)
+             CHGVAR     VAR(&FAX) VALUE('Y')
+             CHGVAR     VAR(&EMAIL) VALUE('N')
+             ENDDO
+
+             IF         COND((&FAX *EQ 'Y') *OR (&EMAIL *EQ 'Y')) +
+                          THEN(DO)
+             OVRPRTF    FILE(QPRINT) PAGESIZE(*N 84) PAGRTT(0) +
+                          OUTQ(FAXQ) USRDTA(&CUSTA)
+
+             CALL       PGM(AR605) PARM(&CUST &CUSTNM &CREDIT &PRTCO +
+                          &COMP)
+
+/* CALL PGM TO SEND FAX TO ALL CUSTS IN CUST DISTRIBUTION ENTRY FILE */
+/* POQ2XFR ONLY FAXES TO ACTIVE RECORDS                              */
+             IF         COND(&FAX *EQ 'Y') THEN(DO)
+             CALL       PGM(POQ2XFR) PARM('' &COMP &CUST &CREDIT +
+                          &STMTTP &FAX 'N' &PRTCO)
+             ENDDO      /* FAX = YES */
+
+/* DEFAULT JOB SCHEDULER JOBS TO &EMAIL = 'Y'                       */
+             IF         COND(&JOBSCHED *EQ 'Y') THEN(DO)
+             CHGVAR     VAR(&EMAIL) VALUE('Y')
+             CHGVAR     VAR(&FAX) VALUE('N')
+             ENDDO
+
+/* CALL PGM TO SEND EMAIL TO ALL CUSTS IN CUST DISTRIBUTION ENTRY FILE*/
+/* POQ2XFR ONLY EMAILS TO ACTIVE RECORDS                             */
+             IF         COND(&EMAIL *EQ 'Y') THEN(DO)
+             CALL       PGM(POQ2XFR) PARM('' &COMP &CUST &CREDIT +
+                          &STMTTP 'N' &EMAIL &PRTCO)
+             ENDDO
+
+/* DELETE SPOOL FILE                                                 */
+             CALL       PGM(PNRAUPC) PARM(&FILE &SELECT)
+             ENDDO      /* FAX = Y OR EMAIL = Y */
+
+             CLOF       OPNID(ARBDCPL6)
+             MONMSG     MSGID(CPF0000)
+             DLTOVR     FILE(*ALL)
+
+             ENDDO      /* END FOR NOT AGED */
+
+/*------------------------------------------------------------------*/
+/*  PRINT AGED REPORT                                               */
+/*------------------------------------------------------------------*/
+ AGED:       IF         COND(&STMTTP = 'A') THEN(DO)
+
+/*           OVRDBF     FILE(ARBDCPLZ) SHARE(*YES)        */
+/*           OPNQRYF    FILE((ARBDCPLZ)) QRYSLT(&QDATA) +
+                          KEYFLD(*FILE) SEQONLY(*YES)       */
+  /*PIO      OVRDBF     FILE(ARBDCPQR) SHARE(*YES)      +
+             OPNQRYF    FILE((ARBDCPQR)) QRYSLT(&QDATA) + +
+                          KEYFLD(*FILE) SEQONLY(*YES)   */
+
+  /*PIO*/    OVRDBF     FILE(ARBDCPP) TOFILE(ARBDCPP) LVLCHK(*NO)
+             OPNSQLF    SQL('Select * from ARBDCPP Where  '  *BCAT +
+                          &QDATA *BCAT ' Order by BDANC7 asc, +
+                          BDCEST asc, BDCONB asc') +
+                          OPNID(ARBDCPQR) OPTION(*ALL) SEQONLY(*NO) +
+                          RCDFMT(@BDCPR3) ALWCPY(*IFRQD) /*PIO*/
+   /*PIO*/  OVRDBF     FILE(ARBDCPQR) TOFILE(ARBDCPP) LVLCHK(*NO) +
+                       OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+
+/* THIS REPORT IS PRINTS LANDSCAPE ON A LASER PRINTER. USE THE       */
+/* CUSTOMIZED SEABOARD COMMAND TO OVERRIDE THE PRINT FILE TO THE     */
+/* OUTPUT QUEUE IN CUST DISTRIBUTION ENTRY FILE.                     */
+/* CALL PROGRAM TO CREATE A PRTF IN THAT OUTQ                        */
+/* CALLING PGM HAS ALREADY CALLED PBDUXFR TO DETERMINE IF THIS       */
+/* RECORD STATUS IS ACTIVE AND RETURNS BLANKS IF IT IS INACTIVE.     */
+             IF         COND(&PRINT = 'Y') THEN(DO)       /* E002121 */
+             IF         COND(&OUTQ *NE '          ') THEN(DO)
+
+/*B:SZ050826 CHANGE PRT FILE                                         */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PPRKPFR$) OUTQ(&OUTQ) +
+                          WIDTH(144) LANDSCAPE(*YES) +
+                          DRAWER(&DRAWER) COPIES(&COPIES) +
+                          HOLD(&HOLD) SAVE(&SAVE) USRDTA(&CUSTA)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+             CALL       PGM(PPRKPFR) PARM(' ' &CREDIT &PRTCO &COMP)
+             ENDDO      /* END OUTQ = BLANKS */
+             ENDDO      /* END PRINT = 'Y' FOR AGED */
+
+/* OVERRIDE THE PRINT FILE TO FAXQ OUTPUT QUEUE SO IT DOESN'T       */
+/* DISAPPEAR BEFORE THE FAXING AND/OR EMAILING IS COMPLETE.         */
+/* CALL PROGRAM TO CREATE A PRTF IN THAT OUTQ                       */
+/* DEFAULT JOB SCHEDULER JOBS TO &FAX = 'Y'                         */
+             IF         COND(&JOBSCHED *EQ 'Y') THEN(DO)
+             CHGVAR     VAR(&FAX) VALUE('Y')
+             CHGVAR     VAR(&EMAIL) VALUE('N')
+             ENDDO
+
+/* 07/07/2006 ADD COMPANY NUMBER WHICH WILL BE PASSED TO THE         */
+/* AGING PROGRAM TO TEST FOR ZEROS TO PROCESS ALL COMPANIES OR       */
+/* TO PROCESS ONLY THE COMPANY PASSED IN.                            */
+             IF         COND((&FAX *EQ 'Y') *OR (&EMAIL *EQ 'Y')) +
+                          THEN(DO)
+             OVRPRTF    FILE(PPRKPFR$) PAGESIZE(*N 144) OUTQ(FAXQ) +
+                          USRDTA(&CUSTA)
+
+             CALL       PGM(PPRKPFR) PARM(' ' &CREDIT &PRTCO &COMP)
+
+/* FAX REPORT TO ALL FAX NUMBERS IN CUST DISTRIBUTION ENTRY FILE    */
+/* POQ2XFR ONLY FAXES TO ACTIVE RECORDS                              */
+             IF         COND(&FAX *EQ 'Y') THEN(DO)
+             CALL       PGM(POQ2XFR) PARM('' &COMP &CUST &CREDIT +
+                          &STMTTP &FAX &EMAIL &PRTCO)
+             ENDDO
+
+/* DEFAULT JOB SCHEDULER JOBS TO &EMAIL = 'Y'                       */
+             IF         COND(&JOBSCHED *EQ 'Y') THEN(DO)
+             CHGVAR     VAR(&EMAIL) VALUE('Y')
+             CHGVAR     VAR(&FAX) VALUE('N')
+             ENDDO
+
+/* EMAIL REPORT TO ALL EMAIL ADDRESSES IN CUST DISTRIBUTION ENTRY   */
+/* POQ2XFR ONLY EMAILS TO ACTIVE RECORDS                             */
+             IF         COND(&EMAIL *EQ 'Y') THEN(DO)
+             CALL       PGM(POQ2XFR) PARM('' &COMP &CUST &CREDIT +
+                          &STMTTP &FAX &EMAIL &PRTCO)
+             ENDDO
+
+/* DELETE SPOOL FILE                                                 */
+             CALL       PGM(PNRAUPC) PARM(&FILE &SELECT)
+
+             ENDDO /* FAX AND PRINT EQ 'Y' */
+
+ /*          CLOF       OPNID(ARBDCPLZ)      */
+             CLOF       OPNID(ARBDCPQR)
+             MONMSG     MSGID(CPF0000)
+
+             ENDDO      /* END STMTTYP = A */
+   /*PIO     DLTOVR     FILE(*ALL)  */
+             DLTOVR     FILE(*ALL) LVL(*JOB) /*PIO*/
+
+ END:        ENDPGM

@@ -1,0 +1,171 @@
+/*********************************************************************/
+/*     Program: PDLFUPC                                              */
+/*       Title: Prompt for printer overrides, then submit report.    */
+/*        Date: 03/16/98                                             */
+/* Description: - Calls print options prompt program                 */
+/*              - Submits A/R Customer Statement                   */
+/*                                                                   */
+/*  Parameters:                                                      */
+/*  Usage   Field       Field Description                            */
+/*  -----   ---------   ------------------------------------------   */
+/*    I     &RETURN     Company number                               */
+/*    I     &APPLIC     Application Code                             */
+/*    I     &COMPANY    Company number                               */
+/*    I     &CUSTNBR    A/R customer number                          */
+/*    I     &AROUTQ     FOR BATCH FROM JOB SCHEDULER                 */
+/*    I     &CUSTNM     A/R customer name                            */
+/*    I     &CREDIT     Include Credit Memos (Y/N)                   */
+/*    I     &CHARGE     Include Charge Backs (Y/N)                   */
+/*    I     &REBILL     Include Rebills (Y/N)                        */
+/*    I     &STMTTP     STATEMENT TYPE:N=NOT AGED, A=AGED            */
+/*    I     &PRTCO      PRINT CO# ON STATEMENT (Y/N)                 */
+/*    I     &COMPORG    CO ORGANIZATION                              */
+/*    I     &DISTCODE   CUST DISTRIBUTION CODE                       */
+/*    I     &DISTSEQ    CUST DISTRIBUTION SEQ#                       */
+/*    I     &NAME       CUST DISTRIBUTION NAME (TO SEND TO)          */
+/*    I     &DISTTYPE   CUST DISTRIBUTION TYPE (E, F, P)             */
+/*    I     &DESTINAT   CUST DISTRIBUTION - EMAIL, FAX#, PRINT QUEUE */
+/*    I     &RECSTS     RECORD STATUS                                */
+/*                                                                   */
+/*********************************************************************/
+/* Modifications:                                                    */
+/*                                                                   */
+/*   Date     Pgmr     Description                                   */
+/* -------- ---------- --------------------------------------------  */
+/* 8/06/02  RMC        ADDED PARMS FOR AGED STMT, AND PRINT TO AR605 */
+/* 4/28/05  RMC        REMOVED COMPANY FROM PARMS AND CALLING PGM    */
+/* 5/02/05  RMC        DONT CHANGE FOR NO COMPANY YET                */
+/* 8/30/05  RMC        NEW PARM &PRTCO - PRINT CO ON STMT            */
+/* 1/21/08  SAZ        NEW PARM &DRAWER-WHICH DRAWER TO PRINT THE    */
+/*                     STATEMENTS. DEFAULT DRAWER 1.                 */
+/* 5/10/12  LJB E002085  PASS NEW PARMS TO AR605CLP:  A/R OUTPUT     */
+/*                     QUEUE AND COMPANY ORGANIZATION                */
+/* 5/25/12  LJB E002121  RETRIEVE PRINT QUEUE FROM CUST DISTRIBUTION */
+/*                     IF NO RECORD, RTV FROM SYSTEM VALUES          */
+/*                     PASS NEW PARMS FOR PRINT FAX AND EMAIL FLAGS  */
+/*                     ONLY RETRIEVE RECS WITH MATCHING REC STATUS   */
+/* 6/14/16  JBB E5262  ADD INCLUDE REBILL PARM AND PASS VALUE ON     */
+/*                     TO  SUBMITTED JOB.                            */
+/*********************************************************************/
+             PGM        PARM(&RETURN &APPLIC &AROUTQ &COMPANY +
+                          &CUSTNBR &CUSTNM &CREDIT &CHARGE &REBILL +
+                          &STMTTP &FAX &PRINT &EMAIL &PRTCO +
+                          &COMPORG &JOBSCHED &DISTCODE &DESTINAT +
+                          &RECSTS)
+
+   /* Declare Variables */
+             DCL  VAR(&RETURN)   TYPE(*CHAR) LEN(7)
+             DCL  VAR(&APPLIC)   TYPE(*CHAR) LEN(6)
+             DCL  VAR(&COMPANY)  TYPE(*DEC)
+             DCL  VAR(&CUSTNBR)  TYPE(*DEC)
+             DCL  VAR(&CUST)     TYPE(*DEC) LEN(7 0)
+             DCL  VAR(&AROUTQ)   TYPE(*CHAR) LEN(10)
+             DCL  VAR(&CUSTNM)   TYPE(*CHAR) LEN(30)
+             DCL  VAR(&CREDIT)   TYPE(*CHAR) LEN(1)
+             DCL  VAR(&CHARGE)   TYPE(*CHAR) LEN(1)
+             DCL  VAR(&REBILL)   TYPE(*CHAR) LEN(1)
+             DCL  VAR(&STMTTP)   TYPE(*CHAR) LEN(1)
+             DCL  VAR(&PRTCO)    TYPE(*CHAR) LEN(1)
+/***         DCL  VAR(&PRTFAX) TYPE(*CHAR) LEN(1) VALUE('Y')       ***/
+             DCL  VAR(&COMPORG)  TYPE(*CHAR) LEN(1)
+             DCL  VAR(&FAX)      TYPE(*CHAR) LEN(1)
+             DCL  VAR(&PRINT)    TYPE(*CHAR) LEN(1)
+             DCL  VAR(&EMAIL)    TYPE(*CHAR) LEN(1)
+             DCL  VAR(&JOBSCHED) TYPE(*CHAR) LEN(1)
+             DCL  VAR(&DRAWER)   TYPE(*CHAR) LEN(1) VALUE('1')
+
+             /* Internal Work Fields */
+             DCL  VAR(&DISTTYPE) TYPE(*CHAR) LEN(1) VALUE('P')
+             DCL  VAR(&DISTSEQ)  TYPE(*DEC) LEN(3 0)
+             DCL  VAR(&NAME)     TYPE(*CHAR) LEN(30)
+             DCL  VAR(&DESTINAT) TYPE(*CHAR) LEN(50)
+             DCL  VAR(&RECSTS)   TYPE(*CHAR) LEN(1)
+             DCL  VAR(&DISTCODE) TYPE(*CHAR) LEN(10) +
+                    VALUE('AR_STMTS  ')
+             DCL  VAR(&SYSCODE)  TYPE(*CHAR) LEN(10) +
+                    VALUE('ARSTMTOUTQ')
+             DCL  VAR(&DESC)     TYPE(*CHAR) LEN(25)
+             DCL  VAR(&OUTQ)     TYPE(*CHAR) LEN(10)
+             DCL  VAR(&HOLD)     TYPE(*CHAR) LEN(4)
+             DCL  VAR(&SAVE)     TYPE(*CHAR) LEN(4)
+             DCL  VAR(&COPYN)    TYPE(*DEC)
+             DCL  VAR(&COPY)     TYPE(*DEC)  LEN(2 0)
+             DCL  VAR(&NQSTAT)   TYPE(*CHAR) LEN(01)
+             DCL  VAR(&NIGHTQ)   TYPE(*CHAR) LEN(10)
+             DCL  VAR(&MSG)      TYPE(*CHAR) LEN(512)
+             DCL  VAR(&MSGID)    TYPE(*CHAR) LEN(7)
+             DCL  VAR(&MSGL)     TYPE(*DEC)  LEN(5 0)
+
+   /* Monitor for all message at the program level */
+             MONMSG MSGID(CPF0000) EXEC(GOTO CMDLBL(MSGTRAP))
+
+             CHGJOB     LOG(4 0 *SECLVL) LOGCLPGM(*YES)
+             IF         COND(&RECSTS *EQ ' ') THEN(CHGVAR +
+                          VAR(&RECSTS) VALUE('A'))
+             CHGVAR     VAR(&CUST) VALUE(&CUSTNBR)
+             CHGVAR     VAR(&DISTSEQ) VALUE(001)
+
+/* RETRIEVE PRINTER FROM CUST DISTRIBUTION ENTRY FILE, IF ONE IS */
+/* THERE, ELSE DEFAULT TO PRINTER IN SYSTEM VALUES. ALLOW TO BE  */
+/* CHANGED IF THEY WANT TO.                                      */
+             IF         COND(&DESTINAT *NE '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(&DESTINAT))
+
+             IF         COND(&DESTINAT *EQ '          ') THEN(DO)
+             CHGVAR     VAR(&DISTTYPE) VALUE('P')
+             CALL       PGM(PBDUXFR) PARM('' &CUST &DISTCODE +
+                          &DISTSEQ &NAME &DISTTYPE &DESTINAT &RECSTS)
+             IF         COND(&DESTINAT *NE '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(&DESTINAT))
+             IF         COND(&DESTINAT *EQ '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE('PRKPRT02  '))
+             ENDDO        /* DESTINATION = '       ' */
+
+/* Call Print Options Prompt Program                                 */
+/* Setup print option parameters                                     */
+             CHGVAR VAR(&RETURN) VALUE(' ')
+             CHGVAR VAR(&DESC)   VALUE('A/R Aging by as of Date')
+             CHGVAR VAR(&HOLD)   VALUE(' ')
+             CHGVAR VAR(&SAVE)   VALUE(' ')
+             CHGVAR VAR(&COPY)   VALUE(0)
+             CHGVAR VAR(&NQSTAT) VALUE('N')
+             CHGVAR VAR(&NIGHTQ) VALUE(' ')
+
+             CALL       PGM(PDG0PVR) PARM(&RETURN &DESC &OUTQ &HOLD +
+                          &SAVE &COPY &NQSTAT &NIGHTQ &APPLIC)
+
+             IF         COND(&RETURN *NE ' ') THEN(GOTO +
+                          CMDLBL(USERQUIT))
+             CHGVAR     VAR(&DESTINAT) VALUE(&OUTQ)
+             CHGVAR     VAR(&COPYN) VALUE(&COPY)
+
+/* DON'T SUBMIT, CALL THE PRINT PROGRAM                              */
+/***** CALL:  CALL       PGM(AR605CLP) PARM(&COMPANY &CUSTNBR &AROUTQ +
+                          &COMPORG &CUSTNM &CREDIT &CHARGE &STMTTP +
+                          &PRTFAX &OUTQ &HOLD &SAVE &COPYN &PRTCO +
+                          &DRAWER)                             *******/
+/***** CALL:  CALL      PGM(AR605CLP) PARM(&COMPANY &CUSTNBR &COPYN +
+                          &AROUTQ &CUSTNM &CREDIT &CHARGE &STMTTP +
+                          &OUTQ &HOLD &SAVE &FAX &PRINT &EMAIL +
+                          &PRTCO &COMPORG &JOBSCHED &DRAWER)  *******/
+ CALL:       CALL       PGM(AR605CLP) PARM(&COMPANY &CUSTNBR &COPYN +
+                          &AROUTQ &CUSTNM &CREDIT &CHARGE &REBILL +
+                          &STMTTP &OUTQ &HOLD &SAVE &FAX &PRINT +
+                          &EMAIL &PRTCO &COMPORG &JOBSCHED &DRAWER)
+             GOTO CMDLBL(END)
+
+/* User Quit                                                         */
+ USERQUIT:   CHGVAR     VAR(&RETURN) VALUE('Y2U0005')
+             GOTO CMDLBL(END)
+
+/* Trap errors and send message                                      */
+ MSGTRAP:    RCVMSG     MSGTYPE(*EXCP) MSGDTA(&MSG) MSGDTALEN(&MSGL) +
+                          MSGID(&MSGID)
+             MONMSG MSGID(CPF0000) EXEC(GOTO CMDLBL(END))
+             SNDPGMMSG MSGID(&MSGID) MSGF(QCPFMSG) +
+                       MSGDTA(%SST(&MSG 1 &MSGL)) +
+                       MSGTYPE(*ESCAPE)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(END))
+
+/* End of Program                                                    */
+ END:        ENDPGM

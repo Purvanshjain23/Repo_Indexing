@@ -1,0 +1,1842 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF204 - Cash Distribution: Distribute Cash
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     05/19/05
+      *
+      * Function:    When a Cash Distribution Header record is "Posted",
+      *              we call this program to distribute the cash, including logic to:
+      *                1) write records to the Cash Distribution Detail file
+      *                2) update SBF/TF distributed amounts in Cash Distributon Header file
+      *                3) update remaining balances in the Cash Distributon Balance file
+      *                4) print a listing
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 08/18/06  LeAnne Ramsey
+      *           Changed print logic only for "Exempt" dollars section.
+      *           We no longer print "other" company columns--since there is no "other"
+      *           company values for "Exempt". Also, we no longer print Seaboard and/or
+      *           Triumph "percent" columns.
+      *
+      * 11/07/06  LeAnne Ramsey
+      *           1) New fields were added to TFP011-Cash Distribution Balance.
+      *           2) Changed logic to distribute Sales Expense for Exempt records.
+      *
+      * 06/06/07  LeAnne Ramsey
+      *           Changed print logic for "Exempt" dollars section.
+      *           We will only process/print Cash Distribution Balance records where
+      *           there is an appropriate (SBD or TF) balance. This will keep us
+      *           from printing records which did not have any distributions against them.
+      *
+      * 07/02/07  LeAnne Ramsey
+      *           Recompile only. Synon Customer Extension file was changed.
+      *
+      * 10/30/07  LeAnne Ramsey
+      *           Added logic to dump remaining Triumph Sales Expense balances
+      *           when: 1) the Aggregate Sales Expense Balance is hitting zero
+      *                 2) the TF Sales Expense Balance is hitting zero
+      *
+      * 11/12/07  LeAnne Ramsey
+      *           We wanted this to fit on one page. So, reduced white space;
+      *           went to 198 character line.
+      *
+      * 04/24/08  LeAnne Ramsey
+      *           Added 2 fields to Cash Distribution Detail:
+      *             1) system generated flag (yes/no)--add logic to populate with Yes
+      *             2) adjustment comment
+      *
+      * 06/03/08  LeAnne Ramsey
+      *           We discovered 2 problems in the retrieval of On Account records.
+      *
+      *           The Ship to Customer (bdbkc7) in OA records in the AR Header
+      *           is always zero. So, our retrieval of the Customer Exempt Code from
+      *           the Customer Extension file always failed--giving us an erroneous
+      *           Exempt/Non-Exempt flag value. Per Alice/Rose, we should just
+      *           make our Customer Extension record retrieval using the AR Customer
+      *           Number (bdanc7) from the AR Header record. (see $rtvoa)
+      *
+      *           Also, the $rtvoa subroutine was not inside a loop reading the
+      *           Bank Deposits...it should have been; it is now.
+      *
+      * 09/15/09  LeAnne Ramsey
+      *           Recompile only. Fields added to TFP011-Cash Distribution Balance.
+      *
+      * 09/30/09  Alice Brownfield    ---   E00493
+      *           Change to bring in new "AR Adj PayOut amount" to add to
+      *           TF'sTotal payment amount.  Also remove "SBF Pre-Commencement Amt"
+      *           from all processing.  this is obsolete
+      *
+      * 06/25/10  LeAnne Ramsey   (C1204)
+      *           Added check for negative exempt dollars.
+      *
+      * 01/21/21  ISE              TSN593
+      *           Replaced *loval with *start
+      *
+      * 05/15/21  RMC       W116222         Scan:  W116222
+      *           For OA, get the Exempt code from the invoices instead of from the ship to
+      *           on the OA itself. One invoice could be NE and another could EP so they need
+      *           to be posted to the correct bucket.
+      *
+      * 06/30/25  Anurag Agrawal   - SR31841
+      *           SR# 3031841 - Process Cash Distribution On-Acct Status,
+      *           Invoices in Miscellaneous Post report are being posted as Non-exempt.
+      *           New routine added to read Miscellaneous Post invoices from new file,
+      *           if it is EP then should be posted as Exempt.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Farbdcpl1  if   e           k disk
+      *   AR header
+      *
+      *
+     Farbecpl4  if   e           k disk
+      *   AR detail
+      *
+     Farbecpl8  if   e           k disk
+      *   AR detail key: bfconb    W116222 - added to get OA exempt for SPR invoices
+      *
+      *
+     Fpdnhcpl0  if   e           k disk
+      *   AR OA/CM Transacions  W116222 - added to get OA exempt for SPR invoices
+      *
+      *
+     Fpdj2cpl6  if   e           k disk
+      *   AR bank deposit
+      *
+      *
+     Fpdnerel1  if   e           k disk
+      *   Customer extension
+      *
+      *
+     Fppa4cpl2  if   e           k disk
+      *   AR header OA
+      *
+      *
+     Ftfp007    if   e           k disk
+      *    Exempt codes
+      *
+      *
+     Ftfl011g   uf   e           k disk    rename(cbrec:cbreca) prefix(p1)
+      *  Cash distribution balance (LF selects Payout Amt <> 0 and Payout Date = 0)
+      *
+      *
+     Ftfl011a   uf   e           k disk
+      *  Cash distribution balance
+      *
+      *
+     Ftfp012    uf   e           k disk
+      *  Cash distribution header
+      *
+      *
+     Ftfp013    uf a e           k disk
+      *  Cash distribution detail
+      *
+      *
+      * SR31841 - Added new file
+     Ftfl024a   uf   e           k disk
+      *  Cash Distribution On-Acct Status
+      *
+      *
+     Fprint198  o    f  198        printer oflind(*inof)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      * SR31841 - Added new constants
+     D processed       c                   'P'
+     D history         c                   'H'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     d rtime           s              6  0
+      *
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D passfl          s              1
+     D procfl          s              1
+     D lastsxfl        s              1
+     D count           s              5  0
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+      *
+      * Workfields
+      *
+     D wkrcexfl        s                   like(cbrcexfl)
+     d wkudam          s                   like(chcpam)
+      *
+     d wksxam          s                   like(chcpam)
+     d wksam           s                   like(chcpam)
+     d wktam           s                   like(chcpam)
+      *
+     d wkdsam          s                   like(chcpam)
+     d wkdtam          s                   like(chcpam)
+      *
+     d wkadsxam        s                   like(cdasxcdam)
+     d wktdsxam        s                   like(cdtsxcdam)
+      *
+     d wktdafam        s                   like(cdtafcdam)
+     d wktdbcam        s                   like(cdtbccdam)
+     d wktdoxam        s                   like(cdtoxcdam)
+      *
+     d wkdump          s                   like(cdtoxcdam)
+     d wkam            s                   like(cdtoxcdam)
+      *
+     d wkexpc          s                   like(chtcdpc)
+      *
+     D wkrate          s              9  6
+      *
+      * SR31841 - Added work field
+     D wkprocessed     s              1
+      *
+      *
+      *
+      * Print fields
+      *
+     d h1mdy           s              6  0
+      *
+      *
+     d l2mdy           s              6  0
+      *
+     d l3nexam         s                   like(chcpam)
+      *
+     d h4desc          s             35
+     d l4wemdy         s              6  0
+     d l4absxam        s                   like(cbabsxam)
+     d l4sbalam        s                   like(cbsbalam)
+     d l4tbalam        s                   like(cbtbalam)
+     d l4udam          s                   like(cbtbalam)
+      *
+      *
+     d l6mdy           s              6  0
+     d l6ssxcdam       s                   like(cdasxcdam)
+      *
+     d t6asxcdam       s                   like(cdasxcdam)
+     d t6ssxcdam       s                   like(cdasxcdam)
+     d t6tsxcdam       s                   like(cdasxcdam)
+     d t6tafcdam       s                   like(cdasxcdam)
+     d t6tbccdam       s                   like(cdasxcdam)
+     d t6toxcdam       s                   like(cdasxcdam)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldbtsn                 1      7  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * As a preliminary step, retrieve/update the Cash Distribution Header
+      * with the Exempt dollars from the AR Detail file and the On-Account file.
+      *
+     C                   exsr      $prelim
+      *
+      * Print Report Headings
+      *
+     C                   exsr      $h1hdr
+      *
+      *
+      * Distribute the Seaboard Exempt dollars.
+      *
+     C                   move      'S'           passfl
+     C                   eval      h4desc = 'Distribution of SBF Exempt Dollars'
+     C                   exsr      $exempt
+      *
+      *
+      * Distribute the Triumph Exempt dollars.
+      *
+     C                   move      'T'           passfl
+     C                   eval      h4desc = 'Distribution of TF Exempt Dollars'
+     C                   exsr      $exempt
+      *
+      *
+      * Distribute the Non-exempt dollars.
+      *
+     C                   eval      h4desc = 'Distribution of Non-Exempt Dollars'
+     C                   exsr      $nonexempt
+      *
+      * Print the Sales Expense Breakdown section
+      *
+     C                   exsr      $breakdown
+      *
+      * Update the Cash Distribution Header record and print final sections of report.
+      *
+     C                   exsr      $upd012
+      *
+      * EOF processing
+      *
+     C                   seton                                        lr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Distribute Sales Expenses
+      *--------------------------------------------------------------------------------------
+      *
+     C     $expenses     begsr
+      *
+     C                   move      no            lastsxfl
+      *
+      * Turn the 'Aggregate Gross Sales Expense %' into a "rate" by dividing by 100.
+      * Then, multiply this "rate" times the Undistributed Amount to get the dollars
+      * that will be distributed off the top as "Sales Expense" against the Balance record.
+      *
+     C                   eval      wkrate = cbagsxpc / 100
+     C                   eval(h)   wksxam = wkudam * wkrate
+      *
+      * If the calculated amount is equal/greater than the value in the field
+      * 'Aggregate Remaining Balance-Sales Expense' on the Balance record, set
+      * the total amount to be distributed equal to the remaining amount.
+      *
+     C                   if        wksxam >= cbabsxam
+     C                   z-add     cbabsxam      wkadsxam
+     C                   move      yes           lastsxfl
+     C                   else
+     C                   z-add     wksxam        wkadsxam
+     C                   endif
+      *
+     C                   sub       wkadsxam      wkudam
+      *
+      * Make special Triumph calculations to break Triumph's distributed dollars down
+      * into the "lower level" sales expense buckets. (NOTE: Do not perform this
+      * logic for the Seaboard Exempt pass.)
+      *
+     C                   if        h4desc = 'Distribution of SBF Exempt Dollars'
+     C                   else
+     C                   exsr      $triumph
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Break the Triumph dollars down into the lower sales expense levels
+      *--------------------------------------------------------------------------------------
+      *
+     C     $triumph      begsr
+      *
+      * Turn the 'TF Percent of All Sales Expenses' into a "rate" by dividing by 100.
+      * (Note: If this is the Triumph Exempt pass, just set the percent to 100).
+      *
+     C                   if        h4desc = 'Distribution of TF Exempt Dollars'
+     C                   z-add     1             wkrate
+     C                   else
+     C                   eval      wkrate = cbtsxpc / 100
+     C                   endif
+      *
+      * If this will be the last distributon of Aggregate Sales Expense,
+      *   set the value to distribute equal to the TF Remaining Sales Expense
+      * Else, calculate a "rate"
+      *       multiply this "rate" times the Sales Expense Distribution Amount to get
+      *       the TF portion of the distributed Sales Expense.
+      *
+     C                   if        lastsxfl = yes
+     C                   z-add     cbtbsxam      wktdsxam
+     C                   else
+     C                   eval(h)   wktdsxam = wkadsxam * wkrate
+     C                   endif
+      *
+      * If the calculated amount is equal/greater than the
+      * 'TF Remaining Balance-Sales Expenses' on the Balance record,
+      * override the calculated amount with the remaining balance.
+      *
+     C                   if        wktdsxam >= cbtbsxam
+     C                   z-add     cbtbsxam      wktdsxam
+     C                   move      yes           lastsxfl
+     C                   endif
+      *
+      * Now, we have to break this Triumph Distributed Amount down individually for:
+      *       TF absorbed feight
+      *       TF broker commission
+      *       TF other sale expense
+      *
+      * To accomplish this "break-down", we will make 2 passes.
+      *   Pass 1: Break down by percents
+      *
+     C                   exsr      $pass1
+      *
+      *   Pass 2: If the sum of the breakdown amounts is not equal to the TF total distributed
+      *           sales expense amount, execute the second pass to dump the difference.
+      *
+     C                   if        wksxam <> wktdsxam and
+     C                             lastsxfl = no
+     C     wktdsxam      sub       wksxam        wkdump
+     C                   exsr      $pass2
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Pass 1 to break down TF sales expenses into lower levels
+      *--------------------------------------------------------------------------------------
+      *
+     C     $pass1        begsr
+      *
+      * Initialize the accumulator for the breakdown dollars. At the end, we will compare this
+      * field to the TF distributed sales expense dollars.
+      *
+     C                   z-add     0             wksxam
+      *
+      *-------------- Calculate: TF Absorbed Freight Amount -------------------------------
+      *
+      * Turn 'TF Absorbed Freight %' into a "rate" by dividing by 100.
+      * Then, multiply this "rate" times the TF Distributed Amount to get the
+      * Absorbed Freight portion.
+      *
+     C                   eval      wkrate = cbtafpc / 100
+     C                   eval(h)   wktdafam = wktdsxam * wkrate
+      *
+     C                   if        wktdafam > cbtbafam or
+     C                             lastsxfl = yes
+     C                   z-add     cbtbafam      wktdafam
+     C                   endif
+      *
+     C                   add       wktdafam      wksxam
+      *
+      *
+      *-------------- Calculate: TF Broker Commission Amount -------------------------------
+      *
+      * Turn 'TF Broker Commission %' into a "rate" by dividing by 100.
+      * Then, multiply this "rate" times the TF Distributed Amount to get the
+      * Broker Commission portion.
+      *
+     C                   eval      wkrate = cbtbcpc / 100
+     C                   eval(h)   wktdbcam = wktdsxam * wkrate
+      *
+     C                   if        wktdbcam > cbtbbcam or
+     C                             lastsxfl = yes
+     C                   z-add     cbtbbcam      wktdbcam
+     C                   endif
+      *
+     C                   add       wktdbcam      wksxam
+      *
+      *
+      *-------------- Calculate: TF Other Sales Expense Amount -----------------------------
+      *
+      * Turn 'TF Other Sales Expense %' into a "rate" by dividing by 100.
+      * Then, multiply this "rate" times the TF Distributed Amount to get the
+      * Other Sales Expense portion.
+      *
+     C                   eval      wkrate = cbtoxpc / 100
+     C                   eval(h)   wktdoxam = wktdsxam * wkrate
+      *
+     C                   if        wktdoxam > cbtboxam or
+     C                             lastsxfl = yes
+     C                   z-add     cbtboxam      wktdoxam
+     C                   endif
+      *
+     C                   add       wktdoxam      wksxam
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Pass 2 to dump the difference from Triumph's Sales Expense breakdown
+      *--------------------------------------------------------------------------------------
+      *
+     C     $pass2        begsr
+      *
+      * Dump on TF Absorbed Freight Amount if it has any balance remaining
+      *
+     C     cbtbafam      sub       wktdafam      wkam
+     C                   if        wkam > 0
+     C                   exsr      $dump
+     C                   endif
+      *
+      * If you have some more to "dump",
+      * dump on TF Broker Commission Amount if it has any balance remaining
+      *
+     C                   if        wkdump <> 0
+     C     cbtbbcam      sub       wktdbcam      wkam
+     C                   if        wkam > 0
+     C                   exsr      $dump
+     C                   endif
+     C                   endif
+      *
+      * If you still need to "dump", we probably have data problems. So, we will
+      * unconditionally dump any remaining amount into TF Other Sales Expense---and
+      * see what we get!!
+      *
+     C                   if        wkdump <> 0
+     C                   add       wkdump        wktdoxam
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Dump leftover Triumph Sales Expense
+      *--------------------------------------------------------------------------------------
+      *
+     C     $dump         begsr
+      *
+     C                   select
+     C                   when      wkam >= wkdump
+     C                   add       wkdump        wktdafam
+     C                   z-add     0             wkdump
+      *
+     C                   when      wkam < wkdump
+     C                   add       wkam          wktdafam
+     C                   sub       wkam          wkdump
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Recalc balances
+      *--------------------------------------------------------------------------------------
+      *
+     C     $balances     begsr
+      *
+      * Calc amount still left to be distributed:
+      * (You've already taken off the Sales Expense distribution)
+      *
+     C                   eval      wkudam = wkudam - wkdsam - wkdtam
+      *
+      * Accumulate the distributed amounts for the Cash Header record.
+      *
+     C                   add       wkadsxam      chasxcdam
+     C                   add       wkdsam        chscdam
+     C                   add       wkdtam        chtcdam
+      *
+      * Update the 'Non-Sales Expense' Balance Remaining fields on the
+      * Cash Distribution Balance record:
+      *     SBF Balance Remaining Amount
+      *     TF Balance Remaining Amount
+      *     Aggregate Balance Remaining Amount
+      *
+     C                   sub       wkdsam        cbsbalam
+     C                   sub       wkdtam        cbtbalam
+     C                   eval      cbabalam = cbsbalam + cbtbalam
+      *
+      * Update the Remaining Balances for the Total Sales Expenses on the
+      * Cash Distribution Balance record:
+      *    Aggregate Remaining Balance--Sales Expenses
+      *    Triumph Remaining Balance--Sales Expenses
+      *
+     C                   sub       wkadsxam      cbabsxam
+     C                   sub       wktdsxam      cbtbsxam
+      *
+      * Update the TF Remaining Balances for the TF "lower level" Sales Expenses
+      * on the Cash Distribution Balance record:
+      *     TF Remaining Balance--Absorbed freight
+      *     TF Remaining Balance--Broker commission
+      *     TF Remaining Balance--Other sales expenses
+      *
+     C                   sub       wktdafam      cbtbafam
+     C                   sub       wktdbcam      cbtbbcam
+     C                   sub       wktdoxam      cbtboxam
+      *
+      * Populate the Collection Completed Date when all the following
+      * Remaining Balances are zero:
+      *     Aggregate Remaining Balance-Sales Expenses
+      *     SBF Balance Remaining Amount
+      *     TF Balance Remaining Amount
+      *
+     C                   if        cbabsxam = 0 and
+     C                             cbsbalam = 0 and
+     C                             cbtbalam = 0
+     C                   z-add     chddt         cbccdt
+     C                   endif
+      *
+      * Save the Record Exempt value from the Cash Distribution Balance record.
+      * Then, update the record.
+      *
+     C                   move      cbrcexfl      wkrcexfl
+     C                   update    cbrec
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Distribute Exempt Dollars
+      *--------------------------------------------------------------------------------------
+      *
+      * We flow thru this subroutine 2 times: once for SBF and once for Triumph
+      * We set the "Passfl" field with S/T prior to coming into the subroutine.
+      *
+      * Distribute to all Exempt Cash Distribution Balance records that:
+      *   1) Have a remaining balance  (Note: logical file omits zero balance records)
+      *   2) Have a Week-ending date on/before the week-ending date of the Header
+      *      record you are processing.
+      *
+     C     $exempt       begsr
+      *
+      * Set indicators that control print format
+      *
+     C                   seton                                        85
+     C                   setoff                                       86
+
+     C                   move      yes           first
+      *
+      * Set Seaboard/Triumph workfields to zero.
+      *
+     C                   z-add     0             wkdtam
+     C                   z-add     0             wkdsam
+      *
+      * Retrieve the Cash Distribution Header record to get the Exempt
+      * Amount to distribute.
+      *
+     C     ldbtsn        chain     tfp012                             92
+     C                   if        *in92 = *off                                 If hit
+      *
+      *
+      * Set up either the SBF Exempt dollars or the TF Exempt dollars for
+      * distribution.
+     C                   setoff                                       8788
+      *
+     C                   select
+     C                   when      passfl = 'S'
+     C                   seton                                        87
+     C                   z-add     chsexam       wkudam
+      *
+     C                   when      passfl = 'T'
+     C                   seton                                        88
+     C                   z-add     chtexam       wkudam
+     C                   endsl
+      *
+      * Process the Cash Distribution Balance records.
+      *
+593  C*    *loval        setll     tfl011a
+593  C     *start        setll     tfl011a
+      *
+     C                   dou       *in91 = *on or                               Do dist
+     C                             wkudam <= 0 or
+     C                             cbwedt > chwedt
+      *
+     C                   read      tfl011a                                91
+     C                   if        *in91 = *off and                             If exempt
+     C                             cbrcexfl = yes and
+     C                             cbwedt <= chwedt and
+     C                             wkudam > 0
+      *
+      * Only process records where there is an appropriate (SBD or TF)
+      * remaining balance.
+      *
+     C                   select
+     C                   when      passfl = 'S' and cbsbalam = 0
+     C                   move      no            procfl
+      *
+     C                   when      passfl = 'T' and
+     C                             cbtbalam = 0 and cbtbsxam = 0
+     C                   move      no            procfl
+     C                   other
+      *
+     C                   move      yes           procfl
+     C                   endsl
+      *
+      *
+     C                   if        procfl = yes                                 If process
+     C                   z-add     wkudam        l4udam
+     C                   z-add     cbabsxam      l4absxam
+     C                   z-add     cbsbalam      l4sbalam
+     C                   z-add     cbtbalam      l4tbalam
+      *
+      * Sales Expenses
+      *
+     C                   exsr      $expenses
+      *
+      * Seaboard
+     C                   select
+     C                   when      passfl = 'S'
+     C                   if        wkudam > cbsbalam
+     C                   z-add     cbsbalam      wkdsam
+     C                   else
+     C                   z-add     wkudam        wkdsam
+     C                   endif
+      * Triumph
+     C                   when      passfl = 'T'
+     C                   if        wkudam > cbtbalam
+     C                   z-add     cbtbalam      wkdtam
+     C                   else
+     C                   z-add     wkudam        wkdtam
+     C                   endif
+     C                   endsl
+      *
+      *
+      * Calculate balances
+     C                   exsr      $balances
+      *
+      * Print a line on the report
+      *
+     C                   exsr      $l4dtl
+      *
+      * Write a Cash Distributon Detail record
+      *
+     C                   exsr      $wrt013
+     C                   endif                                                  If process
+     C                   endif                                                  If exempt
+     C                   enddo                                                  Do dist
+      *
+      * Update Cash Distribution header
+      *
+     C                   update    chrec
+      *
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Distribute non-exempt cash
+      *--------------------------------------------------------------------------------------
+      *
+      * Distribute to all Non-exempt Cash Distribution Balance records that:
+      *   1) Have a remaining balance  (Note: logical file omits zero balance records)
+      *   2) Have a Week-ending date on/before the week-ending date of the Header
+      *      record you are processing.
+      *
+     C     $nonexempt    begsr
+      *
+      * Set indicators that control print format
+      *
+     C                   seton                                        86
+     C                   setoff                                       85
+
+     C                   move      yes           first
+      *
+      * Retrieve the Cash Distribution Header record.
+      *
+     C     ldbtsn        chain     tfp012                             92
+     C                   if        *in92 = *off                                 If hit
+      *
+      * Subtract the Exempt Dollars from the Cash Payment Amount to get
+      * the "Non-exempt" dollars that need to be distributed.
+      *
+     C     chcpam        sub       chaexam       wkudam
+      *
+      * Process the Non-Exempt Cash Distribution Balance records.
+      *
+593  C*    *loval        setll     tfl011a
+593  C     *start        setll     tfl011a
+      *
+     C                   dou       *in91 = *on or                               Do dist
+     C                             wkudam <= 0 or
+     C                             cbwedt > chwedt
+      *
+     C                   read      tfl011a                                91
+     C                   if        *in91 = *off and                             If nonexempt
+     C                             cbrcexfl = no and
+     C                             cbwedt <= chwedt and
+     C                             wkudam > 0
+      *
+     C                   z-add     wkudam        l4udam
+     C                   z-add     cbabsxam      l4absxam
+     C                   z-add     cbsbalam      l4sbalam
+     C                   z-add     cbtbalam      l4tbalam
+      *
+      * Sales Expense
+      *
+     C                   exsr      $expenses
+      *
+      * Seaboard
+     C                   eval      wkrate = cbsnprpc / 100
+     C                   eval(h)   wksam = wkudam * wkrate
+      *
+     C                   if        wksam > cbsbalam
+     C                   z-add     cbsbalam      wkdsam
+     C                   else
+     C                   z-add     wksam         wkdsam
+     C                   endif
+      *
+      * Triumph
+     C                   eval(h)   wktam = wkudam - wksam
+      *
+     C                   if        wktam > cbtbalam
+     C                   z-add     cbtbalam      wkdtam
+     C                   else
+     C                   z-add     wktam         wkdtam
+     C                   endif
+      *
+      *
+      * Calculate balances
+     C                   exsr      $balances
+      *
+      * Print a line on the report
+      *
+     C                   exsr      $l4dtl
+      *
+      * Write a Cash Distributon Detail record
+      *
+     C                   exsr      $wrt013
+     C                   endif                                                  If nonexempt
+     C                   enddo                                                  Do dist
+      *
+      * Update Cash Distribution header
+      *
+     C                   update    chrec
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print detail line one
+      *---------------------------------------------------------------
+      *
+     C     $l1dtl        begsr
+      *
+     C                   if        *inof = *on
+     c                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   except    l1dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Deposit Detail
+      *---------------------------------------------------------------
+      *
+     C     $deposits     begsr
+      *
+     C                   move      yes           first
+     C     ldbtsn        setll     pdj2cpl6
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     ldbtsn        reade     pdj2cpl6                               91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * Print column headings the first time thru.
+      *
+     C                   if        first = yes
+     C                   exsr      $h2hdr
+     C                   move      no            first
+     C                   endif
+      *
+      * Get Synon Deposit Date into MMDDYY format
+      *
+     C     *cymd         test(d)                 j2hxdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C     *cymd         move      j2hxdt        wkisodate
+     C     *mdy          move      wkisodate     l2mdy
+     C                   endif                                                  If OK date
+      *
+     C                   exsr      $l2dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Deposit Detail
+      *---------------------------------------------------------------
+      *
+     C     $l2dtl        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+      *
+     C                   except    l2dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print report heading
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Deposit Detail Headings
+      *---------------------------------------------------------------
+      *
+     C     $h2hdr        begsr
+      *
+     C                   except    h2hdr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Section 4 headings
+      *---------------------------------------------------------------
+      *
+     C     $h4hdr        begsr
+      *
+     C                   except    h4hdr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Section 3
+      *---------------------------------------------------------------
+      *
+     C     $l3dtl        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+      * Calculate Non-Exempt Amount.
+      *
+     C     chcpam        sub       chaexam       l3nexam
+      *
+     C                   except    l3dtl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Section 4
+      *---------------------------------------------------------------
+      *
+     C     $l4dtl        begsr
+      *
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   exsr      $h4hdr
+      *
+     C                   when      *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h4hdr
+     C                   endsl
+      *
+      * Flip Week-Ending Date to MMDDYY for printing
+      *
+     C     *iso          test(d)                 cbwedt                 92
+     C                   if        *in92 = *off                                 If OK daily
+     C                   move      cbwedt        wkisodate
+     C     *mdy          move      wkisodate     l4wemdy
+     C                   endif                                                  If OK daily
+      *
+     C                   except    l4dtl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print the Sales Expense Breakdown section
+      *---------------------------------------------------------------
+      *
+     C     $breakdown    begsr
+      *
+      * Print on-page column headings for this section.
+      *
+     C                   exsr      $h6hdr
+      *
+      * Retrieve/print each Cash Distribution Detail record for this Batch.
+      *
+     C                   z-add     0             count
+     C     ldbtsn        setll     tfp013
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     ldbtsn        reade(n)  tfp013                                 91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * Flip the Revenue Weeking Date to MMDDYY format.
+      *
+     C     *iso          test(d)                 cdrwedt                92
+     C                   if        *in92 = *off
+     C                   move      cdrwedt       wkisodate
+     C     *mdy          move      wkisodate     l6mdy
+     C                   endif
+      *
+      * Calculate SBF portion as:
+      *   Agg sales expense cash distributed amount -
+      *    TF sales expense cash distributed amount
+      *
+     C     cdasxcdam     sub       cdtsxcdam     l6ssxcdam
+      *
+      * Accumulate totals:
+      *
+     C                   add       cdasxcdam     t6asxcdam
+     C                   add       l6ssxcdam     t6ssxcdam
+     C                   add       cdtsxcdam     t6tsxcdam
+     C                   add       cdtafcdam     t6tafcdam
+     C                   add       cdtbccdam     t6tbccdam
+     C                   add       cdtoxcdam     t6toxcdam
+      *
+      * Print detail line
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h6hdr
+     C                   endif
+      *
+     C                   except    l6dtl
+     C                   add       1             count
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+      * If you printed more than one line, print a Total Line.
+      *
+     C                   if        count > 1                                    If total
+     C                   if        *inof = *on
+     C                   exsr      $h6hdr
+     C                   endif
+     C                   except    t6tot
+     C                   endif                                                  If total
+      *
+      * Clear total fields
+     C                   z-add     0             t6asxcdam
+     C                   z-add     0             t6ssxcdam
+     C                   z-add     0             t6tsxcdam
+     C                   z-add     0             t6tafcdam
+     C                   z-add     0             t6tbccdam
+     C                   z-add     0             t6toxcdam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Headings for Section 6
+      *---------------------------------------------------------------
+      *
+     C     $h6hdr        begsr
+      *
+     C                   if        *inof = *on
+     c                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   except    h6hdr
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Update the Cash Distribution Header record
+      *---------------------------------------------------------------
+      *
+     C     $upd012       begsr
+      *
+      * Retrieve the Cash Distribution Header record for this Batch Number.
+      *
+     C     ldbtsn        chain     tfp012                             92
+     C                   if        *in92 = *off                                 If hit
+      *
+      * Set status to Posted
+      * Blank out "submitted" flag
+      *
+     C                   move      'P'           chchstcd
+     C                   move      *blank        chsbfl
+      *
+      * Calculate: TF Cash Distributed Percent as:
+      *    TF cash distributed amount / cash payment amount
+      *    Then, multiply the result times 100 to get the value into % format
+      *
+     C                   if        chcpam <> 0
+     C                   eval(h)   chtcdpc = (chtcdam / chcpam) * 100
+     C                   endif
+      *
+      * get payout amount from tfp011 and update with daily date
+      *
+     C                   exsr      $payout
+      *
+      * Calculate: TF Total Payment Amount as:
+      *    TF cash distributed amount + TF distribution Adjustment amount
+      *                               + AR Adj Payout Amount
+      *
+     C                   eval      chttpam = chtcdam + chtdaam + charapam
+      *
+      *
+      * Print final sections of report
+      *
+     C                   exsr      $l1dtl
+     C                   exsr      $deposits
+     C                   exsr      $l3dtl
+      *
+      * Update record.
+      *
+     C                   update    chrec
+      *
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a Cash Distribution Detail record
+      *---------------------------------------------------------------
+      *
+      * Write a Cash Distributon Detail record for this:
+      *  1) batch number
+      *  2) daily date
+      *  3) week-ending date
+      *
+     C     $wrt013       begsr
+      *
+     C                   move      wkrcexfl      cdrcexfl
+     C                   move      yes           cdsysfl
+      *
+     C                   z-add     chbtsn        cdbtsn
+     C                   z-add     chddt         cdddt
+     C                   z-add     chwedt        cdcwedt
+     C                   z-add     cbwedt        cdrwedt
+      *
+      * Cash distributed amount (not sales expense):
+      *   Seaboard
+      *   Triumph
+     C                   z-add     wkdsam        cdscdam
+     C                   z-add     wkdtam        cdtcdam
+      *
+      * Distributed sales expenses:
+      *    Aggregate
+      *    Triumph
+     C                   z-add     wkadsxam      cdasxcdam
+     C                   z-add     wktdsxam      cdtsxcdam
+      *
+      * Breakdown amounts for Triumph distributed Sales Expenses:
+      *    Absorbed freight
+      *    Broker commission
+      *    Other sales expense
+      *
+     C                   z-add     wktdafam      cdtafcdam
+     C                   z-add     wktdbcam      cdtbccdam
+     C                   z-add     wktdoxam      cdtoxcdam
+      *
+     C                   write     cdrec
+     C                   clear                   cdrec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Update Cash Distribution Header with Exempt Dollars
+      *---------------------------------------------------------------
+      *
+     C     $prelim       begsr
+      *
+      * Retrieve the Cash Distribution Header record for this Batch Number.
+      *
+     C     ldbtsn        chain     tfp012                             92
+     C                   if        *in92 = *off                                 If hit
+      *
+      * Flip the Daily Date to MMDDYY format.
+      *
+     C     *iso          test(d)                 chddt                  92
+     C                   if        *in92 = *off                                 If OK daily
+     C                   move      chddt         wkisodate
+     C     *mdy          move      wkisodate     h1mdy
+     C                   endif                                                  If OK daily
+      *
+      * Read/process all AR Bank Deposit records for the Batch Number:
+      *   1) Retrieve the Exempt Dollars from the AR Detail file
+      *   2) Retrieve the Exempt Dollars from the On Account file
+      *
+     C     ldbtsn        setll     pdj2cpl6
+     C                   dou       *in91 = *on                                  Do deposit
+     C     ldbtsn        reade     pdj2cpl6                               91
+     C                   if        *in91 = *off                                 If not eof
+     C                   exsr      $rtvar
+     C                   exsr      $rtvoa
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do deposit
+      *
+      * SR31841 - Process all non-processed Cash Distribution On-Acct Status records
+     C                   exsr      $rtvoamis
+      *
+      * Set negative amounts to zero. (We don't expect/rarely have negatives.)
+      *
+     C                   if        chsexam < 0
+     C                   z-add     0             chsexam
+     C                   endif
+      *
+     C                   if        chtexam < 0
+     C                   z-add     0             chtexam
+     C                   endif
+      *
+      * Add Seaboard and Triumph values together to get Aggregate value
+      *
+     C     chsexam       add       chtexam       chaexam
+      *
+      * If the Aggregate Exempt amount is more than the Cash Payment Amount,
+      * recalculate the amount
+      *
+     C                   if        chaexam > chcpam
+     C                   exsr      $exemptadj
+     C                   endif
+      *
+      * Update Cash Distribution Header with Exempt dollars
+      *
+     C                   update    chrec
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve the Exempt Dollars from the AR Detail
+      *---------------------------------------------------------------
+      *
+     C     $rtvar        begsr
+      *
+      * For each AR Bank Deposit record:
+      *    Retrieve/process each AR Detail record using a key of:
+      *        Bank code
+      *        Deposit date
+      *        Deposit time
+      *
+     C     key01         setll     arbecpl4
+     C                   dou       *in93 = *on                                  Do detail
+     C     key01         reade     arbecpl4                               93
+     C                   if        *in93 = *off and                             If not eof
+     C                             bfa5st = 'CSH'
+      *
+      * Retrieve the Record Exempt Flag from the Exempt Code file for the
+      * 'AR TF Exempt Code' value.
+      *
+     C                   move      no            wkrcexfl
+     C     bfw3sx        chain     tfp007                             92
+     C                   if        *in92 = *off
+     C                   move      exrcexfl      wkrcexfl
+     C                   endif
+      *
+      * Accumulate "Exempt Transaction Amount" into Exempt fields.
+      *
+     C                   if        wkrcexfl = yes                               If exempt
+      *
+     C                   select
+     C                   when      bfaic3 = 360
+     C                   add       bfbsva        chsexam
+      *
+     C                   when      bfaic3 = 960
+     C                   add       bfbsva        chtexam
+     C                   endsl
+     C                   endif                                                  If exempt
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do detail
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve Exempt Dollars from On-Account records
+      *---------------------------------------------------------------
+      *
+      * For each AR Bank Deposit record:
+      *    Retrieve each AR Header OA record using a key of:
+      *        Bank code
+      *        Deposit date
+      *        Deposit time
+      *    Then, for each AR Header OA record retrieved:
+      *        Retrieve each AR Header record using a key of:
+      *            Company number
+      *            Invoice number
+      *            Invoice suffix
+      *
+     C     $rtvoa        begsr
+      *
+      * AR Header OA file
+      *
+     C     key01         setll     ppa4cpl2
+     C                   dou       *in93 = *on                                  Do OA
+     C     key01         reade     ppa4cpl2                               93
+     C                   if        *in93 = *off                                 If not eof
+     C*****************************************************************************************
+     c*  W116222 5-15-2023 DO   DO THIS LOGIC TO GET THE REMAINING BALANCE TO POST.
+     c*   FOR WHAT WAS APPLIED USE THE INVOICES THAT THE OA WAS SPREAD TO INSTEAD.
+     C*****************************************************************************************
+      *
+      * AR Header file
+      *
+     C     key02         chain     arbdcpl1                           92
+     C                   if        *in92 = *off                                 If hit
+     C                   IF        BDBGVA > 0                                   REMAINING BALANCE
+      *
+      ***etrieve the Customer record for the 'AR Customer'.
+      ***sing the Customer's 'Exempt Code' from the retrieved record,
+      * Retrieve the Invoice record from the 'AR Detail'.
+      * Using the Invoice's 'Exempt Code' from the retrieved record,
+      * go get the exempt/non-exempt flag for this code from the Exempt
+      * Codes master file.
+      *
+      * Customer Extension file
+      *
+     C*                  move      no            wkrcexfl
+     C*    bdanc7        chain     pdnerel1                           92
+     C*                  if        *in92 = *off
+     C*    nep3sx        chain     tfp007                             92
+     C*                  if        *in92 = *off
+     C*                  move      exrcexfl      wkrcexfl
+     C*                  endif
+     C*                  endif
+      *
+      * Now using the AR Detail file to get the Exempt code from the Invoice.
+      *
+     C*****************************************************************************************
+     c* Read AR CM/OA Transactions for applied invoices.
+     c                   setoff                                           97
+     C     key02         setll     pdnhcpl0
+     C*                  dow       *in97 = *off                                 dow oa
+     C     key02         reade     pdnhcpl0                               97
+     C                   if        *in97 = *off                                 If oa hit
+      *
+     c* Get the applied invoices exempt/not exempt code using the Reference Number.
+      *
+     C     nhjznx        chain     arbecpl8                           94
+     c                   if        *in94 = *off
+     C     bfw3sx        chain     tfp007                             95       f/ar dtl
+     C                   if        *in95 = *off
+     C                   move      exrcexfl      wkrcexfl
+     C                   endif
+     C                   endif
+     C                   endif                                                  oa hit
+      *
+      * Accumulate "Exempt Transaction Amount" from OA trans REMAINING BAL into Exempt fields.
+      *
+     C                   if        wkrcexfl = yes                               If exempt
+      *
+     C                   select
+     C                   when      bdaic3 = 360
+     C**                 add       bdbsva        chsexam
+     C                   add       bdbGva        chsexam                        REMAINING BAL
+      *
+     C                   when      bdaic3 = 960
+     C**                 add       bdbsva        chtexam                        W116222
+     C                   add       bdbGva        chtexam                        REMAINING BAL
+     C                   endsl
+     C                   endif
+     C                   endif                                                  REMAINING BALANCE
+     C                   endif                                                  If hit
+      *
+     C*****************************************************************************************
+     c*  W116222 5-15-2023 DO THIS LOGIC NOW. GET THE EXEMPT CODE FOR THE INVOICE(s)
+     c*   THAT THE OA WAS SPREAD TO INSTEAD.
+     C*****************************************************************************************
+     c* Read AR CM/OA Transactions for applied invoices.
+     c                   setoff                                           97
+     C     key02         setll     pdnhcpl0
+     C                   dow       *in97 = *off                                 dow oa
+     C     key02         reade     pdnhcpl0                               97
+     C                   if        *in97 = *off                                 If oa hit
+      *
+     c* Get the applied invoices exempt/not exempt code using the Reference Number.
+      *
+     C     nhjznx        chain     arbecpl8                           94
+     c                   if        *in94 = *off
+     C     bfw3sx        chain     tfp007                             95       f/ar dtl
+     C                   if        *in95 = *off
+     C                   move      exrcexfl      wkrcexfl
+     C                   endif
+      *
+      * Accumulate "Exempt Transaction Amount" from OA trans into Exempt fields.
+      *
+     C                   if        wkrcexfl = yes                               If exempt
+      *
+     C                   select
+     C**                 when      bdaic3 = 360
+     C**                 add       bdbsva        chsexam
+     C                   when      bfaic3 = 360
+     C                   add       nhbsva        chsexam
+      *
+     C**                 when      bdaic3 = 960
+     C**                 add       bdbsva        chtexam                        W116222
+     C                   when      bfaic3 = 960
+     C                   add       nhbsva        chtexam                        W116222
+     C                   endsl
+     C                   endif                                                  If exempt
+     C                   endif                                                  If ar dtl found
+      *
+     C                   endif                                                  If not OA eof
+     C                   enddo                                                  Dow OA
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Dow OA
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * SR31841 - Process all non-processed Cash Distribution On-Acct Status records
+      *-----------------------------------------------------------------------------------
+      /free
+         begsr $rtvoamis;
+            setll *loval tfl024a;
+            read tfl024a;
+            dow not %eof(tfl024a);
+
+              wkprocessed = No;
+            //Get the applied invoices exempt/not exempt code using the Reference Number.
+              chain (oarinsn) arbecpl8;
+              if %found(arbecpl8);
+                chain (bfw3sx) tfp007;
+                if %found(tfp007);
+                  if exrcexfl = yes;
+
+                  //Accumulate "Transaction Amount" from Cash Distribution On-Acct Status
+                  //into Exempt fields
+                    if oafcono = 440;
+                      If oapcono = 360;
+                        chsexam = chsexam + oadsam;
+                        wkprocessed = yes;
+                      endif;
+
+                      if oapcono = 960;
+                        chtexam = chtexam + oadsam;
+                        wkprocessed = yes;
+                      endif;
+                    endif;
+
+                  endif;
+                endif;
+              endif;
+
+              // Update Processed Status in Cash Distribution On-Acct Status
+              if wkprocessed = yes;
+                 oaprst = processed;
+              else;
+                 oaprst = history;
+              endif;
+
+              oaprdt = %dec(%date);
+              oaupdt = %dec(%date);
+              oauptm = %dec(%time);
+
+              update oarec;
+
+              read tfl024a;
+            enddo;
+         endsr;
+      /end-free
+      *-----------------------------------------------------------------------------------
+      * Recalculate the Exempt Amounts if they are greater than the Cash Payment
+      *-----------------------------------------------------------------------------------
+      *
+     C     $exemptadj    begsr
+      *
+     C                   select
+      *
+      * When the SBF Exempt Amount is zero,
+      *      force TF Exempt Amount to be the Cash Payment Amount
+      *
+     C                   when      chsexam = 0
+     C                   z-add     chcpam        chtexam
+     C                   other
+      *
+      * When the SBF Exempt Amount is NOT zero
+      *      If the TF Exempt amount is zero
+      *          force SBF Exempt Amount to be the entire Cash Payment Amount
+      *
+      *      If the TF Exempt amount is NOT zero
+      *          calculate SBD % of Aggregate Exempt Amount
+      *          set SBD's Exempt Amount = Cash Payment Amount * the SBD %
+      *          set TF's Exempt Amount = Cash Payment Amount - SBD amount
+      *
+     C                   if        chtexam = 0
+     C                   z-add     chcpam        chsexam
+     C                   else
+      *
+     c                   eval      wkexpc = chsexam / chaexam
+     c                   eval      chsexam = chcpam * wkexpc
+     c                   eval      chtexam = chcpam - chsexam
+     C                   endif
+     C                   endsl
+      *
+      * Recalculate the Aggregate Exempt Amount
+      *
+     C     chsexam       add       chtexam       chaexam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Get the Payout Amount and update the 011 record with daily date
+      *---------------------------------------------------------------
+      *
+     C     $payout       begsr
+      *
+      * We just need to read a record from the file.
+      * There should be only 1 record where the payout amount has not been
+      * distributed.  There will only be a record 1 time a week...since we
+      * turn around and populate the Payout Daily Date in this routine.
+      *
+      * The logical file only selects records where:
+      *            CBARAPDDT-AR Adj Payout Daily Date = 0
+      *            CBARAPAM-AR Adj Payout Amount     <> 0
+      *            CBPFCD-Preliminary/Final Code      = F
+      *
+      *
+593  C*    *loval        setll     tfl011g
+593  C     *start        setll     tfl011g
+     C                   read      tfl011g                                92
+     C                   if        *in92 = *off                                 If hit
+     C                   z-add     p1cbarapam    charapam
+     C                   z-add     p1cbwedt      chararwedt
+      *
+      * Update CD Balance file with the Daily Date
+      *
+     C                   z-add     chddt         p1cbarapddt
+     C                   update    cbreca
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    j2g4cd                         Bank code
+     C                   kfld                    j2hxdt                         Deposit date
+     C                   kfld                    j2yxnx                         Deposit time
+      *
+      *
+     C     key02         klist
+     C                   kfld                    a4aic3                         Company
+     C                   kfld                    a4conb                         Invoice Nbr
+     C                   kfld                    a4cest                         Inv suffix
+      *
+      * Set up heading info.
+      *
+     C                   time                    rtime
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oprint198  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           95 'CASH POST REPORT'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+      *
+     O          e            h1hdr          2
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+     O          e            h1hdr          1
+     O                                           13 'Daily date:'
+     O                       h1mdy          b    23 '  /  /  '
+      *
+     O          e            h1hdr          1
+     O                                           13 'Batch number:'
+     O                       ldbtsn        z     23
+      *
+      *
+      *-------------------------------------------------------------
+      * Section 1
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       2  1
+     O                                           55 'Deposit-Prior day total +
+     O                                              cash collected:'
+     O                       chdpdccam     k     72
+      *
+     O          e            l1dtl          1
+     O                                           55 'Deposit-Current day total +
+     O                                              cash collected:'
+     O                       chdcdccam     k     72
+      *
+     O                                          102 'List of Deposits:'
+      *
+      *-------------------------------------------------------------
+      * Section 2: Deposit Detail Headings
+      *-------------------------------------------------------------
+      *
+     O          e            h2hdr          1
+     O                                           93 'Deposit'
+     O                                          103 'Deposit'
+     O                                          111 'Bank'
+     O                                          131 'Deposit'
+      *
+     O          e            h2hdr          1
+     O                                           91 'Date'
+     O                                          102 'Time'
+     O                                          111 'Code'
+     O                                          131 'Amount'
+      *
+     O          e            h2hdr          1
+     O                                           93 '--------'
+     O                                          103 '-------'
+     O                                          113 '------'
+     O                                          131 '--------------'
+      *
+      *
+     O          e            l2dtl          1
+     O                       l2mdy          b    93 '  /  /  '
+     O                       j2yxnx             102 '  :  '
+     o                       j2g4cd             113
+     o                       j2uiva        k    132
+      *
+      *-------------------------------------------------------------
+      * Section 3
+      *-------------------------------------------------------------
+      *
+     O          e            l3dtl       1  1
+     O                                           55 'Bank Report-Prior day +
+     O                                              total cash collected:'
+     O                       chbpdccam     k     72
+      *
+     O          e            l3dtl          1
+     O                                           55 'Bank Report-Current day +
+     O                                              total cash collected:'
+     O                       chbcdccam     k     72
+      *
+      *
+     O          e            l3dtl       1  1
+     O                                           55 'Bank Report-Opening +
+     O                                              available amount:'
+     O                       chboaam       k     72
+      *
+      *
+     O          e            l3dtl          1
+     O                                           55 'Bank Report-Current day +
+     O                                              immediate availability +
+     O                                              amount:'
+     O                       chbcdiaam     k     72
+      *
+     O                                          151 'Sales expense cash +
+     O                                              distributed amount:'
+     O                       chasxcdam     k    168
+      *
+     O          e            l3dtl          1
+     O                                          151 'SBF cash distributed +
+     O                                              amount:'
+     O                       chscdam       k    168
+      *
+     O          e            l3dtl          1
+     O                                           55 'Unapplied wire transfer +
+     O                                              pre-payments:'
+     O                       chwtppam      k     72
+      *
+     O                                          151 'TF cash distributed +
+     O                                              amount:'
+     O                       chtcdam       k    168
+      *
+     O          e            l3dtl          1
+     O                                           55 'Required balance in +
+     O                                              account:'
+     O                       chrbam        k     72
+      *
+     O                                          151 'TF distribution +
+     O                                              adjustment amount:'
+     O                       chtdaam       k    168
+      *
+      *
+     O          e            l3dtl          1
+     O                                           72 '---------------'
+      *
+     O                                          151 'TF distribution +
+     O                                              adjustment comment:'
+     O                       chtdacom           178
+      *
+      *
+     O          e            l3dtl          1
+     O                                           55 'Cash payment amount:'
+     O                       chcpam        k     72
+      *
+     O                                           85 'Exempt:'
+     O                       chaexam       k    101
+      *
+     O                                          151 'AR adjustment +
+     O                                              payout amount:'
+     O                       charapam      k    168
+      *
+     O          e            l3dtl          1
+     O                                           85 'Non-Exempt:'
+     O                       l3nexam       k    101
+      *
+     O                                          151 'TF total payment +
+     O                                              amount:'
+     O                       chttpam       k    168
+      *
+      *-------------------------------------------------------------
+      * Section 4 for Exempt and Non-Exempt Dollars
+      *-------------------------------------------------------------
+      *
+     O          e            h4hdr       1  0
+     O                       h4desc              35
+      *
+     O          e            h4hdr       0  1
+     O                       h4desc              35
+      *
+      *----------------
+      * Exempt
+      *----------------
+     O          e    85      h4hdr       1  1
+     O                                           39 'Sales Expense'
+     O                                           50 'Percent'
+     O               87                          77 'Seaboard'
+     O               88                          77 'Triumph'
+      *
+     O          e    85      h4hdr          1
+     O                                           39 '---------------'
+     O                                           50 '--------'
+     O                                           77 '---------------'
+      * Before distribution
+     O          e    85      l4dtl          1
+     O                       l4wemdy        b     8 '  /  /  '
+     O                                           23 'Before:'
+     O                       l4absxam      kb    40
+     O               87      l4sbalam      kb    78
+     O               88      l4tbalam      kb    78
+      *
+      * Distribution amounts
+      *
+     O          e    85      l4dtl          1
+     O                                           23 'Distribution:'
+     O                       wkadsxam      k     40
+     O                       cbagsxpc      k     51
+     O               87      wkdsam        k     78
+     O               88      wkdtam        k     78
+      *
+      * After distribution
+     O          e    85      l4dtl          1
+     O                                           23 'After:'
+     O                       cbabsxam      k     40
+     O               87      cbsbalam      k     78
+     O               88      cbtbalam      k     78
+      *
+      *----------------
+      * Non-Exempt
+      *----------------
+     O          e    86      h4hdr       1  1
+     O                                           39 'Sales Expense'
+     O                                           50 'Percent'
+     O                                           77 'Seaboard'
+     O                                           88 'Percent'
+     O                                          114 'Triumph'
+     O                                          125 'Percent'
+      *
+     O          e    86      h4hdr          1
+     O                                           39 '---------------'
+     O                                           50 '--------'
+     O                                           77 '---------------'
+     O                                           88 '--------'
+     O                                          114 '---------------'
+     O                                          125 '--------'
+      *
+      * Before distribution
+     O          e    86      l4dtl          1
+     O                       l4wemdy        b     8 '  /  /  '
+     O                                           23 'Before:'
+     O                       l4absxam      kb    40
+     O                       l4sbalam      kb    78
+     O                       l4tbalam      kb   115
+      *
+      * Distribution amounts
+     O          e    86      l4dtl          1
+     O                                           23 'Distribution:'
+     O                       wkadsxam      k     40
+     O                       cbagsxpc      k     51
+     O                       wkdsam        k     78
+     O                       cbsnprpc      k     89
+     O                       wkdtam        k    115
+     O                       cbtnprpc      k    126
+      * After distribution
+     O          e    86      l4dtl          1
+     O                                           23 'After:'
+     O                       cbabsxam      k     40
+     O                       cbsbalam      k     78
+     O                       cbtbalam      k    115
+      *
+      *------------------------------------------------------------------------------
+      * Column headings for Sales Expense Breakdown section
+      *------------------------------------------------------------------------------
+      *
+      *
+     O          e            h6hdr       1  1
+     O                                            9 'Revenue'
+     O          e            h6hdr          1
+     O                                           11 'Week-Ending'
+     O                                           19 'Exempt'
+     O                                           35 'Total Sales'
+     O                                           51 'SBF Sales'
+     O                                           67 'TF Sales'
+     O                                           82 'TF Absorbed'
+     O                                           98 'TF Broker'
+     O                                          114 'TF Other'
+      *
+     O          e            h6hdr          1
+     O                                            7 'Date'
+     O                                           19 'Record'
+     O                                           35 'Expense'
+     O                                           51 'Expense'
+     O                                           67 'Expense'
+     O                                           82 'Freight'
+     O                                           98 'Commission'
+     O                                          114 'Sales Expense'
+      *
+     O          e            h6hdr          1
+     O                                           11 '-----------'
+     O                                           19 '------'
+     O                                           35 '--------------'
+     O                                           51 '--------------'
+     O                                           67 '--------------'
+     O                                           82 '--------------'
+     O                                           98 '--------------'
+     O                                          114 '--------------'
+      *
+      *------------------------------------------------------------------------------
+      * Detail line for the Expense Section on the last page of the report
+      *------------------------------------------------------------------------------
+      *
+     O          e            l6dtl          1
+     O                       l6mdy          b    10 '  /  /  '
+     o                       cdrcexfl            16
+     o                       cdasxcdam     k     36
+     o                       l6ssxcdam     k     52
+     o                       cdtsxcdam     k     68
+     o                       cdtafcdam     k     83
+     o                       cdtbccdam     k     99
+     o                       cdtoxcdam     k    115
+      *
+      *------------------------------------------------------------------------------
+      * Total line for the Expense Section on the last page of the report
+      *------------------------------------------------------------------------------
+      *
+     O          e            t6tot          1
+     o                                           35 '--------------'
+     o                                           51 '--------------'
+     o                                           67 '--------------'
+     o                                           82 '--------------'
+     o                                           98 '--------------'
+     o                                          114 '--------------'
+      *
+     O          e            t6tot          1
+     o                       t6asxcdam     k     36
+     o                       t6ssxcdam     k     52
+     o                       t6tsxcdam     k     68
+     o                       t6tafcdam     k     83
+     o                       t6tbccdam     k     99
+     o                       t6toxcdam     k    115
+      /eject

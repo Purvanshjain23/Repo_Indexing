@@ -1,0 +1,696 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      ****************************************************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF252 - Freezer Charges
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     04/02/07
+      *
+      * Function:    This program runs in the Weekly Inventory Close.
+      *
+      *              This function:
+      *              1) retrieves Inventory Costs for the week
+      *              2) retrieves Cold Carcass Pounds for the week
+      *              3) retrieves Inventory Holding Pounds for the week
+      *              4) calculates Inventory Amounts Due
+      *              5) writes a single weekly Freezer Charge record
+      *              6) writes a detail "backup" file of Inventory Stock Closing recs
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 04/16/07  LeAnne Ramsey
+      *           On the call to TF809:
+      *           Added parms: Byproduct Mix Flag
+      *                        Meat Cost Group Code
+      *           Changed parms: Exclude from Mix Flag     to  Mix Flag
+      *                          Exclude from Volume Flag  to  Volume Flag
+      *                          Capability Flag           to  Inventory Flag
+      *
+      * 05/14/07  LeAnne Ramsey
+      *           On the call to TF809:
+      *           Added parms:    TF Percent Owned
+      *
+      * 05/22/07  LeAnne Ramsey
+      *           We now have 2 sets of values in the Freezer Charges file:
+      *                Not Co-Owned Products
+      *                Co-Owned Products
+      *           So, added logic to conditionally populate the appropriate
+      *           fields. Prior to this, we had 1 set of values.
+      *
+      * 07/18/07  LeAnne Ramsey
+      *           Per Damon Ginther. We do not do the "calc" subroutine for
+      *           CoOwned Products. So, removed the CoOwned fields used in this
+      *           subroutine from: 1) file TFP052
+      *                            2) the "calc" subroutine
+      *           And also changed the calc for CoOwned "due" amounts.
+      *
+      * 10/03/07  LeAnne Ramsey
+      *           Added logic to retrieve the Product Exception record for a
+      *           Week-Ending Date/Item and add any "exception" Produced Pounds
+      *           to the appropriate "inflow" fields.
+      *
+      * 12/11/07  LeAnne Ramsey
+      *           Added new "freezer interest" fields/logic.
+      *
+      * 01/24/08  LeAnne Ramsey
+      *           Added new file/logic for "Freezer Charges Detail".
+      *           This new file is basically just a snapshot of the data we
+      *           read/used to produce the existing Freezer Charges file.
+      *           We added this new "detail" file because we were unable to "prove"
+      *           the numbers historically.
+      *
+      * 06/12/08  LeAnne Ramsey
+      *           We now have multiple records for a Week/Item in the Product Exception
+      *           file. So, the "chain" logic had to be replaced with "loop" logic to
+      *           process all records for Week/Item.
+      *
+      * 07/07/08  LeAnne Ramsey
+      *           We had to increase our "exception" pounds to 15,4 in the TFP019
+      *           file to accommodate a Meat Costing change. BUT, we did not
+      *           increase any other "pounds" fields in TFS. So, in this
+      *           program we now accumulate the "exception" pounds into a 15,4
+      *           workfield; but, we move it to an 11,2 workfield with half-/adjust
+      *           before using it in the calculations.
+      *
+      * 08/15/08  LeAnne Ramsey
+      *           Users are no longer calculating Amounts Due for Holding/Inflow.
+      *           They are still calculating an Amount Due for "Freezer Interest".
+      *           We have deleted all fields from the Freezer files that are not
+      *           required for the Freezer Interest charge. So, the users will not
+      *           be able to go back "historically" and see/print the old Inflow/
+      *           Holding Amounts due.
+      *
+      * 11/20/08  LeAnne Ramsey
+      *           As a prep for synchronizing the TFS and Meat Cost LDAs, we
+      *           removed the unused LDA fields.
+      *
+      * 12/01/08  LeAnne Ramsey
+      *           File TFP050 renamed from Cold Carcass Pounds to Kill/Cut Data.
+      *           Fields were added to the file and the 2-letter prefix was changed
+      *           from "CP" to "KC".
+      *
+      * 11/15/12  LeAnne Ramsey (E2337)
+      *           Recompile only.
+      *           Rose had to increase the price/cwt field sizes in PPBTCPP-Inventory
+      *           Value file and PPBSCPP-Inventory Stock Closing.
+      *
+      * 02/23/17  Danny Nguyen (R9083)
+      *           New Seaboard Triumph Foods (STF) will need to be valued on its own and NOT
+      *           included in company 360/960 Valuation and NOT included in the Triumph Fees
+      *           & Payments Weekly Revenue processing.
+      *           PPBSCPL3 already hard codes 360/960 for selection, no change.
+      *           Replaced PPBTCPL1 logical with PPBTCPL7. Logical SEL Grouping = G
+      *           (Guymon & Triumph).
+      *
+      * 11/09/17  Danny Nguyen    - R12011-Kill Cut Data for STF
+      *           File TFP050 was changed. Recompile only. No logic change.
+      *
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fombyrel1  if   e           k disk
+      *  Item default
+      *
+      *
+     Fppbscpl3  if   e           k disk
+      *  Inventory stock closing
+      *
+      *
+R9083F*ppbtcpl1  if   e           k disk
+  |  Fppbtcpl7  if   e           k disk
+R9083 *  Inventory Value File - WeekEnd/Item SEL Grp=G
+      *
+      *
+     Ftfl019b   if   e           k disk
+      *   Product exceptions
+      *
+      *
+     Ftfl050a   if   e           k disk
+      *  Kill/Cut data
+      *
+      *
+     Ftfl053a   if   e           k disk
+      *  Inventory cost
+      *
+      *
+     Ftfp052    o    e           k disk
+      *  Freezer charges
+      *
+      *
+     Ftfp152    uf a e           k disk
+      *  Freezer charges detail
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control/save fields
+      *
+     D first           s              1    inz('Y')
+     D svprcd          s                   like(fbprcd)
+     D svtownpc        s                   like(fbtownpc)
+     D svprdcmp        s                   like(fbprdcmp)
+     D svivpr          s                   like(fbivpr)
+      *
+      *
+      * Workfields
+      *
+     D wkprice         s             15  9
+      *
+     D wksexpulb       s                   like(pesexpulb)
+     D wksexlb         s                   like(fztnhllb)
+     D wkshllb         s                   like(fztnhllb)
+     D wksiflb         s                   like(fztniflb)
+     D wkslb           s                   like(fzscclb)
+      *
+     D wktexpulb       s                   like(petexpulb)
+     D wktexlb         s                   like(fztnhllb)
+     D wkthllb         s                   like(fztnhllb)
+     D wktiflb         s                   like(fztniflb)
+     D wktlb           s                   like(fzscclb)
+      *
+     D wkpc            s             15  4
+     D wkrate          s              9  6
+     D wksownpc        s              7  4
+      *
+      *
+      * Parm
+      *
+     D xxtfclcd        s                   like(bytcst)
+     D xxistycd        s                   like(byrgnb)
+     D xxisgrcd        s                   like(byrhnb)
+     D xxisclcd        s                   like(byrinb)
+     D xxinvfl         s              1
+     D xxmixfl         s              1
+     D xxvolfl         s              1
+     D xxcgcd          s              4
+     D xxtownpc        s              7  4
+     D xxprdcmp        s              3
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwbdt                 8     15  0
+      *
+     D  ldwedt                29     36  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *************************************************************************************
+      * Mainline
+      *************************************************************************************
+      *
+      * Retrieve Inventory Costs for the week
+      *
+     C                   exsr      $costs
+      *
+      * Retrieve Cold Carcass Pounds for the week
+      *
+     C                   exsr      $carcass
+      *
+      * Retrieve SBF and TF Inventory Pounds for the week
+      *
+     C                   exsr      $inventory
+      *
+      * Make Freezer Interest calculations
+      *
+     C                   exsr      $calc2
+      *
+      * Write record
+     C                   z-add     ldwbdt        fzwbdt
+     C                   z-add     ldwedt        fzwedt
+     C                   z-add     ldyr          fzyr
+     C                   z-add     ldwk          fzwk
+      *
+     C                   write     fzrec
+      *
+     C                   seton                                        lr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Retrieve Inventory Costs for the Week
+      *-------------------------------------------------------------------------------
+      *
+      * Retrieve Freezer Interest Rate (percent)
+      *
+     C     $costs        begsr
+      *
+     C     ldwedt        setgt     tfl053a
+     C                   readp     tfl053a                                92
+     C                   if        *in92 = *off
+     C                   z-add     infipc        fzfipc
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Retrieve Cold Carcass Pounds for the Week and calculate Percents
+      *----------------------------------------------------------------------------------
+      *
+      * Note: We have only 1 set of values for the "carcass" stuff. We do not have
+      *       "co-owned" versus "not co-owned".
+      *
+     C     $carcass      begsr
+      *
+     C     ldwedt        chain     tfl050a                            92
+     C                   if        *in92 = *off
+     C                   z-add     kcscclb       fzscclb
+     C                   z-add     kctcclb       fztcclb
+     C     fzscclb       add       fztcclb       fzacclb
+      *
+      *
+      * Calculate Cold Carcass Percent
+      *
+     C                   if        fzacclb <> 0                                 If agg lbs
+      *
+      * Seaboard Percent
+      * calc: (SBF Cold Carcass Pounds / Aggregate Cold Carcass Lbs) * 100
+      *
+     C                   eval(h)   wkpc = (fzscclb / fzacclb) * 100
+     C                   if        wkpc <= 999
+     C                   z-add     wkpc          fzsccpc
+     C                   endif
+      *
+      * Triumph Percent
+      * calc: 100 - SBF Cold Carcass Percent
+      *
+     C                   eval      fztccpc = 100 - fzsccpc
+     C                   endif
+     C                   endif                                                  If agg lbs
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Retrieve Inventory Pounds (holding and inflow)
+      *----------------------------------------------------------------------------------
+      *
+     C     $inventory    begsr
+      *
+      * We will first build our "Backup" file by:
+      * Retrieving Ending Inventory (Holding) and Sales Production (Inflow) pounds
+      * for this week from all "freezer" warehouses from the Inventory Stock Closing file.
+      * Only process Items that are:
+      *      1) in Freezer warehouses
+      *      2) "finished goods" items
+      *      3) Company 360 or 960
+      *      4) Flagged as "include in inventory" = Yes
+      *
+     C                   exsr      $bld152
+      *
+      * Process the Backup file you just wrote.
+      *
+     C                   move      yes           first
+     C     ldwedt        setll     tfp152
+      *
+     C                   dou       *in91 = *on                                  Do backup
+     C     ldwedt        reade(n)  tfp152                                 91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * Control breaks
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   exsr      $new
+      *
+     C                   when      fbprcd <> svprcd
+     C                   exsr      $calc3
+     C                   exsr      $clear
+     C                   exsr      $new
+     C                   endsl
+      *
+      * Detail processing
+      *
+      *        Triumph
+     C                   select
+     C                   when      fbcono = 960
+     C                   add       fbhllb        wkthllb
+     C                   add       fbiflb        wktiflb
+      *        Seaboard
+     C                   when      fbcono = 360
+     C                   add       fbhllb        wkshllb
+     C                   add       fbiflb        wksiflb
+     C                   endsl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do backup
+      *
+      * Last Item
+     C                   if        first = no
+     C                   exsr      $calc3
+     C                   endif
+      *
+      * Accumulate the SBF and TF Inventory Pounds into Aggregate fields.
+      *  1) holding pounds
+      *  2) in flow pounds
+      *
+      *  Not co-owned
+     C     fzsnhllb      add       fztnhllb      fzanhllb
+     C     fzsniflb      add       fztniflb      fzaniflb
+      *
+      *  Co-owned
+     C     fzsyhllb      add       fztyhllb      fzayhllb
+     C     fzsyiflb      add       fztyiflb      fzayiflb
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Retrieve values that you get once per Item
+      *-----------------------------------------------------------------------------------
+      *
+     C     $new          begsr
+      *
+     C                   z-add     fbprcd        svprcd
+     C                   z-add     fbtownpc      svtownpc
+     C                   move      fbprdcmp      svprdcmp
+     C                   z-add     fbivpr        svivpr
+      *
+      * Retrieve all Product Exception "produced pounds" for this Item/Week.
+      *
+     C     key01         setll     tfl019b
+      *
+     C                   dou       *in93 = *on                                  Do excepts
+     C     key01         reade     tfl019b                                93
+     C                   if        *in93 = *off
+     C                   add       pesexpulb     wksexpulb
+     C                   add       petexpulb     wktexpulb
+     C                   endif
+     C                   enddo                                                  Do excepts
+      *
+      * Get these accumulated "exception" pounds into workfields that are 11,2
+      * so that they are the same size as all the other "pounds" fields. (Note:
+      * to accommodate a Meat Costing change in July 2008, we had to increase
+      * our "exception" pounds to 15,6...but, we didn't increase the other TFS
+      * "pounds" fields.)
+      *
+     C                   z-add(h)  wksexpulb     wksexlb
+     C                   z-add(h)  wktexpulb     wktexlb
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Build the backup Freezer Charge Detail file
+      *---------------------------------------------------------------
+      *
+     C     $bld152       begsr
+      *
+     C                   z-add     0             svprcd
+      *
+      * Process Inventory Stock Closing records
+      *
+     C     ldwedt        setll     ppbscpl3
+      *
+     C                   dou       *in91 = *on                                  Do inventory
+     C     ldwedt        reade     ppbscpl3                               91
+     C                   if        *in91 = *off and                             If not EOF
+     C                             bsv8sx = 'FZ' and
+     C                             bsw1sx = 'FG ' and
+     C                             (bsb2c3 = 360 or bsb2c3 = 960)
+      *
+      * Retrieve the Inventory Flag
+      *
+     C                   if        bsejc7 <> svprcd
+     C                   z-add     bsejc7        svprcd
+     C                   exsr      $invfl
+     C                   endif
+      *
+      * If the Inventory Flag is YES, continue
+      *
+     C                   if        xxinvfl = yes
+     C                   exsr      $wrt152
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do inventory
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Retrieve the Inventory Flag  (to determine if you will process this Item
+      *-----------------------------------------------------------------------------------------
+      *
+     C     $invfl        begsr
+      *
+     C     bsejc7        chain     ombyrel1                           92
+     C                   if        *in92 = *off                                 If hit
+     C                   call      'TF809'
+     C                   parm      bytcst        xxtfclcd
+     C                   parm      byrgnb        xxistycd
+     C                   parm      byrhnb        xxisgrcd
+     C                   parm      byrinb        xxisclcd
+     C                   parm      *blank        xxinvfl
+     C                   parm      *blank        xxmixfl
+     C                   parm      *blank        xxvolfl
+     C                   parm      *blank        xxcgcd
+     C                   parm      0             xxtownpc
+     C                   parm      *blank        xxprdcmp
+     C                   endif                                                  If hit
+      *
+      * Retrieve the "Inventory Price" for this Item/Week from the
+      * Inventory Value file.
+      *
+     C                   if        xxinvfl = yes                                If inventory
+      *
+R9083 ** Replaced Logical File. LF selects Grouping = G (Guymon & Triumph).
+  |  C**   key02         chain     ppbtcpl1                           92
+R9083C     key02         chain     ppbtcpl7                           92
+     C                   if        *in92 = *off
+     C     btfzvl        div       100           wkprice
+     C                   else
+     C                   z-add     0             wkprice
+     C                   endif
+     C                   endif                                                  If inventory
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a Freezer Charge Detail record  (freezer backup record)
+      *---------------------------------------------------------------
+      *
+     C     $wrt152       begsr
+      *
+     C                   z-add     ldwbdt        fbwbdt
+     C                   z-add     ldwedt        fbwedt
+     C                   z-add     ldyr          fbyr
+     C                   z-add     ldwk          fbwk
+      *
+     C                   z-add     wkprice       fbivpr
+      *
+     C                   move      xxtfclcd      fbtfclcd
+     C                   move      xxistycd      fbistycd
+     C                   move      xxisgrcd      fbisgrcd
+     C                   move      xxisclcd      fbisclcd
+     C                   move      xxinvfl       fbinvfl
+     C                   z-add     xxtownpc      fbtownpc
+     C                   move      xxprdcmp      fbprdcmp
+      *
+     C                   z-add     bsb2c3        fbcono
+     C                   z-add     bsejc7        fbprcd
+     C                   move      bsv8sx        fbwtycd
+     C                   move      bsw1sx        fbitycd
+     C                   z-add     bsm5wg        fbhllb
+     C                   z-add     bsmtwg        fbiflb
+      *
+     C                   write     fbrec
+     C                   clear                   fbrec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Clear accumulators
+      *---------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   z-add     0             wkslb
+     C                   z-add     0             wkshllb
+     C                   z-add     0             wksiflb
+     C                   z-add     0             wksexpulb
+     C                   z-add     0             wksexlb
+      *
+     C                   z-add     0             wktlb
+     C                   z-add     0             wkthllb
+     C                   z-add     0             wktiflb
+     C                   z-add     0             wktexpulb
+     C                   z-add     0             wktexlb
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * CoOwned/Not CoOwned Calcs
+      *---------------------------------------------------------------
+      *
+     C     $calc3        begsr
+      *
+      * If the Item is NOT CoOwned, just plop the values into the NOT CoOwned
+      * fields; otherwise, divvy out the pounds.
+      *
+     C                   if        svtownpc = 0                                 If Not
+      *        Seaboard
+     C                   add       wkshllb       fzsnhllb
+     C                   add       wksiflb       fzsniflb
+     C                   add       wksexlb       fzsniflb
+      *        Triumph
+     C                   add       wkthllb       fztnhllb
+     C                   add       wktiflb       fztniflb
+     C                   add       wktexlb       fztniflb
+     C                   else
+      *        CoOwned
+     C                   exsr      $coOwned
+     C                   endif                                                  If Not
+      *
+      * Calc the Inventory Value of Holding Pounds (for Freezer Interest calcs later).
+      * (Note: Pounds will only be in 1 SBF field and 1 TF field--depending
+      * on whether the Item was CoOwned/Not CoOwned. So, we can just add the
+      * workfields together for this calc instead of conditioning the logic on
+      * CoOwned/Not CoOwned.)
+      *
+     C                   eval(h)   fzseiam = fzseiam +
+     C                                         ((wkshllb + wkslb) * svivpr)
+     C                   eval(h)   fzteiam = fzteiam +
+     C                                         ((wkthllb + wktlb) * svivpr)
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * CoOwned logic
+      *---------------------------------------------------------------
+      *
+     C     $coOwned      begsr
+      *
+      * When Seaboard is the Producing Company, you have to give some of
+      * Seaboards pounds to Triumph.
+      *
+     C                   select
+     C                   when      svprdcmp = 'SBF'
+     C     100           sub       svtownpc      wksownpc
+     C                   eval      wkrate = wksownpc / 100
+      *        Holding
+     C                   eval(h)   wkslb = wkshllb * wkrate
+     C     wkshllb       sub       wkslb         wktlb
+     C                   add       wkslb         fzsyhllb
+     C                   add       wktlb         fztyhllb
+      *        Inflow
+     C                   eval(h)   wkslb = (wksiflb + wksexlb) * wkrate
+     C                   eval      wktlb = wksiflb + wksexlb - wkslb
+     C                   add       wkslb         fzsyiflb
+     C                   add       wktlb         fztyiflb
+      *
+      * When Triumph is the Producing Company, you have to give some of
+      * Triumphs pounds to Seaboard.
+      *
+     C                   when      svprdcmp = 'TF '
+     C                   eval      wkrate = svtownpc / 100
+      *        Holding
+     C                   eval(h)   wktlb = wkthllb * wkrate
+     C     wkthllb       sub       wktlb         wkslb
+     C                   add       wktlb         fztyhllb
+     C                   add       wkslb         fzsyhllb
+      *        Inflow
+     C                   eval(h)   wktlb = (wktiflb + wktexlb) * wkrate
+     C                   eval      wkslb = wktiflb + wktexlb - wktlb
+     C                   add       wktlb         fztyiflb
+     C                   add       wkslb         fzsyiflb
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Freezer Interest Calcs
+      *---------------------------------------------------------------
+      *
+     C     $calc2        begsr
+      *
+      * Get the Freezer Interest Rate % into a "rate" workfield.
+      *
+     C                   eval      wkrate = fzfipc / 100
+      *
+      * Actual Freezer Interest Cost Amount
+      *   calc: (Inventory Value Amount times Interest Rate %) / 52
+      *
+     C                   eval(h)   fzsfiactam = (fzseiam * wkrate) / 52
+     C                   eval(h)   fztfiactam = (fzteiam * wkrate) / 52
+      *
+      * Allocated Freezer Interest Cost Amount
+      *   calc: (SBF + TF Actual Freezer Interest Cost Amount) *
+      *         (SBD or TF Cold Weight / Agg Cold Weight)
+      *
+      *
+     C                   if        fzacclb <> 0                                 If Agg Cold Lbs
+      *      Seaboard
+     C                   eval(h)   fzsfiallam = (fzsfiactam + fztfiactam) *
+     C                                          (fzscclb / fzacclb)
+      *      Triumph
+     C                   eval(h)   fztfiallam = (fzsfiactam + fztfiactam) *
+     C                                          (fztcclb / fzacclb)
+     C                   endif                                                  If Agg Cold Lbs
+      *
+      *
+      * FREEZER INTEREST AMOUNT:
+      *     SBF Actual Interest Cost - SBF Allocated Interest Cost
+      * (Note: if the value is negative, it is dollars due Triumph
+      *        if the value is positive, it is dollars due Seaboard
+      *
+     C                   eval      fzdufiam = fzsfiactam - fzsfiallam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *  none
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    fbprcd
+      *
+     C     key02         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    bsejc7
+      *
+     C                   endsr
+      /eject

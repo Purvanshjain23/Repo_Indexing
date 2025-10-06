@@ -1,0 +1,185 @@
+/********************************************************************/
+/*                                                                  */
+/*  SYNOPSIS - CL PROGRAM TO BE RUN AT NIGHT TO ALLOCATE ORDERS.     */
+/*             FOR ALL PLANTS. THIS RUNS AFTER THE 1ST LEVEL CUT RUNS */
+/*             FOR EACH PLANT AND IS DEPENDANT ON THEM FINISHING     */
+/*                                                                  */
+/*  SYSTEM     - PPS                                                 */
+/*  DATE       - 09/13/17                                            */
+/*  PROGRAMMER - ROSE CENTONZE                                       */
+/*                                                                  */
+/*------------------------------------------------------------------*/
+/* RMC 5/12/09 MONMSG AND CHGJOB LOGGING TO CRT JOB LOG FOR PROCESSES UP */
+/*             TO ALLOCATING THE ORDERS. WE WANT THE JOB TO FALL OUT IF */
+/*             THERE'S A CPF MSG IN THE 1ST LEVEL CUT OR HOG POP BUILD   */
+/*             SO THE ORDERS WONT BE SCHEDULED WITH -0- QTY AND PUT ON HOLD */
+/*                                                                      */
+/* RMC 8/31/2020 ROLL KILL DATE IN SEPARATE CLP INVBLDROLL - TO DO IT LATER */
+/*               DONT WANT TO ROLL IT BEFORE THE HOT SCALE DATA HAS BEEN */
+/*               UPLOADED/REUPLOADED                                       */
+/*                                                                      */
+/* RMC 8/29/2021 CHANGE TO RUN THE ORDER ALLOCATION TWICE, 1ST TIME FOR*/
+/*  W85204       ORDERS SHIPPNG <= 21 DAYS OUT OR HAVE SCHED OVERRIDE =Y,    */
+/*               THEN DROP THE SCHEDULES TO THE PLANTS, THEN RUN AGAIN FOR */
+/*               ORDERS SHIPPING > 21 DAYS OUT + NO SCHED OVERRIDE. */
+/*               THIS WILL GET THE SCHEDULES TO THE PLANTS SOONER  */
+/*                                                                         */
+/* DN  01/26/2023 W118693 - ADDED THE FOLLOWING CALLS TO ALLOW HAM         */
+/*                  SCHEDULES/REPORTS TO BE PROCESSED SOONER.              */
+/*                ADDED CALLS TO:                                          */
+/*                  INVNIGHTRN, INVNIGHTSP & INVNIGHTRS                    */
+/*                                                                         */
+/*-------------------------------------------------------------------------*/
+INVBLDAC:    PGM
+             DCL        &COMP       *DEC     (3 0)
+             DCL        VAR(&TDATE) TYPE(*DEC) LEN(7 0) +
+                          VALUE(0000000) /* PROD DATE RGT */
+             DCL        VAR(&FDATE) TYPE(*DEC) LEN(7 0) +
+                          VALUE(0000000) /* PROD DATE RGF */
+             DCL        VAR(&NDATE) TYPE(*DEC) LEN(7 0) +
+                          VALUE(0000000) /* NEW FROM DATE FOR 2ND TIME */
+             DCL        &JOBDATE    *CHAR   6
+             DCL        &JOBDTE     *CHAR   7
+             DCL        &HOLD       *CHAR    4
+             DCL        &SAVE       *CHAR    4
+             DCL        &COPY       *DEC     2 0
+             DCL        &OUTQ5      *CHAR    10
+             DCL        &HOLD5      *CHAR    4
+             DCL        &HOLDNO     *CHAR    4
+             DCL        &SAVE5      *CHAR    4
+             DCL        &COPY5      *DEC     2 0
+             DCL        &LIBRARY    *CHAR    10
+             DCL        &DAYSOUT    *DEC
+             DCL     VAR(&DAYSBK) TYPE(*DEC) LEN(5 0)    /* DAYS BACK F ORDS */
+             DCL        VAR(&DAYSTO) TYPE(*DEC) LEN(5 0)
+             DCL        &COMMAND    *CHAR    512
+             CHGVAR     VAR(&HOLD) VALUE(*NO)
+             CHGVAR     VAR(&SAVE) VALUE(*YES)
+             CHGVAR     VAR(&COPY) VALUE(1)
+/*------------------------------------------------------------------*/
+/* GET DATA LIBRARY                                                       */
+/*------------------------------------------------------------------*/
+             CALL       PGM(CAQXXFR) PARM('' 'DTALIB    ' &LIBRARY)
+/*------------------------------------------------------------------*/
+/* INIT TO DATE TO A DATE                                                 */
+/*------------------------------------------------------------------*/
+             RTVJOBA    DATE(&JOBDATE)
+             CVTDAT     DATE(&JOBDATE) TOVAR(&JOBDTE) FROMFMT(*MDY) +
+                          TOFMT(*CYMD) TOSEP(*NONE)
+             CHGVAR     VAR(&FDATE) VALUE(&JOBDTE)
+/*------------------------------------------------------------------*/
+/* BUILD PRODUCTION SCHEDULE                                               */
+/*------------------------------------------------------------------*/
+
+             SNDMSG     MSG('Build Production Schedule has started +
+                          for the nightly run program') TOUSR(SEABOARD)
+
+/* GET OUTQ -- WHICH IS CURRENTLY PRKPRT05     */
+ GETOUTQ:    CALL       PGM(POMTXFR) PARM(' ' X'360F' 'INVNIGHTQ' &OUTQ5)
+
+/* DEFAULT HOLDNO TO OVERRIDE SELECT OUTQ'S FOR PRKPRT05    T070     */
+             CHGVAR     VAR(&HOLDNO) VALUE(*NO)
+             CHGVAR     VAR(&HOLD5) VALUE(*YES)
+             CHGVAR     VAR(&SAVE5) VALUE(*YES)
+             CHGVAR     VAR(&COPY5) VALUE(1)
+
+/* RETURN TO THE ORIGINAL CALL WITH NO HOLD(*YES)            T070    */
+
+             SBDPRTOVR  CMDVAR(&COMMAND) FILE(PMFPPFR$) +
+                          OUTQ(&OUTQ5) COPIES(&COPY5) HOLD(&HOLD5) +
+                          SAVE(&SAVE5)
+             CALL       PGM(QCMDEXC) PARM(&COMMAND 512)
+/*-------------------------------------------------------------------*/
+/* DO INITILIZATION FOR ORDER ALLOCATIONS                                */
+/*    CAPTURE INVENTORY                                                     */
+/*-------------------------------------------------------------------*/
+
+             CALL       PGM(PUT1XFR) PARM(' ' '1')
+
+
+/*-------------------------------------------------------------------*/
+/* BUILD WORKFILE FOR ALL  COMPS AT THE SAME TIME - RUN TWICE                */
+/*          1ST TIME: ORDERS SHIPPING <= 21 DAYS OR HAVE SCHED OVERRIDE=Y */
+/*          2ND TIME: ORDERS SHIPPING > 21 DAYS AND DONT HAVE SCHED OVERRIDE*/
+/*-------------------------------------------------------------------*/
+
+ FSTTIME:    CALL       PGM(PBE0XFR) PARM(' ' 'ALLOCDAY1' &DAYSOUT)
+             CHGVAR     VAR(&DAYSTO) VALUE(&DAYSOUT)
+             CALL       PGM(PBPJXFR) PARM(' ' &FDATE &DAYSTO &TDATE)
+             CHGVAR     VAR(&DAYSBK) VALUE(11)
+BACK11:      CALL       PGM(PBPHXFR) PARM(' ' &FDATE &DAYSBK &NDATE)
+
+/* BUILD ORDER DETAIL BUILD FILE WITH 1ST ITERATION OF ORDERS  */
+/*   SET FIRST TIME PARM TO YES                                */
+
+             CLRPFM     FILE(PME6CPP)   /* ORD DTL SCHED BUILD */
+             CALL       PGM(PUT4XFR) PARM('' &NDATE  &TDATE 'Y')
+
+/* SAVE FIRST INTERATION ORDER DETAIL SCHED BUILD FILE                  */
+COPY:        IF         COND(&LIBRARY *EQ 'PRKFLIB   ') THEN(DO)  +
+
+             CPYF       FROMFILE(PME6CPP) TOFILE(PRKFHST/PME6CPP) +
+                          MBROPT(*REPLACE)
+             MONMSG     MSGID(CPF2817)
+                          ENDDO
+             ELSE       CMD(DO)
+             CPYF       FROMFILE(PME6CPP) TOFILE(TPMTESTF/PME6CPPSV) +
+                          MBROPT(*REPLACE)
+             MONMSG     MSGID(CPF2817)
+                          ENDDO
+/* ALLOCATE ORDERS FOR 1ST INTERATION - SHIPPING <= 21 DAYS OUT    */
+
+             CALL       PGM(PUT2XFR)   PARM(' ' &FDATE &TDATE)
+
+
+/*-------------------------------------------------------------------*/
+/* DROP PROD SCHEDULES TO THE PLANTS    FOR PRODUCTION ONLY        */
+/*-------------------------------------------------------------------*/
+      /*     SNDMSG     MSG('drop schedules now') TOUSR(ISRCENT)  */
+
+             IF         COND(&LIBRARY *NE 'PRKFLIB   ') THEN(GOTO +
+                          CMDLBL(NOTPROD))
+
+             CALL       PGM(PUT6UPR) PARM(X'360F')
+             CALL       PGM(PUT6UPR) PARM(X'960F')
+             CALL       PGM(PUT6UPR) PARM(X'440F')
+
+    /* W118693 - ADDED CALLS TO ALLOW HAMS SCHEDULE/REPORTS TO BE +
+                 PROCESSED SOONER.                                     */
+             CALL       PGM(INVNIGHTRN) PARM('Y')     /* 360 */
+             CALL       PGM(INVNIGHTSP) PARM('Y')     /* 440 */
+             CALL       PGM(INVNIGHTRS) PARM('Y')     /* 960 */
+
+ NOTPROD:
+
+/*-------------------------------------------------------------------*/
+/* ALLOCATE ORDERS FOR 2ND INTERATION - SHIPPING > 21 DAYS OUT     */
+/*-------------------------------------------------------------------*/
+
+/* BUILD ORDER DETAIL BUILD FILE WITH 2ND ITERATION OF ORDERS  */
+/*   SET FIRST TIME PARM TO NO, START WITH PREVIOUS &TDATE + 1 DAY */
+
+             CALL       PGM(PMCYXFR)  PARM(' ' X'360F' &TDATE &NDATE)
+ SCDTIME:    CALL       PGM(PBE0XFR) PARM(' ' 'ALLOCDAYS' &DAYSOUT)
+             CHGVAR     VAR(&DAYSTO) VALUE(&DAYSOUT)
+             CALL       PGM(PBPJXFR) PARM(' ' &FDATE &DAYSTO &TDATE)
+
+             CLRPFM     FILE(PME6CPP)   /* ORD DTL SCHED BUILD */
+             CALL       PGM(PUT4XFR) PARM('' &NDATE  &TDATE 'N')
+
+/* ALLOCATE ORDERS FOR 2ND INTERATION - SHIPPING >  21 DAYS OUT    */
+
+             CALL       PGM(PUT2XFR)   PARM(' ' &NDATE &TDATE)
+
+
+/*-------------------------------------------------------------------*/
+/* DO END OF PROCESS STEPS                                      */
+/*-------------------------------------------------------------------*/
+
+             CALL       PGM(PUT3XFR) PARM(' ' &FDATE)
+
+
+             SNDMSG     MSG('Build Production Schedule has completed +
+                          for the nightly run program') TOUSR(SEABOARD)
+
+  END:                    ENDPGM

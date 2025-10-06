@@ -1,0 +1,126 @@
+/**************************************************************************/
+/*  SYSTEM    - ORDER MANAGEMENT SYSTEM                                   */
+/*  PROGRAM   - PUKFUPC - EXC CVT/SND PDF TO IFS CL EXECUTE USER PROGRAM  */
+/*  PROJECT   - R13944 - USDA FSIS PHIS (PHASE 2)                         */
+/*  BY        - DANNY NGUYEN                                              */
+/*  DATE      - 11/29/2018                                                */
+/*  PURPOSE   - Opt '9=Send to PHIS' was taken on Doc Type not 'A' so     */
+/*              convert spooled file(s) & send to IFS Directory for .NET  */
+/*              Team to pick up & send to the USDA PHIS portal.           */
+/*              Doc Type 'H' will not be affected by Opt 9.               */
+/*                                                                        */
+/*  PARAMETERS:                                                           */
+/*     I    &PGM$       - Print Program Printer File                      */
+/*     I    &COMP       - Company Number                                  */
+/*     I    &ORDER      - Order Number                                    */
+/*     I    &DOCTYP     - Document Type                                   */
+/*     I    &ATHTYP     - Attachment Type                                 */
+/*     I    &ATHSTYP    - Attachment Subtype                              */
+/*     I    &SPLFID     - Spooled File ID; This is to control how many    */
+/*                          spooled file will be created for one Doc Type */
+/*                          in a single job stream. This will make the    */
+/*                          filename unqiue.                              */
+/*                                                                        */
+/**************************************************************************/
+/* MODIFICATION HISTORY                                                   */
+/*========================================================================*/
+/* DATE     INT  PROJECT DESCRIPTION                                      */
+/* -------- ---- ------- -------------------------------------------------*/
+/* 12/03/21 DN   DO2416  Added &COMP as input parm. Based on the Company  */
+/*                       default the following to set the following prefix*/
+/*                       to the IFS filename:                             */
+/*                       Co:    Prefix:                                   */
+/*                       360 -> 'G'uymon                                  */
+/*                       440 -> 'S'ioux City                              */
+/*                       960 -> 'T'riumph Foods                           */
+/* DN  01/31/22 DO2416 - Call PUVVXFR to update the IFS PHIS Document     */
+/*                       filename in order for Business Integrations team */
+/*                       can send the file to the USDA PHIS website.      */
+/*                       The IFS PHIS Doc Filename will be updated by the */
+/*                       Export Doc Type.                                 */
+/*                                                                        */
+/**************************************************************************/
+
+             PGM        PARM(&PGM$ &COMP &ORDER &DOCTYP &ATHTYP +
+                          &ATHSTYP &SPLFID)
+
+
+             DCL        VAR(&PGM$) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&COMP) TYPE(*DEC) LEN(3 0)
+             DCL        VAR(&ORDER) TYPE(*DEC) LEN(7 0)
+             DCL        VAR(&DOCTYP) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&ATHTYP) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&ATHSTYP) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&SPLFID) TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&USER) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBNM) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBNB) TYPE(*CHAR) LEN(6)
+
+             DCL        VAR(&RTNCDE) TYPE(*CHAR) LEN(7) /* RETURN CODE */
+             DCL        VAR(&SYSVCDE) TYPE(*CHAR) LEN(10) +
+                          VALUE('PRKEXPDOC')
+             DCL        VAR(&IFSSTMF) TYPE(*CHAR) LEN(50) /* IFS +
+                          STREAM FILE DIR */
+             DCL        VAR(&ORDERA) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&FILENME) TYPE(*CHAR) LEN(18)
+             DCL        VAR(&FILEEXT) TYPE(*CHAR) LEN(4) VALUE('.pdf')
+             DCL        VAR(&IFSFILNM) TYPE(*CHAR) LEN(50) /* IFS +
+                          DOC FILENAME */
+
+
+             RTVJOBA    JOB(&JOBNM) USER(&USER) NBR(&JOBNB)
+
+             CHGVAR     VAR(&ORDERA) VALUE(&ORDER)
+
+/*==========================================================================*/
+/* Select Prefix Based on Company Number                                    */
+/*==========================================================================*/
+             SELECT
+               WHEN       COND(&COMP *EQ 360) THEN(CHGVAR +
+                          VAR(&FILENME) VALUE('G'))
+               WHEN       COND(&COMP *EQ 440) THEN(CHGVAR +
+                          VAR(&FILENME) VALUE('S'))
+               OTHERWISE  CMD(DO)
+                          CHGVAR VAR(&FILENME) VALUE('T') /* Co = 960 */
+               ENDDO
+             ENDSELECT
+
+/*==========================================================================*/
+/* Build Filename Based on Order, Attachment Type/Subtype Code & Doc Type   */
+/*==========================================================================*/
+         /* Attachment Type '1' = Supplemental */
+             IF         COND(&ATHTYP *EQ '1') THEN(DO)
+             CHGVAR     VAR(&FILENME) VALUE(&FILENME *TCAT &ORDERA +
+                          *TCAT '_SPM_' *TCAT &ATHSTYP *TCAT '_' +
+                          *TCAT &DOCTYP *TCAT '_' *TCAT &SPLFID)
+             ENDDO
+         /* Attachment Type '2' = Supporting */
+             IF         COND(&ATHTYP *EQ '2') THEN(DO)
+             CHGVAR     VAR(&FILENME) VALUE(&FILENME *TCAT &ORDERA +
+                          *TCAT '_SUP_' *TCAT &DOCTYP *TCAT '_' +
+                          *TCAT &SPLFID)
+             ENDDO
+
+/*==========================================================================*/
+/* Build Stream Filename Path                                               */
+/*==========================================================================*/
+         /* Get Pork Export Doc IFS Path */
+             CALL       PGM(PPJXXFR) PARM(&RTNCDE &SYSVCDE &IFSSTMF)
+             CHGVAR     VAR(&IFSSTMF) VALUE(&IFSSTMF *TCAT &FILENME +
+                          *TCAT &FILEEXT)
+
+/*==========================================================================*/
+/* Convert Spooled File to PDF & Send to IFS Directory */
+/*==========================================================================*/
+             CPYSPLIFS  SPLF(&PGM$) JOB(&JOBNB/&USER/&JOBNM) +
+                          TYPE(*PDF) STMF(&IFSSTMF) REPLACE(*YES)
+
+    /* DN 01/31/21 DO2416-Update EDE IFS PHIS Doc Filename in PUA6CPP by +
+          Document Type */
+             CHGVAR     VAR(&IFSFILNM) VALUE(&FILENME *TCAT &FILEEXT)
+             CALL       PGM(PUVVXFR) PARM(' ' &COMP &ORDER &DOCTYP +
+                          &IFSFILNM)
+
+
+ EXIT:       ENDPGM

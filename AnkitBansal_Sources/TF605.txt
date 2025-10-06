@@ -1,0 +1,1574 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF605 - Cash Distribution Batch Report
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     09/20/05
+      *
+      * Function:    Prints a report showing all info for a Cash Distribution Header.
+      *              The report prints:
+      *                1) AR Deposit Header Info and for each Header:
+      *                   AR Deposit Detail Info
+      *                And, then, on the last page:
+      *                1) Cash Distribution Header Info
+      *                2) Exempt Code info
+      *                3) On Account info
+      *                4) Sales Expense info
+      *
+      * INVOICE NOTES---Part #2 is Obsolete as of January 2014
+      * In January 2014, the users began using all 7 positions of the Invoice Number...
+      * this made #2 below obsolete. We have replaced this Rose Centonze's new logic.
+      *
+      *    We do 2 "tweaking" things with Invoice Numbers to make this work correctly:
+      *
+      *    1) When an Invoice Number is less than 100,000, we retrieve the
+      *       associated AR Header record instead of the associated Sales History
+      *       record to get a "Date".
+      *
+      *       We use 100,000 because we assume that records with Invoice Numbers
+      *       under 100,000 have no corresponding Sales History record. The reason
+      *       for this is that the smaller Invoice Numbers are assigned by the
+      *       AR System for Adjustment Type transactions that don't have a real
+      *       invoice tied to them. If we don't do this, when we chain back to the
+      *       Sales History file, we are finding a hit on invoices for 1997. These
+      *       invoices in Sales History have nothing to do with the transaction we
+      *       are working with today.
+      *
+      *    2) OBSOLETE Drop the last character on Invoice Numbers greater than 1,000,000
+      *       In OMS they sometimes want to reference the same invoice on multiple
+      *       transactions and they get a duplicate key error. So, they add
+      *       a zero to the end of the invoice to get it into the system.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 07/02/07  LeAnne Ramsey
+      *           Recompile only. Synon Customer Extension file was changed.
+      *
+      * 11/13/07  LeAnne Ramsey
+      *           Added 4 columns to the "revenue week-ending date" section:
+      *             SBF Cash distribution amount
+      *             TF Cash distribution amount
+      *             SBF Net Product Revenue %
+      *             TF Net Product Revenue %
+      *
+      * 04/24/08  LeAnne Ramsey
+      *           Added 3 fields to Cash Distribution Detail:
+      *             1) system generated flag (yes/no)
+      *             2) adjustment comment
+      *             3) adjustment amount
+      *           Changed this logic to exclude any "manual" records in the
+      *           Cash Distribution Detail file.
+      *
+      * 05/19/08  LeAnne Ramsey
+      *           We are changing our AR ADJUSTMENT logic.
+      *
+      *           On ITC adjustment types in the AR System, they post the same invoice to
+      *           both companies, so when we chain back to the Sales History file, we only
+      *           find the Actual Ship Date for the company that generated the invoice.
+      *           We will now retrieve Actual Ship Date for our AR Adjustments with a
+      *           key list that DOES NOT INCLUDE Company.
+      *
+      * 06/03/08  LeAnne Ramsey
+      *           We discovered a problem in the retrieval of On Account records.
+      *           The Ship to Customer (bdbkc7) in OA records in the AR Header
+      *           is always zero. So, our retrieval of the Customer Exempt Code from
+      *           the Customer Extension file always failed--giving us an erroneous
+      *           Exempt/Non-Exempt flag value. Per Alice/Rose, we should just
+      *           make our Customer Extension record retrieval using the AR Customer
+      *           Number (bdanc7) from the AR Header record. (see $rtvoa)
+      *
+      * 09/15/09  LeAnne Ramsey
+      *           Recompile only. Fields added to TFP011-Cash Distribution Balance.
+      *
+      * 10/02/09  LeAnne Ramsey
+      *           Removed SBF PreCommencement Amount..it is now obsolete.
+      *           Added AR Adjustment Payout Amount.
+      *
+      * 01/28/14  LeAnne Ramsey (E2991)
+      *           Since the users have started using all 7 digits of the Invoice Number,
+      *           our "tweaking" logic no longer works. I replaced it with new logic that
+      *           Rose Centonze gave me.
+      *
+      * 01/21/21  ISE            TSN593
+      *           Replaced *loval with *start
+      *
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fpdj2cpl6  if   e           k disk
+      *   AR bank deposit
+      *
+      *
+     Farbdcpma  if   e           k disk
+      *   AR header
+      *
+      *
+     Farbecpl4  if   e           k disk
+      *   AR detail             (file keyed in CLP)
+      *
+      *
+     Fomhstpn0  if   e           k disk
+      *    Sales history
+      *
+      *
+     Fpdnerel1  if   e           k disk
+      *   Customer extension
+      *
+      *
+     Fppa4cpl2  if   e           k disk
+      *   AR header OA
+      *
+      *
+     Ftfp007    if   e           k disk
+      *  Exempt codes
+      *
+      *
+     Ftfp011    if   e           k disk
+      *  Cash distribution balance
+      *
+      *
+     Ftfp012    if   e           k disk
+      *  Cash distribution header
+      *
+      *
+     Ftfp013    if   e           k disk
+      *  Cash distribution detail
+      *
+      *
+     Ftfp097    if   e           k disk
+      *    Status codes
+      *
+      *
+     Ftfp305    uf a e           k disk
+      *  Workfile: Cash Distribution Batch Report
+      *
+      *
+     Ftfp306    uf a e           k disk
+      *  Workfile: Cash Distribution Batch Report
+      *
+      *
+     Ftfl306a   if   e           k disk    rename(w2rec:w2reca)
+      *  Workfile: Cash Distribution Batch Report
+      *
+      *
+     Fprint198  o    f  198        printer oflind(*inof)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+     D aram            s             11  2 dim(4)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     d rtime           s              6  0
+      *
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D firstdtl        s              1    inz('Y')
+     D first306        s              1    inz('Y')
+     d count           s              3  0
+      *
+     D svcono          s                   like(bfaic3)
+     D svexcd          s                   like(w1excd)
+     D svrcexfl        s                   like(w1rcexfl)
+      *
+      *
+      * Workfields
+      *
+     D alphcono        s              3
+     d wksyndt         s                   like(bfdvdt)
+     D wkchkno         s             10
+     d wksam           s                   like(j2uiva)
+     d wktam           s                   like(j2uiva)
+     d wkchar          s              1
+     d wkposition      s              2  0
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+      *
+      * Print fields
+      *
+     d h1stds          s                   like(ststds)
+     d h1mdy           s              6  0
+      *
+     d l2mdy           s              6  0
+     d l2time          s                   like(j2yxnx)
+     d l2bank          s                   like(j2g4cd)
+     d l2am            s                   like(j2uiva)
+      *
+      *
+     d t3desc          s             21
+      *
+      *
+     d l4ds            s                   like(exexds)
+      *
+     d t4sam           s                   like(j2uiva)
+     d t4tam           s                   like(j2uiva)
+     d t4aam           s                   like(j2uiva)
+     d t4desc          s             17
+      *
+     d l5mdy           s              6  0
+     d l5ssxcdam       s                   like(cdasxcdam)
+     d l5snprpc        s                   like(cbsnprpc)
+     d l5tnprpc        s                   like(cbtnprpc)
+      *
+     d t5asxcdam       s                   like(cdasxcdam)
+     d t5ssxcdam       s                   like(cdasxcdam)
+     d t5tsxcdam       s                   like(cdasxcdam)
+     d t5scdam         s                   like(cdscdam)
+      *
+     d t5tafcdam       s                   like(cdasxcdam)
+     d t5tbccdam       s                   like(cdasxcdam)
+     d t5toxcdam       s                   like(cdasxcdam)
+     d t5tcdam         s                   like(cdtcdam)
+      *
+      *
+      * Array index
+      *
+     D x               s              3  0
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldbtsn                 1      7  0
+      *
+     D  lddsfl                14     14
+     D  lddsds                15     21
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * Retrieve Cash Distribution Header record.
+      *
+     C     ldbtsn        chain     tfp012                             92
+     C                   if        *in92 = *off                                 If hit
+      *
+      * Retrieve Status description
+      *
+     C     chchstcd      chain     tfp097                             92
+     C                   if        *in92 = *off
+     C                   move      ststds        h1stds
+     C                   endif
+      *
+      * Flip the Daily Date to MMDDYY format.
+      *
+     C     *iso          test(d)                 chddt                  92
+     C                   if        *in92 = *off
+     C                   move      chddt         wkisodate
+     C     *mdy          move      wkisodate     h1mdy
+     C                   endif
+      *
+      *
+      * If the Cash Distribution Header has not been assigned deposits,
+      * just print the header portion.
+      *
+     C                   select
+     C                   when      chchstcd = 'O'
+     C                   exsr      $header
+     C                   other
+      *
+     C                   exsr      $deposits
+     C                   exsr      $header
+     C                   exsr      $exempt
+     C                   exsr      $nonexempt
+     C                   exsr      $expenses
+     C                   endsl
+     C                   endif                                                  If hit
+      *
+      * EOF processing
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Print each Deposit Header followed by the Detail
+      *---------------------------------------------------------------
+      *
+     C     $deposits     begsr
+      *
+      * Retrieve/print each A/R Bank Deposit record for this batch
+      * followed by its detail.
+      *
+     C                   z-add     0             count
+     C     ldbtsn        setll     pdj2cpl6
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     ldbtsn        reade     pdj2cpl6                               91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C                   add       1             count
+      *
+      * Set up print fields
+     C                   z-add     j2yxnx        l2time
+     C                   move      j2g4cd        l2bank
+     C                   z-add     j2uiva        l2am
+      *
+      * Format Deposit Date for printing
+      *
+     C     *cymd         test(d)                 j2hxdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C     *cymd         move      j2hxdt        wkisodate
+     C     *mdy          move      wkisodate     l2mdy
+     C                   endif                                                  If OK date
+      *
+      *
+      * Print the Deposit Header line
+      *
+     C                   exsr      $l2dtl
+      *
+      * Retrieve/Print all Deposit Detail
+      *
+     C                   exsr      $detail
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+      * If you had more than 1 deposit on the report,
+      * print a total line for all deposits on the report
+      *
+     C                   if        count > 1
+     C                   exsr      $totrpt
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve/Print the Detail for each Deposit
+      *---------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+      * Delete any/all records out of the Workfile
+      *
+593  C*    *loval        setll     tfp306
+593  C     *start        setll     tfp306
+     C                   dou       *in93 = *on
+     C                   read      tfp306                                 93
+     C                   if        *in93 = *off
+     C                   delete    w2rec
+     C                   endif
+     C                   enddo
+      *
+      * Retrieve AR Detail records and write them to the Workfile
+      *
+     C                   exsr      $rtvardtl
+      *
+      * Retrieve On Account records and write them to the Workfile
+      *
+     C                   exsr      $rtvoa
+      *
+      * Process/print the Workfile records
+      *
+     C                   move      yes           firstdtl
+      *
+593  C*    *loval        setll     tfp306
+593  C     *start        setll     tfp306
+     C                   dou       *in93 = *on                                  Do workfile
+     C                   read      tfp306                                 93
+     C                   if        *in93 = *off                                 If not eof
+      *
+     C                   select
+     C                   when      firstdtl = yes
+     C                   move      no            firstdtl
+     C                   z-add     w2cono        svcono
+     C                   move      w2excd        svexcd
+      *
+     C                   when      w2cono <> svcono
+     C                   exsr      $totexcd
+     C                   exsr      $totcono
+     C                   except    blank
+      *
+     C                   when      w2excd <> svexcd
+     C                   exsr      $totexcd
+     C                   except    blank
+     C                   endsl
+      *
+      *
+      * Always accumulate Transaction Amount into array for column totals
+      *
+     C                   add       w2tram        aram
+      *
+      * If this is the "Detail" version, print a "detail" line.
+      *
+     C                   if        lddsfl = 'D'                                 If Detail version
+     C                   exsr      $l3dtl
+     C                   endif                                                  If Detail version
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do workfile
+      *
+      * If you had some/any detail:
+      *    Print out totals for last deposit:
+      *         1) last exempt code
+      *         2) last company
+      *         3) deposit total
+      *    Accumulate workfile records into "total" workfile
+      *
+     C                   if        firstdtl = no
+     C                   exsr      $totexcd
+     C                   exsr      $totcono
+     C                   exsr      $totdep
+     C                   exsr      $proc306
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve AR Detail and write Workfile records
+      *---------------------------------------------------------------
+      *
+      * For each AR Bank Deposit record:
+      *    Retrieve each AR Detail record using a key of:
+      *        Bank code
+      *        Deposit date
+      *        Deposit time
+      *    Write a workfile record for each AR Detail record retrieved.
+      *
+     C     $rtvardtl     begsr
+      *
+     C     key01         setll     arbecpl4
+     C                   dou       *in93 = *on                                  Do detail
+     C     key01         reade     arbecpl4                               93
+     C                   if        *in93 = *off and                             If not eof
+     C                             bfa5st = 'CSH'
+      *
+     C                   z-add     2             w2seq
+     C                   move      bfw3sx        w2excd
+     C                   z-add     bfaic3        w2cono
+     C                   z-add     bfbsva        w2tram
+      *
+      * Retrieve "record exempt" flag.
+      *
+     C                   move      no            w2rcexfl
+     C     w2excd        chain     tfp007                             92
+     C                   if        *in92 = *off
+     C                   move      exrcexfl      w2rcexfl
+     C                   endif
+      *
+      * Strip leading 'zeros' from 'check number'
+      *
+     C                   move      bfcptx        wkchkno
+     C                   exsr      $strip
+      *
+      * Retrieve either:
+      *  1) AR Header record to get a Transaction Date or
+      *  2) Sales History record to get an Actual Ship Date
+      * Use Rose's new Original Invoice field (BFQIDT) if it is valued;
+      * otherwise, use the old Invoice Number for retrievals.
+      *
+     C                   z-add     0             w2mdy
+      *
+     C                   select
+      * Use Rose new fld
+     C                   when      bfqidt <> 0
+     C                   z-add     bfqidt        w2inno
+     C     w2inno        chain     omhstpn0                           92
+     C                   if        *in92 = *off
+     C                   z-add     f4gndt        wksyndt
+     C                   exsr      $flip
+     C                   endif
+     C                   other
+      * Use old field
+     C                   z-add     bfconb        w2inno
+      *
+     C                   if        bfconb < 100000                              If < 100000
+     C     key04         chain     arbdcpma                           92
+     C                   if        *in92 = *off
+     C                   z-add     bdb4dt        wksyndt
+     C                   exsr      $flip
+     C                   endif
+     C                   else
+      *
+     C     w2inno        chain     omhstpn0                           92
+     C                   if        *in92 = *off
+     C                   z-add     f4gndt        wksyndt
+     C                   exsr      $flip
+     C                   endif
+     C                   endif                                                  If < 100000
+     C                   endsl
+      *
+     C                   exsr      $wrt306
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do detail
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve On Account records
+      *---------------------------------------------------------------
+      *
+      * For each AR Bank Deposit record:
+      *    Retrieve each AR Header OA record using a key of:
+      *        Bank code
+      *        Deposit date
+      *        Deposit time
+      *    Then, for each AR Header OA record retrieved:
+      *        Retrieve each AR Header record using a key of:
+      *            Invoice number
+      *            Invoice suffix
+      *        Write a workfile record for each AR Header record.
+      *
+     C     $rtvoa        begsr
+      *
+      * AR Header OA file
+      *
+     C     key01         setll     ppa4cpl2
+     C                   dou       *in93 = *on                                  Do OA
+     C     key01         reade     ppa4cpl2                               93
+     C                   if        *in93 = *off                                 If not eof
+      *
+      * AR Header file
+      *
+     C     key02         chain     arbdcpma                           92
+     C                   if        *in92 = *off                                 If hit
+      *
+     C                   z-add     1             w2seq
+     C                   z-add     bdaic3        w2cono
+     C                   z-add     bdbsva        w2tram
+     C                   z-add     bdconb        w2inno
+     C                   move      bdcest        w2excd
+      *
+      * Retrieve the Customer record for this 'AR Customer'.
+      * Using the Customer's 'Exempt Code' from the retrieved record,
+      * go get the exempt/non-exempt flag for this code from the Exempt
+      * Codes master file.
+      *
+     C                   move      no            w2rcexfl
+     C     bdanc7        chain     pdnerel1                           92
+     C                   if        *in92 = *off
+     C     nep3sx        chain     tfp007                             92
+     C                   if        *in92 = *off
+     C                   move      exrcexfl      w2rcexfl
+     C                   endif
+     C                   endif
+      *
+      *
+      * We will not "retrieve" an "Actual Ship Date" for OAs.
+      * So, set the date field to zero.
+      *
+     C                   z-add     0             w2mdy
+      *
+      * Strip leading 'zeros' from 'check number'
+      *
+     C                   move      bdcptx        wkchkno
+     C                   exsr      $strip
+      *
+     C                   exsr      $wrt306
+     C                   endif                                                  If hit
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do OA
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Get Synon Actual Ship Date to MMDDYY format for printing
+      *---------------------------------------------------------------
+      *
+     C     $flip         begsr
+      *
+     C     *cymd         test(d)                 wksyndt                92
+     C                   if        *in92 = *off                                 If OK date
+     C     *cymd         move      wksyndt       wkisodate
+     C     *mdy          move      wkisodate     w2mdy
+     C                   endif                                                  If OK date
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Strip leading zeros from check number
+      *---------------------------------------------------------------
+      *
+      * Check Number is 10 alpha--but seems to hold numbers. So, we will
+      * strip leading zeros.
+      *
+     C     $strip        begsr
+      *
+     C                   move      wkchkno       w2chkno
+     C                   z-add     0             wkposition
+     C                   move      *blank        wkchar
+      *
+     C                   dou       (wkchar <> '0' and wkchar <> ' ') or
+     C                             wkposition > 10
+     C                   add       1             wkposition
+     C                   if        wkposition <= 10                             If not over
+     C                   eval      wkchar = %subst(wkchkno:wkposition:1)
+     C                   if        wkchar ='0' or wkchar = ' '
+     C                   eval      %subst(w2chkno:wkposition:1) = ' '
+     C                   endif
+     C                   endif                                                  If not over
+     C                   enddo
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write a workfile record
+      *---------------------------------------------------------------
+      *
+     C     $wrt306       begsr
+      *
+     C                   write     w2rec
+     C                   clear                   w2rec
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print data from Cash Distribution Header record
+      *---------------------------------------------------------------
+      *
+     C     $header       begsr
+      *
+     C                   exsr      $h1hdr
+     C                   except    l1dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Accumulate Dollars and Print Total Line for Exempt Code
+      *---------------------------------------------------------------
+      *
+     C     $totexcd      begsr
+      *
+      * Set array index
+     C                   z-add     1             x
+      * Print
+     C                   if        *inof = *on
+     C                   exsr      $l2dtl
+     C                   endif
+      *
+     C                   eval      t3desc = '   *        Code:  ' + svexcd
+     C                   seton                                        80
+     C                   exsr      $t3tot
+     C                   setoff                                       80
+      *
+      * Save Exempt Code
+     C                   move      w2excd        svexcd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Total Line for Company
+      *---------------------------------------------------------------
+      *
+     C     $totcono      begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $l2dtl
+     C                   endif
+      *
+     C                   z-add     2             x
+     C                   move      svcono        alphcono
+     C                   eval      t3desc = '  **     Company: ' + alphcono
+      *
+     C                   exsr      $t3tot
+      *
+      * Save Company
+     C                   z-add     w2cono        svcono
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Total Line for Deposit
+      *---------------------------------------------------------------
+      *
+     C     $totdep       begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $l2dtl
+     C                   endif
+      *
+     C                   z-add     3             x
+     C                   eval      t3desc = ' ***       Total:    '
+      *
+     C                   exsr      $t3tot
+     C                   except    blank
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Total Line for all Deposits on the report
+      *---------------------------------------------------------------
+      *
+     C     $totrpt       begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+      *
+     C                   z-add     4             x
+     C                   eval      t3desc = '****      Report:    '
+      *
+     C                   exsr      $t3tot
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Deposit Header
+      *---------------------------------------------------------------
+      *
+     C     $l2dtl        begsr
+      *
+      * Print headings when appropriate
+      *
+     C                   select
+     C                   when      first = yes
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   move      no            first
+      *
+     C                   when      *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endsl
+      *
+     C                   except    l2dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Deposit Detail
+      *---------------------------------------------------------------
+      *
+     C     $l3dtl        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $l2dtl
+     C                   endif
+      *
+     C                   except    l3dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Detail Line in the Exempt Section on the last page
+      *---------------------------------------------------------------
+      *
+     C     $l4dtl        begsr
+      *
+      * We intend to code this program so that everything fits on the last page>
+      * So, we do not expect to hit overflow; but, just in case, print the report
+      * headings if you hit a page break.
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+      * Print detail line
+     C                   except    l4dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print total line in the AR Detail Section
+      *---------------------------------------------------------------
+      *
+     C     $t3tot        begsr
+      *
+     C                   except    t3tot
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print report heading
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Deposit Detail Headings
+      *---------------------------------------------------------------
+      *
+     C     $h2hdr        begsr
+      *
+     C                   except    h2hdr
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------------
+      * Process the detail workfile records for the "total" workfile
+      *------------------------------------------------------------------------------------
+      *
+     C     $proc306      begsr
+      *
+     C                   move      yes           first306
+      *
+593  C*    *loval        setll     tfl306a
+593  C     *start        setll     tfl306a
+      *
+     C                   dou       *in93 = *on                                  Do loop
+     C                   read      tfl306a                                93
+     C                   if        *in93 = *off                                 If not eof
+      *
+      * Control break
+     C                   select
+     C                   when      first306 = yes
+     C                   move      w2excd        svexcd
+     C                   move      w2rcexfl      svrcexfl
+     C                   move      no            first306
+      *
+     C                   when      w2excd <> svexcd or
+     C                             w2rcexfl <> svrcexfl
+     C                   exsr      $wrt305
+     C                   endsl
+      *
+      * Detail processing:
+     C                   select
+     C                   when      w2cono = 360
+     C                   add       w2tram        wksam
+      *
+     C                   when      w2cono = 960
+     C                   add       w2tram        wktam
+     C                   endsl
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do loop
+      *
+      * Last record processing
+      *
+     C                   if        first306 = no
+     C                   exsr      $wrt305
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------------------
+      * Write/update a "Total" workfile record for the "total" section on the last page
+      *---------------------------------------------------------------------------------------
+      *
+     C     $wrt305       begsr
+      *
+     C     key05         chain     tfp305                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   add       wksam         w1sam
+     C                   add       wktam         w1tam
+     C                   add       wksam         w1aam
+     C                   add       wktam         w1aam
+     C                   update    w1rec
+     C                   else
+      *
+     C                   move      svexcd        w1excd
+     C                   move      svrcexfl      w1rcexfl
+     C                   z-add     wksam         w1sam
+     C                   z-add     wktam         w1tam
+     C                   eval      w1aam = w1sam + w1tam
+     C                   write     w1rec
+     C                   clear                   w1rec
+     C                   endif                                                  If hit
+      *
+      * Save control fields
+      *
+     C                   move      w2excd        svexcd
+     C                   move      w2rcexfl      svrcexfl
+      *
+      * Initialize accumulators
+      *
+     C                   z-add     0             wktam
+     C                   z-add     0             wksam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print column headings for Exempt Section on the last page
+      *---------------------------------------------------------------
+      *
+     C     $h4hdr        begsr
+      *
+     C                   except    h4hdr
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print the Exempt Code section on the last page
+      *---------------------------------------------------------------
+      *
+     C     $exempt       begsr
+      *
+      * Print headings for 'Exempt' section
+      *
+     C                   exsr      $h4hdr
+      *
+      * Print a detail line for each 'exempt code' record in the workfile that
+      * is flagged as an "exempt record".
+      *
+     C                   z-add     0             count
+     C     'Y'           setll     tfp305
+     C                   dou       *in93 = *on                                  Do loop
+     C     'Y'           reade(n)  tfp305                                 93
+     C                   if        *in93 = *off
+      *
+     C                   add       1             count
+      *
+      * Accumulate for the total line
+      *
+     C                   add       w1sam         t4sam
+     C                   add       w1tam         t4tam
+     C                   add       w1aam         t4aam
+      *
+      * Retrieve the Exempt Code Description
+      *
+     C                   select
+     C                   when      w1excd = 'OA'
+     C                   eval      l4ds   = 'On Account--Exempt'
+     C                   other
+      *
+     C     w1excd        chain     tfp007                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   move      exexds        l4ds
+     C                   else
+     C                   eval      l4ds = 'Unknown'
+     C                   endif                                                  If hit
+     C                   endsl
+      *
+      * Print exempt code line
+      *
+     C                   exsr      $l4dtl
+     C                   endif
+     C                   enddo                                                  Do loop
+      *
+      * Now, if you printed more than 1 line, print total lines.
+      *
+      *      Print the 'Total' line for the "Exempt" section.
+      *
+     C                   if        count > 1                                    If multiple
+     C                   seton                                        80
+     C                   eval      t4desc = '    Exempt Total:'
+     C                   exsr      $t4tot
+     C                   setoff                                       80
+     C                   endif                                                  If multiple
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print the Non-Exempt Code section on the last page
+      *---------------------------------------------------------------
+      *
+     C     $nonexempt    begsr
+      *
+      * Print a detail line for each 'exempt code' record in the workfile that
+      * is flagged as a  "non-exempt record".
+      *
+     C                   z-add     0             count
+     C     'N'           setll     tfp305
+     C                   dou       *in93 = *on                                  Do loop
+     C     'N'           reade(n)  tfp305                                 93
+     C                   if        *in93 = *off
+      *
+     C                   add       1             count
+      *
+      * Accumulate for the total line
+      *
+     C                   add       w1sam         t4sam
+     C                   add       w1tam         t4tam
+     C                   add       w1aam         t4aam
+      *
+      * Retrieve the Exempt Code Description
+      *
+     C                   select
+     C                   when      w1excd = 'OA'
+     C                   eval      l4ds   = 'On Account--Not Exmt'
+     C                   other
+      *
+     C     w1excd        chain     tfp007                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   move      exexds        l4ds
+     C                   else
+     C                   eval      l4ds = 'Unknown'
+     C                   endif                                                  If hit
+     C                   endsl
+      *
+      * Print exempt code line
+      *
+     C                   exsr      $l4dtl
+     C                   endif
+     C                   enddo                                                  Do loop
+      *
+      * Now, if you printed more than 1 line, print total lines.
+      *
+      *      Print the 'Total' line for the "Non-Exempt" section.
+      *
+     C                   if        count > 1                                    If multiple
+     C                   seton                                        80
+     C                   eval      t4desc = 'Non-Exempt Total:'
+     C                   exsr      $t4tot
+     C                   setoff                                       80
+     C                   endif                                                  If multiple
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print total line in 'Exempt' section.
+      *---------------------------------------------------------------
+      *
+     C     $t4tot        begsr
+      *
+     C                   except    t4tot
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Sales Expense Breakdown (Revenue Week-Ending Section)
+      *---------------------------------------------------------------
+      *
+     C     $expenses     begsr
+      *
+      * Print column headings for this section
+      *
+     C                   exsr      $h5hdr
+      *
+      * Retrieve/print each Cash Distribution Detail record for this Batch.
+      *
+     C     ldbtsn        setll     tfp013
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     ldbtsn        reade     tfp013                                 91
+     C                   if        *in91 = *off and cdsysfl = yes               If not EOF
+      *
+      * Flip the Revenue Weeking Date to MMDDYY format.
+      *
+     C     *iso          test(d)                 cdrwedt                92
+     C                   if        *in92 = *off
+     C                   move      cdrwedt       wkisodate
+     C     *mdy          move      wkisodate     l5mdy
+     C                   endif
+      *
+      * Calculate SBF portion as:
+      *   Agg sales expense cash distributed amount -
+      *    TF sales expense cash distributed amount
+      *
+     C     cdasxcdam     sub       cdtsxcdam     l5ssxcdam
+      *
+      * Accumulate totals
+     C                   add       cdasxcdam     t5asxcdam
+     C                   add       l5ssxcdam     t5ssxcdam
+     C                   add       cdtsxcdam     t5tsxcdam
+     C                   add       cdscdam       t5scdam
+      *
+     C                   add       cdtafcdam     t5tafcdam
+     C                   add       cdtbccdam     t5tbccdam
+     C                   add       cdtoxcdam     t5toxcdam
+     C                   add       cdtcdam       t5tcdam
+      *
+      * If this is a Non-Exempt record,
+      * Retrieve the Cash Distribution Balance record to get the SBF and TF
+      * Revenue Percents for printing.  Use a key of: revenue week-ending date
+      *                                               record exempt flag
+      *
+     C                   z-add     0             l5snprpc
+     C                   z-add     0             l5tnprpc
+     C                   if        cdrcexfl = no                                If Non-exempt
+     C     key06         chain     tfp011                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   z-add     cbsnprpc      l5snprpc
+     C                   z-add     cbtnprpc      l5tnprpc
+     C                   endif                                                  If hit
+     C                   endif                                                  If Non-exempt
+      *
+     C                   exsr      $l5dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+      * Print total line
+     C                   exsr      $t5tot
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------
+      * Print Sales Expense Column Headings (Revenue Week-Ending Date Section)
+      *-----------------------------------------------------------------------------
+      *
+     C     $h5hdr        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   except    h5hdr
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------
+      * Print Sales Expense Detail line (Revenue Week-Ending Date Section)
+      *---------------------------------------------------------------------------
+      *
+     C     $l5dtl        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h5hdr
+     C                   endif
+      *
+     C                   except    l5dtl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------
+      * Print Sales Expense Total line (Revenue Week-Ending Date Section)
+      *---------------------------------------------------------------------
+      *
+     C     $t5tot        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h5hdr
+     C                   endif
+      *
+     C                   except    t5tot
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    j2g4cd                         Bank code
+     C                   kfld                    j2hxdt                         Deposit date
+     C                   kfld                    j2yxnx                         Deposit time
+      *
+     C     key02         klist
+     C                   kfld                    a4conb                         Invoice Nbr
+     C                   kfld                    a4cest                         Inv suffix
+      *
+     C     key04         klist
+     C                   kfld                    bfconb                         Invoice Nbr
+     C                   kfld                    bfcest                         Inv suffix
+      *
+     C     key05         klist
+     C                   kfld                    svrcexfl                       Exempt record
+     C                   kfld                    svexcd                         Exempt code
+      *
+     C     key06         klist
+     C                   kfld                    cdrwedt                        Revenue wedt
+     C                   kfld                    cdrcexfl                       Exempt code
+      *
+      * Set up heading info.
+      *
+     C                   time                    rtime
+      *
+      * To control printing:
+      *
+     C                   if        lddsfl = 'D'
+     C                   seton                                        81
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oprint198  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           70 'CASH DISTRIBUTION'
+     O                                           83 ' BATCH REPORT'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                       lddsds              72
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+     O          e            h1hdr          2
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+     O          e            h1hdr          1
+     O                                           13 'Daily date:'
+     O                       h1mdy               23 '  /  /  '
+      *
+     O          e            h1hdr          1
+     O                                           13 'Batch number:'
+     O                       ldbtsn        z     23
+      *
+      *
+     O          e            h1hdr          2
+     O                                           13 'Status:'
+     O                       h1stds              27
+      *
+      *-------------------------------------------------------------
+      * Cash Distribtuion Header data
+      *-------------------------------------------------------------
+      *
+      *
+     O          e            l1dtl          1
+     O                                           55 'Deposit-Prior day total +
+     O                                              cash collected:'
+     O                       chdpdccam     k     72
+      *
+     O          e            l1dtl          2
+     O                                           55 'Deposit-Current day total +
+     O                                              cash collected:'
+     O                       chdcdccam     k     72
+      *
+     O          e            l1dtl          1
+     O                                           55 'Bank Report-Prior day +
+     O                                              total cash collected:'
+     O                       chbpdccam     k     72
+      *
+     O          e            l1dtl          2
+     O                                           55 'Bank Report-Current day +
+     O                                              total cash collected:'
+     O                       chbcdccam     k     72
+      *
+     O          e            l1dtl          1
+     O                                           55 'Bank Report-Opening +
+     O                                              available amount:'
+     O                       chboaam       k     72
+     O                                           76 '+'
+      *
+      *
+     O          e            l1dtl          1
+     O                                           55 'Bank Report-Current day +
+     O                                              immediate availability +
+     O                                              amount:'
+     O                       chbcdiaam     k     72
+     O                                           76 '+'
+      *
+     O          e            l1dtl          1
+     O                                           55 'Unapplied wire transfer +
+     O                                              pre-payments:'
+     O                       chwtppam      k     72
+     O                                           76 '-'
+      *
+      *
+     O          e            l1dtl          1
+     O                                           55 'Required balance in +
+     O                                              account:'
+     O                       chrbam        k     72
+     O                                           76 '-'
+      *
+      *
+     O          e            l1dtl          1
+     O                                           72 '---------------'
+      *
+     O          e            l1dtl          2
+     O                                           55 'Cash payment amount:'
+     O                       chcpam        k     72
+     O                                           76 '='
+      *
+      *
+     O          e            l1dtl          1
+     O                                           55 'TF distribution +
+     O                                              adjustment amount:'
+     O                       chtdaam       k     72
+      *
+     O          e            l1dtl          2
+     O                                           55 'TF distribution +
+     O                                              adjustment comment:'
+     O                       chtdacom            82
+      *
+     O          e            l1dtl          1
+     O                                           55 'Sales expense cash +
+     O                                              distributed amount:'
+     O                       chasxcdam     k     72
+     O                                          100 'SBF Exempt Amount:'
+     O                       chsexam       k    116
+      *
+     O          e            l1dtl          1
+     O                                           55 'SBF cash distributed +
+     O                                              amount:'
+     O                       chscdam       k     72
+     O                                          100 'TF Exempt Amount:'
+     O                       chtexam       k    116
+      *
+     O          e            l1dtl          1
+     O                                           55 'TF cash distributed +
+     O                                              amount:'
+     O                       chtcdam       k     72
+     O                                          100 'AGG Exempt Amount:'
+     O                       chaexam       k    116
+      *
+     O          e            l1dtl          2
+     O                                           55 'AR adjustment payout +
+     O                                              amount:'
+     O                       charapam      k     72
+      *
+     O          e            l1dtl          2
+     O                                           55 'TF total payment +
+     O                                              amount:'
+     O                       chttpam       k     72
+      *
+      *-------------------------------------------------------------
+      * Deposit Headings
+      *-------------------------------------------------------------
+      *
+     O          e            h2hdr          1
+     O                                            7 'Deposit'
+     O                                           17 'Deposit'
+     O                                           23 'Bank'
+     O                                           41 'Deposit'
+      *
+     O                                           72 'Exempt'
+     O                                           81 'Company'
+     O                                           97 'Transaction'
+     O                                          106 'Invoice'
+     O                                          117 'AR Check'
+     O                                          132 'Actual Ship'
+      *
+     O          e            h2hdr          1
+     O                                            6 'Date'
+     O                                           16 'Time'
+     O                                           23 'Code'
+     O                                           41 'Amount'
+      *
+     O                                           71 'Code'
+     O                                           81 'Number'
+     O                                           97 'Amount'
+     O                                          106 'Number'
+     O                                          116 'Number'
+     O                                          129 'Date'
+      *
+     O          e            h2hdr          1
+     O                                            8 '--------'
+     O                                           17 '-------'
+     O                                           25 '------'
+     O                                           41 '--------------'
+      *
+     O                                           72 '------'
+     O                                           81 '-------'
+     O                                           97 '--------------'
+     O                                          106 '-------'
+     O                                          118 '----------'
+     O                                          132 '-----------'
+      *
+      *-------------------------------------------------------------
+      * Deposit Header
+      *-------------------------------------------------------------
+      *
+     O          e            l2dtl          1
+     O                       l2mdy                8 '  /  /  '
+     O                       l2time              16 '  :  '
+     o                       l2bank              25
+     o                       l2am          k     42
+      *
+      *-------------------------------------------------------------
+      * Deposit Detail
+      *-------------------------------------------------------------
+      *
+     O          e            l3dtl          1
+     o                       w2excd              69
+     o                       w2cono        z     78
+     o                       w2tram        k     98
+     o                       w2inno        z    106
+     o                       w2chkno            118
+     O                       w2mdy              131 '  /  /  '
+      *
+      *
+      *-------------------------------------------------------------
+      * Total line for AR Detail section
+      *-------------------------------------------------------------
+      *
+     O          e    80 81   t3tot          1
+     O                                           98 '--------------'
+      *
+     O          e            t3tot          1
+     o                       t3desc              65
+     o                       aram(x)       kb    98
+      *
+      *------------------------------------------------------------------------------
+      * Headings for the Exempt/Non-Exempt Section on the last page of the report
+      *------------------------------------------------------------------------------
+      *
+     O          e            h4hdr       4  1
+     O                                            6 'Exempt'
+      *
+     O          e            h4hdr          1
+     O                                            5 'Code'
+     O                                           19 'Description'
+     O                                           44 'SBF Amount'
+     O                                           63 'TF Amount'
+     O                                           81 'Total Amount'
+      *
+     O          e            h4hdr          1
+     O                                            6 '------'
+     O                                           28 '--------------------'
+     O                                           44 '--------------'
+     O                                           63 '--------------'
+     O                                           81 '--------------'
+      *
+      *---------------------------------------------------------------------------------
+      * Detail lines for the Exempt Section on the last page of the report
+      *---------------------------------------------------------------------------------
+      *
+     O          e            l4dtl          1
+     o                       w1excd               4
+     o                       l4ds                28
+     o                       w1sam         k     45
+     o                       w1tam         k     64
+     o                       w1aam         k     82
+      *
+      *
+      *---------------------------------------------------------------------------------
+      * Total line for the Exempt/Non-Exempt Section on the last page of the report
+      *---------------------------------------------------------------------------------
+      *
+     O          e    80      t4tot          1
+     O                                           44 '--------------'
+     O                                           63 '--------------'
+     O                                           81 '--------------'
+      *
+     O          e            t4tot          2
+     o                       t4desc              28
+     o                       t4sam         kb    45
+     o                       t4tam         kb    64
+     o                       t4aam         kb    82
+      *
+      *------------------------------------------------------------------------------
+      * Headings for the Week-Ending Section on the last page of the report
+      *------------------------------------------------------------------------------
+      *
+      *
+     O          e            h5hdr       3  1
+     O                                            9 'Revenue'
+     O                                          131 'SBF Cash'
+     O                                          145 'SBF'
+     O                                          162 'TF Cash'
+     O                                          176 'TF'
+     O          e            h5hdr          1
+     O                                           11 'Week-Ending'
+     O                                           19 'Exempt'
+     O                                           35 'Total Sales'
+     O                                           51 'SBF Sales'
+     O                                           67 'TF Sales'
+     O                                           82 'TF Absorbed'
+     O                                           98 'TF Broker'
+     O                                          114 'TF Other'
+     O                                          131 'Distribution'
+     O                                          145 'Net Product'
+     O                                          162 'Distribution'
+     O                                          176 'Net Product'
+      *
+     O          e            h5hdr          1
+     O                                            7 'Date'
+     O                                           19 'Record'
+     O                                           35 'Expense'
+     O                                           51 'Expense'
+     O                                           67 'Expense'
+     O                                           82 'Freight'
+     O                                           98 'Commission'
+     O                                          114 'Sales Expense'
+     O                                          131 'Amount'
+     O                                          145 'Revenue %'
+     O                                          162 'Amount'
+     O                                          176 'Revenue %'
+      *
+     O          e            h5hdr          1
+     O                                           11 '-----------'
+     O                                           19 '------'
+     O                                           35 '--------------'
+     O                                           51 '--------------'
+     O                                           67 '--------------'
+     O                                           82 '--------------'
+     O                                           98 '--------------'
+     O                                          114 '--------------'
+     O                                          131 '--------------'
+     O                                          162 '--------------'
+      *
+      *------------------------------------------------------------------------------
+      * Detail line for the Expense Section on the last page of the report
+      *------------------------------------------------------------------------------
+      *
+     O          e            l5dtl          1
+     O                       l5mdy          b    10 '  /  /  '
+     o                       cdrcexfl            16
+     o                       cdasxcdam     k     36
+     o                       l5ssxcdam     k     52
+     o                       cdtsxcdam     k     68
+     o                       cdtafcdam     k     83
+     o                       cdtbccdam     k     99
+     o                       cdtoxcdam     k    115
+     o                       cdscdam       k    132
+     o                       l5snprpc      k    146
+     o                       cdtcdam       k    163
+     o                       l5tnprpc      k    177
+      *
+      *------------------------------------------------------------------------------
+      * Total line for the Expense Section on the last page of the report
+      *------------------------------------------------------------------------------
+      *
+     O          e            t5tot          1
+     o                                           35 '--------------'
+     o                                           51 '--------------'
+     o                                           67 '--------------'
+     o                                           82 '--------------'
+     o                                           98 '--------------'
+     o                                          114 '--------------'
+     o                                          131 '--------------'
+     o                                          162 '--------------'
+      *
+     O          e            t5tot          1
+     o                                           19 'Total:'
+     o                       t5asxcdam     k     36
+     o                       t5ssxcdam     k     52
+     o                       t5tsxcdam     k     68
+     o                       t5tafcdam     k     83
+     o                       t5tbccdam     k     99
+     o                       t5toxcdam     k    115
+     o                       t5scdam       k    132
+     o                       t5tcdam       k    163
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank          1
+      /eject

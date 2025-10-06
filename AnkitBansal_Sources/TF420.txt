@@ -1,0 +1,814 @@
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF420
+      * TITLE:       Eopfees: Specify EOP Fees Close
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     04/12/05
+      *
+      *
+      * FUNCTION: This function uses an edit record format to allow the user
+      *           to submit the function.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 03/20/06  LeAnne Fedor
+      *           Added validation that "frozen load" data must exist for
+      *           Year/Period in new Freight Variance Detail file.
+      *
+      * 04/10/06  LeAnne Fedor
+      *           Recompile only. New fields were added to Freight Variance Detail file:
+      *              1) Difference amount
+      *              2) Prior difference amount
+      *
+      * 11/22/06  LeAnne Fedor
+      *           Recompile only. New fields were added to Freight Variance Detail file.
+      *
+      * 12/01/06  LeAnne Fedor
+      *           Changed logic that checks for completion of a Final Revenue Close to
+      *
+      * 03/03/08  LeAnne Ramsey
+      *           To have Yield% and Pump% for Closing, the users must have run a Final
+      *           Meat Cost and a Preliminy Margin Close for the first week in the Period.
+      *           For Period 2, the users closed without doing this. So, we had to reopen.
+      *           Now, I am trying to add an edit to check this. So, now, there must be
+      *           Finished Goods with a Yield % in the TFP010 for the first week of the
+      *           Period being closed.
+      *
+      * 07/17/08  LeAnne Ramsey
+      *           Recompile only.
+      *           In file TFP027-Freight Variance Detail, we:
+      *              Replaced: FDAACTFAM  Allocated Actual Freight Amount
+      *                  With: FDALFAM    Allocated Load Total Freight Amount
+      *
+      * 09/11/08  LeAnne Ramsey
+      *           Recompile only. Export/Domestic Flag was added to TFP010-
+      *           Weekly Product Revenue Detail file.
+      *
+      * 03/10/09  LeAnne Ramsey
+      *           Recompile only.
+      *           The users want to revert back to Allocated Actual Freight Amount
+      *           from Allocated Load Total Freight Amount.
+      *           This will reverse the change of 07/17/08 above!
+      *           We have decided to keep both of the fields in file TFP027-Freight
+      *           Variance Detail:
+      *              FDALFAM    Allocated Load Total Freight Amount
+      *              FDAACTFAM  Allocated Actual Freight Amount
+      *
+      * 05/07/09  LeAnne Ramsey
+      *           Changed the Print logic to match Meat Costing.
+
+      * 01/24/17  Brad Baden
+      *           Added Freight Balance to screen and processing to
+      *           determine when the field can be displayed.
+
+      * 05/01/17  Brad Baden
+      *           Fixed fields name for Preliminary/Final code.  Changed
+      *           from FEPREFNL to FEPFCD to match the field reference file.
+      *
+      * 11/14/17  Danny Nguyen  (R12011A-Weekly Product Revenue)
+      *           Recompile only. Added 25 STF fields to TFP010 file.
+      *
+      * 05/17/22  Danny Nguyen  (DO2484 - WI 479 STF Variance Reporting)
+      *           Recompile only. Added 2 STF fields to TFP010 file.
+      *           PRXYPC   - STF STD YIELD %
+      *           PRXPMPPC - STF PUMP %
+      *
+      * 10/10/22  R Centonze   W105621 - Increase price fields to handle > 999.99
+      *                        CHANGE @@ANPRPR TO SIZE 10.6  --> pranprpr tfp010
+      *
+      *
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Ftfd420    cf   e             workstn infds(iofeed)
+      *
+      *
+     Ftfp001    if   e           k disk
+      *    Preliminary/final
+      *
+      *
+     Ftfl010g   if   e           k disk
+      *    Weekly product revenue detail file (LF selects FG with Yield % GT 0)
+      *
+      *
+     Ftfl027a   if   e           k disk
+      *    Freight variance detail
+      *
+      *
+     Fpdkmrel1  if   e           k disk
+      *    Company values
+      *
+      *
+     Ftfl029    uf a e           k disk
+      *    Freight balances
+      *
+      *
+     Ftfp099    uf   e           k disk
+      *    Function control
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D set1            c                   'SET1  '
+     D edit1           c                   'EDIT1 '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Compile time array for SBMJOB used in QCMDEXC
+      *---------------------------------------------------------------
+     D cmd             s              1    dim(80) ctdata perrcd(80)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D pgm             s             10
+     D msgfl           s             10
+     D routne          s              6
+     D maxmsg          s              2  0  inz(20)
+      *
+      *
+      * Control fields
+      *
+     D fyimsg          s              2  0
+      *
+      *
+      * Work fields for date manipulation
+      *
+     D wkisodate       s               d   datfmt(*iso)
+     D wkwedt          s              8  0
+      *
+      *
+      * Workfields
+      *
+     D wkcedt          s                    like(fncedt)
+     D fecono          s              3p 0
+     D feyr            s              4p 0
+     D fepe            s              2p 0
+     D fefrtbal        s             15p 2
+     D firstpass       s              1
+      *
+      *
+      * Parm fields
+      *
+     D xxpfcd          s                    like(pfpfcd)
+     D xxpfds          s                    like(pfpfds)
+      *
+      *
+      *  Parms for use with QCMDEXC.  'LENGTH' is the length of the
+      *  command that will be issued with QCMDEXC.  QCMDEXC requires
+      *  the field containing length to be defined as 15 with 5 decimal
+      *  positions.  The field 'CMDSBM' will hold the values of the
+      *  submit job command when passed as a parm on the call to
+      *  QCMDEXC.
+      *
+     D length          s             15  5 inz(80)
+     D cmdsbm          s             80
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      *---------------------------------------------------------------
+      *  Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+     D  ldcyr                  2      5  0
+     D  ldcpe                  6      7  0
+      *
+     D  ldcbdt                 8     15  0
+     D  ldcbmdy               16     21  0
+     D  ldcbsyn               22     28  0
+      *
+     D  ldcedt                29     36  0
+     D  ldcemdy               37     42  0
+     D  ldcesyn               43     49  0
+      *
+     D  ldledt                50     57  0
+     D  ldlemdy               58     63  0
+     D  ldlesyn               64     70  0
+      *
+     D  ldoutq               401    410
+     D  ldhold               411    414
+     D  ldsave               415    418
+     D  ldcopy               419    419  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+     C
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     edit1         $edit1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo
+      /EJECT
+      *----------------------------------------------------------------
+      * Set environment for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $set1         begsr
+      *
+     C                   eval      routne = scrn1
+      *
+      * Check if M3 live, and display the Fright Balance field if we are M3 Live
+     C                   exsr      $m3live
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Perform operator I/O for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $scrn1        begsr
+      *
+      *
+      ** Protect Freight Balance field if Final flag is set using indicator 62
+      *
+     C                   if        d1pfcd = 'F'
+     C                   eval      *in62 = *on
+     C                   else
+
+     C                   eval      *in62 = *off
+     C                   if        firstpass = yes
+     C                   eval      d1pfcd = 'P'
+     C                   eval      firstpass = no
+     C                   endif                                                  if firstpass = yes
+     C                   endif                                                  if d1pfcd = 'F'
+      *
+     C                   exsr      $pfcd
+      *
+      *
+      * Write the error messages from the error arrays to the error
+      * message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * Write screen 1 to CRT.
+      *
+     C                   write     tf420k1
+     C                   write     tf420ec
+     C                   exfmt     tf420r1
+      *
+      * Clear the messages from the message data structures and
+      * program message queue
+      *
+     C                   exsr      $clmsg
+      *
+      * Get user's entry and set next routine
+      *
+     C                   select
+     C                   when      *in03 = *on                                  F3-exit
+     C                   eval      routne = exit
+      *
+     C                   when      *in04 = *on                                  F4-prompt
+     C                   exsr      $f4s1
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in17 = *on                                  F17-print options
+     C                   call      'RO890'
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in20 = *on                                  F20-wrksplf
+     C                   call      'QEZOUTPT'                                       API
+     C                   eval      routne = scrn1
+     C                   other
+      *
+     C                   eval      routne = edit1
+     C                   endsl
+      *
+      * Bring in the LDA to pick up any printer changes the user may
+      * have made from called programs
+      *
+     C                   in        lda
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Edit screen 1 input fields
+      *----------------------------------------------------------------
+      *
+     C     $edit1        begsr
+      *
+     C                   z-add     0             fyimsg
+      *
+      * Validate that the EOP Fees function has not already been submitted.
+      *
+     C     'EOPFEES   '  chain(n)  tfp099                             92
+     C                   if        *in92 = *off                                 If hit
+      *
+     C                   z-add     fncedt        wkcedt
+      *
+     C                   if        fnsbfl <> *blank
+     C                   add       1             error
+     C                   movel     'HS08055'     mgid(e)
+     C                   endif
+      *
+     C                   if        fncyr <> d1yr or
+     C                             fncpe <> d1pe
+     C                   add       1             error
+     C                   movel     'HS08014'     mgid(e)
+     C                   endif
+      *
+     C                   endif                                                  If hit
+      *
+      * Validate that load data has been 'Frozen' for the Year/Period
+      *
+     C     key01         chain     tfl027a                            92
+     C                   if        *in92 = *on and                              If not frozen
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS08074'     mgid(e)
+     C                   endif                                                  If not frozen
+      *
+      * Validate that there are Yield Percents for the first week of the
+      * Period.
+     C                   exsr      $yield
+      *
+      *
+      * Validate the preliminary/final entry
+      *
+     C                   exsr      $pfcd
+      *
+      *
+      * If there are no errors, execute the subroutine to submit.
+      *
+     C                   if        (error = 0 or error = fyimsg)                If no error
+     C                             and *in08 = *on
+     C                   exsr      $proc1
+     C                   endif                                                  If no error
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Check that you have Yield % in the Weekly Revenue file
+      *--------------------------------------------------------------------------------------
+      *
+      * To correctly allocate freight using Method 1, you will have to have Yield %
+      * (and Pump %) in the Weekly Product Revenue Detail file for the first week of the
+      * Period. So, check to see if you have any FG records with a Yield (LF makes
+      * selections). (The user must run a Final Meat Cost and then a Preliminary
+      * Margin Close for the first week of the Period to get the Yield/Pump %'s into
+      * the TFP010 file.)
+      *
+     C     $yield        begsr
+      *
+     C     wkwedt        chain     tfl010g                            92
+     C                   if        *in92 = *on and                              If nothing
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS08133'     mgid(e)
+     C                   endif                                                  If nothing
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Check if the company is M3 live and set display indicators appropriately
+      *--------------------------------------------------------------------------------------
+      *
+     C     $m3live       begsr
+      *
+      * Setup key to Company Values file
+     C                   eval      kmaic3 = 300
+     C                   eval      kmv8cd = 'M3FRTBAL'
+      *
+     C     key02         chain     pdkmrel1
+     C                   if        %found(pdkmrel1)
+
+     C                   if        kmbxtx = yes
+     C                   eval      *in32 = *off
+     C                   exsr      $rtvfrtbal
+     C                   else
+     C                   eval      *in42 = *on
+     C                   eval      d1frtbal = *zeros
+     C                   endif                                                  if kmbxtx = yes
+
+     C                   else
+     C                   eval      *in42 = *on
+     C                   eval      d1frtbal = *zeros
+     C                   endif                                                  if %found(pdkmrel1)
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Retrieve the frieght balance value from file TFL029
+      *--------------------------------------------------------------------------------------
+      *
+     C     $rtvfrtbal    begsr
+      *
+      * Setup key to Freight Balances file
+     C                   eval      fecono = 300
+     C                   eval      feyr   = d1yr
+     C                   eval      fepe   = d1pe
+      *
+     C     key03         chain     tfl029
+     C                   if        %found(tfl029)
+     C                   eval      d1frtbal = fefrtbal
+     C                   else
+     C                   eval      d1frtbal = *zeros
+     C                   endif                                                  if %found(tfl029)
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Validate Preliminary/Final
+      *--------------------------------------------------------------------------------------
+      *
+      * Validations:
+      *  1) required
+      *
+     C     $pfcd         begsr
+      *
+     C                   move      *blank        d1pfds
+      *
+     C                   select
+     C                   when      d1pfcd = *blank
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09001'     mgid(e)
+     C                   endif
+     C                   other
+      *
+     C     d1pfcd        chain     tfp001                             92
+     C                   if        *in92 = *off                                 If ok
+     C                   move      pfpfds        d1pfds
+     C                   else
+      *
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS08000'     mgid(e)
+     C                   endif
+     C                   endif                                                  If OK
+     C                   endsl
+      *
+      * Check if the Revenue Close has been run for all weeks in the
+      * period.
+      *
+     C                   if        *in31 = *off                                 If no error
+     C     'REVENUE   '  chain     tfp099                             92
+     C                   if        *in92 = *off and                             If hit
+     C                             fnledt  < wkcedt
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   endif
+      *
+     C                   select
+     C                   when      d1pfcd = 'F'
+     C                   movel     'HS08134'     mgid(e)
+      *
+     C                   when      d1pfcd = 'P'
+     C                   movel     'HS08135'     mgid(e)
+     C                   add       1             fyimsg
+     C                   endsl
+      *
+     C                   endif                                                  If hit
+     C                   endif                                                  If no error
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * F4 prompt on screen 1
+      *----------------------------------------------------------------
+      *
+     C     $f4s1         begsr
+      *
+      * Preliminary/Final
+     C                   select
+     C                   when      fld = 'D1PFCD'
+     C                   call      'TF500'
+     C                   parm      *blank        xxpfcd
+     C                   parm      *blank        xxpfds
+     C                   seton                                        51
+     C                   if        xxpfcd <> *blank
+     C                   movel     xxpfcd        d1pfcd
+     C                   movel     xxpfds        d1pfds
+     C                   endif
+     C                   other
+      *
+      * F4 not valid for this field, so issue message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09011'
+     C                   endif
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Process user's request
+      *---------------------------------------------------------------
+      *
+      * This subroutine is only executed if the user submits the interface.
+      *
+     C     $proc1        begsr
+      *
+     C                   if        kmbxtx = yes or kmbxtx = 'P'
+      * Update TFL029 with Freight Balance
+     C                   exsr      $updfrtbal
+     C                   endif
+      *
+      * Bring in the Function Control file that keeps multiple users (or one spacey user)
+      * from making multiple submissions of this job. Update the record to indicate
+      * that there has been submission.
+      *
+     C     'EOPFEES   '  chain     tfp099                             92
+     C                   if        *in92 = *off                                 If ok
+     C                   move      yes           fnsbfl
+     C                   move      d1pfcd        fnpfcd
+      *
+      * Set up the lda with the 'current' fields from the Control record.
+      *
+     C                   move      fnpfcd        ldpfcd
+      *
+     C                   z-add     fncyr         ldcyr
+     C                   z-add     fncpe         ldcpe
+      *
+     C                   z-add     fncbdt        ldcbdt
+     C                   z-add     fncbmdy       ldcbmdy
+     C                   z-add     fncbsyn       ldcbsyn
+      *
+     C                   z-add     fncedt        ldcedt
+     C                   z-add     fncemdy       ldcemdy
+     C                   z-add     fncesyn       ldcesyn
+      *
+     C                   out       lda
+     C                   update    fnrec
+     C                   endif                                                  If ok
+      *
+      * Move the 80-character compile time array 'CMD' to an
+      * 80-character field for passing as a parm with QCMDEXC.
+      *
+     C                   movea     cmd           cmdsbm
+     C                   call      'QCMDEXC'
+     C                   parm                    cmdsbm
+     C                   parm                    length
+      *
+      * Issue the standard request submission message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09003'
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Update the frieght balance value in file TFL029
+      *--------------------------------------------------------------------------------------
+      *
+     C     $updfrtbal    begsr
+      *
+      * Setup key to Freight Balances file
+     C                   eval      fecono = 300
+     C                   eval      feyr   = d1yr
+     C                   eval      fepe   = d1pe
+      *
+     C                   eval      feupdusr = sdusr                             Update user
+     C                   eval      feupddt  = %int(%char(%date():*ISO0))        Update date
+     C                   eval      feupdtm  = %int(%char(%time():*HMS0))        Update time
+      *
+     C     key03         chain     tfl029
+     C                   if        %found(tfl029)
+     C                   eval      fefrtbal = d1frtbal
+     C                   update    ferec
+
+     C                   else
+     C                   eval      fepfcd   = d1pfcd
+     C                   eval      fefrtbal = d1frtbal
+     C                   write     ferec
+     C                   endif                                                  if %found(tfl029)
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * End job
+      *---------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        LR
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *   none
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    d1yr
+     C                   kfld                    d1pe
+      *
+     C     key02         klist
+     C                   kfld                    kmaic3
+     C                   kfld                    kmv8cd
+      *
+     C     key03         klist
+     C                   kfld                    fecono
+     C                   kfld                    feyr
+     C                   kfld                    fepe
+      *
+      * Retrieve/initialize "printer" fields in the LDA
+      *
+     C                   call      'RO891CL'
+     C                   in        lda
+      *
+      * Initialize LDA fields
+      *
+     C                   z-add     0             ldcyr
+     C                   z-add     0             ldcpe
+     C                   z-add     0             ldcbdt
+     C                   z-add     0             ldcbmdy
+     C                   z-add     0             ldcbsyn
+      *
+     C                   z-add     0             ldcedt
+     C                   z-add     0             ldcemdy
+     C                   z-add     0             ldcesyn
+      *
+     C                   z-add     0             ldledt
+     C                   z-add     0             ldlemdy
+     C                   z-add     0             ldlesyn
+     C                   out       lda
+      *
+      * Set up screen values using the Control Record.
+      *
+     C     'EOPFEES   '  chain(n)  tfp099                             92
+     C                   if        *in92 = *off                                 If ok
+     C                   z-add     fncyr         d1yr
+     C                   z-add     fncpe         d1pe
+     C                   z-add     fncbmdy       d1pbmdy
+     C                   z-add     fncemdy       d1pemdy
+      *
+      * Set up Week-ending Date of first week.
+      *
+     C                   movel     fncbdt        wkisodate
+     C                   adddur    6:*days       wkisodate
+     C                   move      wkisodate     wkwedt
+     C                   endif                                                  If ok
+      *
+      * Set first time through flag to Yes
+      *
+     C                   eval      firstpass = yes
+      *
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+     C                   endsr
+      /EJECT
+      *****************************************************************
+      * COMPILE TIME ARRAY 'CMD' USED IN QCMDEXC
+      *****************************************************************
+** CMD table 'CMD' submits listing when F8 selected
+SBMJOB CMD(CALL PGM(TF420CL)) JOB(TFEOPFEE) JOBQ(*JOBD)

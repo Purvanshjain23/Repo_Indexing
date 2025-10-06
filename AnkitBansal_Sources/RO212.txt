@@ -1,0 +1,519 @@
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Resource Optimization
+      * PROGRAM:     RO212
+      * TITLE:       Byproduct --- Value Summary (FG only)
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     10/25/06
+      *
+      * FUNCTION:    This program creates the "summary" records for a
+      *              Company/Week in the ByProduct Values Summary file.
+      *
+      ***************************************************************************************
+      * MODIFICATIONS:
+      ***************************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 12/20/07  Alice Brownfield
+      *           major changes when we combined the Credit Item Meat Costs with the
+      *           Byproduct MIX processing/files.  I changed the "driving" file from
+      *           ROP011 to ROP122.  We no longer need to keep detail records in ROP010.
+      *           We are using the detail data in ROP122 and writing only "summary"
+      *           records to ROP101.
+      *
+      *           I removed all of the earlier modification comments because they no
+      *           longer apply to the logic of this program.
+      *
+      * 01/24/08  Alice Brownfield
+      *           Damon called to say that we
+      *           need to take labor out of ALL Meat Cost groups.  The code was NOT
+      *           taking labor out of HAM Meat Cost Groups.  So now all groups will use
+      *           the same calculation to get Net Produced value.
+      *
+      * 06/12/08  Alice Brownfield
+      *           New fields (Ingredient and Other Cost) added to multiple files.
+      *
+      * 08/27/08  LeAnne Ramsey
+      *           We will now include BP6 and OFF items.
+      *
+      * 11/20/08  LeAnne Ramsey
+      *           As a prep for synchronizing the TFS and Meat Cost LDAs, we
+      *           removed the unused LDA fields.
+      *
+      * 11/21/08  LeAnne Ramsey
+      *           As part of synchronizing the LDAs between the TFS Margin Adjustment Close
+      *           and the Meat Costing, we changed the LDA positions.
+      *
+      * 03/02/09  LeAnne Ramsey
+      *           Recompile only. Field 'Smoker Yield %' added to Resource Optimization Header.
+      *
+      * 04/02/09  LeAnne Ramsey
+      *           Recompile only. Field 'Producing Company' added to Byproduct Detail.
+      *
+      * 01/14/10  LeAnne Ramsey
+      *           Item 12740 has been added to the hardcoded logic for Items 12721, 12730,
+      *           79810.
+      *
+      * 02/17/10  LeAnne Ramsey
+      *           Recompile only. Two new fields were added to the Resource Optimization Header:
+      *                Cap&Blade Allocation % for Special Trim
+      *                Cap&Blade Allocation % for Regular Trim
+      *
+      * 02/01/11  LeAnne Ramsey (E1298)
+      *           Since we are now writing Exception records to TFP019/ROP122 for the SRLN/BNLS,
+      *           we no longer have to 'double add/accumulate' our SRLN pounds (field: totsrlnlb)
+      *           Damon also had me change the calcs in $pumpsrln...even though we are not making
+      *           any of those products at this time. (Note: For the change in $pumpsrln, I added
+      *           the BOM file/logic.)
+      *
+      * 09/19/11  LeAnne Ramsey (E1748)
+      *           Damon G. had us remove all hardcoded logic for Items 12721, 12730, 12740 and
+      *           79810. He has changed the SalesYld% for these in the BOM; so, they flow thru
+      *           MeatCosting without any special processing.
+      *
+      * 03/08/12  LeAnne Ramsey (E1984)
+      *           Recompile only.
+      *           Added 6 new Skirt Meat Allocation Flag fields to ROP100.
+      * 02/01/24  Jagdish Mistry (CM-S009004),Service request number-3009004
+      *           Damon called to say that we need to take items which has include in mix
+      *           flag as N out of Meat Cost calculations.
+      /EJECT
+      ***************************************************************************************
+      * FILE SPECIFICATION
+      ***************************************************************************************
+      *
+     Fpdiorel4  if   e           k disk
+      *  Item bill of material (LF selects Active/Produced records)
+      *
+      *
+     frol122d   if   e           k disk
+      *  Byproduct detail
+      *
+      *
+     frol100a   uf a e           k disk
+      *  Resource optimization header
+      *
+      *
+     frol101a   if   e           k disk    rename(gmrec:gmreca) prefix(p1)
+      *  ByProduct values summary
+      *
+      *
+     frop101    o    e           k disk
+      *  ByProduct values summary
+      *
+     ‚* Project-S009004-START
+     FPPAOREL1  IF   E           K Disk
+     ‚* Project-S009004-END
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D svcgcd          s                   like(ydcgcd)
+     D svsgcd          s                   like(ydsgcd)
+      *
+      * Workfields
+      *
+     D wkitcd          s                   like(yditcd)
+     d wkrt            s              7  6
+     D wkcgcd          s                   like(ydcgcd)
+     D wksgcd          s                   like(ydsgcd)
+     D wkbicrvl        s                   like(ohbicrvl)
+     D wkbicapc        s                   like(ohbicapc)
+     D wkblcapc        s                   like(ohblcapc)
+     D wkpc            s             15  6
+     D wkpulb          s                   like(gmpulb)
+     D wkrate          s              9  6
+     D wkpump          s              9  6
+      *
+      * Accumulators
+      *
+     d totmunpupr      s                   like(gmnpupr)
+     d totsrlnlb       s                   like(gmpulb)
+     d totsrbilb       s                   like(gmpulb)
+     D totnpuam        s                   like(ydanpuam)
+      *
+      * Parms
+      *
+     D xxslam          s             15  6
+     D xxpuam          s             15  6
+     D xxspuam         s             15  6
+     D xxtpuam         s             15  6
+     D xxsllb          s             15  4
+     D xxpulb          s             15  4
+     D xxspulb         s             15  4
+     D xxtpulb         s             15  4
+     d xxmurt          s              9  6
+     d xxmupc          s              7  4
+     D xxwedt          s              8  0
+     D xxitcd          s              7  0
+     D xxfzfl          s              1
+     D xxcredit        s              1    inz(yes)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+      *
+     D  ldwedt                29     36  0
+      *
+     D  ldfzfl                81     81
+     D  ldcono                82     84  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      **********************************************************************************
+      * Mainline
+      **********************************************************************************
+      *
+      * Read each record in the Byproduct Detail file.  Only process FG Items.
+      * Write a Byproduct Values Summary record when the Meat Cost Group/SubGroup changes
+      *
+     C     ldwedt        setll     rol122d
+     C                   dou       *in90 = *on                                  Main do
+     C     ldwedt        reade     rol122d                                90
+     C                   if        *in90 = *off and ydittycd = 'FG'
+     ‚* Project-S009004-START
+     ‚* Skip Co-owned Item from Meat costs calculations
+     C     Key04         Chain     PPAOREL1                           70
+     C                   If        %Found(PPAOREL1) And AOSWSX ='N'
+     C                   Iter
+     C                   EndIf
+     ‚* Project-S009004-END
+      *
+      * Control breaks
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   move      ydcgcd        svcgcd
+     C                   move      ydsgcd        svsgcd
+      *
+     C                   when      ydcgcd <> svcgcd or
+     C                             ydsgcd <> svsgcd
+     C                   exsr      $wrt101sum
+     C                   endsl
+      *
+      * Detail processing
+     C                   exsr      $sum122dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *-----------------
+      * EOF processing
+      *-----------------
+      *
+      * Write out the last Summary record.
+      *
+     C                   if        first = no
+     C                   exsr      $wrt101sum
+     C                   endif
+      *
+      * Update the RO Header with "Sirloin" stats.
+      *
+     C                   if        totsrlnlb <> 0
+     C                   exsr      $upd100
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Sum the info from the detail record to prepare to write the Summary record
+      *-----------------------------------------------------------------------------------
+      *
+     C     $sum122dtl    begsr
+      *
+      * Setup the code fields
+      *
+     C                   z-add     ldcono        gmcono
+     C                   z-add     ldwedt        gmwedt
+     C                   move      ydcgcd        gmcgcd
+     C                   move      ydsgcd        gmsgcd
+      *
+     C                   z-add     ydmupc        gmmupc
+      *
+      * Sum Pounds and Amounts
+      *
+     C                   add       ydapulb       gmpulb
+     C                   add       ydapuslb      gmpuslb
+     C                   add       ydapuam       gmpuam
+     C                   add       ydapcoam      gmpcoam
+     C                   add       ydalcoam      gmlcoam
+     C                   add       ydaicoam      gmicoam
+     C                   add       ydaocoam      gmocoam
+      * sum net amt
+     C                   add       ydanpuam      totnpuam
+      *
+      *
+      * If this Item has 1) a mult % NE to 100 and 2) produced pounds,
+      *    and 3) it is in the BNIN Meat Cost Group
+      * we want to sum the prices for the group record
+      *
+     C                   if        ydmupc <> 100 and ydapulb <> 0
+     C                             and ydcgcd = 'BNIN'
+     c                   add       ydnpupr       totmunpupr
+     C                   endif
+      *
+      * Accumulate "sirloin' pounds and SRLN BoneIn pounds for later processing.
+      *
+     C                   if        ydcgcd = 'SRLN'                              If sirloin
+     C                   add       ydapulb       totsrlnlb
+      *
+     C                   if        ydsgcd = 'BNIN'
+     C                   add       ydapulb       totsrbilb
+     C                   endif
+     C                   endif                                                  If sirloin
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Write a ByProduct Values Summary record
+      *-----------------------------------------------------------------------------------
+      *
+     C     $wrt101sum    begsr
+      *
+      * Calc Sales Yield %
+      *
+     c                   if        gmpuslb <> 0
+     c                   eval(h)   wkpc = (gmpulb / gmpuslb) * 100
+     c                   if        wkpc <= 999
+     C                   z-add     wkpc          gmsypc
+     c                   endif
+     c                   endif
+      *
+      * Calculate Produced Per/Lb Price and Costs
+      *
+     C                   if        gmpulb <> 0                                  If produced
+     C                   eval(h)   gmpupr = gmpuam / gmpulb
+     C                   eval(h)   gmpco  = gmpcoam / gmpulb
+     C                   eval(h)   gmlco  = gmlcoam / gmpulb
+     C                   eval(h)   gmico  = gmicoam / gmpulb
+     C                   eval(h)   gmoco  = gmocoam / gmpulb
+      *
+      * If summed multiplied prices <> 0, use that price for the group price
+      *     (BNIN - Meat Cost Group)
+      * else use the normal calculation to get the group price
+      *
+     C                   if        totmunpupr <> 0
+     C                   z-add     totmunpupr    gmnpupr
+     C                   else
+     C                   eval(h)    gmnpupr = totnpuam / gmpulb
+     C                   endif
+     C                   endif                                                  If produced
+      *
+      * Write summarized Meat Cost record for this Group/Subgroup
+      *
+     C                   write     gmrec
+     C                   clear                   gmrec
+      *
+      * Clear accumulators
+     C                   z-add     0             totmunpupr
+     C                   z-add     0             totnpuam
+      *
+      * Save control fields
+     C                   move      ydcgcd        svcgcd
+     C                   move      ydsgcd        svsgcd
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Update the RO Header with "Sirloin" stuff
+      *-----------------------------------------------------------------------------------
+      *
+     C     $upd100       begsr
+      *
+      * The first thing we need to do is retrieve the produced pounds for the PUMPED
+      * SRLN's.   These are used to calculate the SRLN data in the Header record.
+      * (When we made the SRLN changes in February 2011, Damon said that they were no
+      *  longer producing the Items below; but, he wanted to keep the logic/code in
+      *  case they started producing them again.)
+      *
+      * BNIN Pumped
+     C                   z-add     9309          wkitcd
+     C                   exsr      $pumpsrln
+     C                   z-add     9317          wkitcd
+     C                   exsr      $pumpsrln
+      * BNLS Pumped
+     C                   z-add     5832          wkitcd
+     C                   exsr      $pumpsrln
+     C                   z-add     9831          wkitcd
+     C                   exsr      $pumpsrln
+      *
+      * Retrieve "group" record for the SRLN Bone-In group, using a key of:
+      *  1) Company
+      *  2) Week-ending date
+      *  3) Group Code (hardcoded to the value 'SRLN')
+      *  4) Sub Code   (hardcoded to the value 'BNIN')
+      *
+      * BONE-IN
+     C                   move      'SRLN'        wkcgcd
+     C                   move      'BNIN'        wksgcd
+     C     key01         chain     rol101a                            92
+     C                   if        *in92 = *off
+     C                   eval(h)   wkbicapc = 100 * (totsrbilb / totsrlnlb)
+     C                   eval(h)   wkbicrvl = ((ohbibypc / 100)
+     C                             * (wkbicapc / 100)) * p1gmnpupr
+     C                   endif
+      *
+      * BONELESS
+     C                   eval      wkblcapc = 100 - wkbicapc
+      *
+      * Retrieve/Update the RO Header
+      *
+     C     key02         chain     rol100a                            92
+     C                   if        *in92 = *off                                 If hit
+      *
+      * Bone-in credit value
+      *
+     C                   z-add     wkbicrvl      ohbicrvl
+      *
+      * Component allotment percents:
+      *   1) Bone-in
+      *   2) Boneless
+     C                   z-add     wkbicapc      ohbicapc
+     C                   z-add     wkblcapc      ohblcapc
+      *
+      * Sirloin trim allocation percent
+     C                   eval(h)   wkrt = ((ohbitrpc / 100) -
+     C                              ((ohbitrpc / 100) * (ohblcapc / 100)))
+     C     wkrt          mult(h)   100           ohaltrpc
+      *
+     c                   update    ohrec
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Get the SRLN pounds from the Pumped product to use for SRLN Yields
+      *-----------------------------------------------------------------------------------
+      *
+     C     $pumpsrln     begsr
+      *
+      * We need to get the produced pounds for the PUMPED Sirloins. These items
+      * are not retrieved in the regular Byproduct processing.  These
+      * pumped Sirloin Byproducts are not used for pricing but they are used when
+      * we are calculating the SRLN values in the Header record.
+      *
+      * Call generic program to retrieve/accumulate Produced Pounds for the Item/Week.
+      *
+     C                   call      'RO800'
+     C                   parm                    xxcredit
+     C                   parm      ldwedt        xxwedt
+     C                   parm      wkitcd        xxitcd
+     C                   parm      ldfzfl        xxfzfl
+     C                   parm      0             xxmurt
+     C                   parm      0             xxmupc
+     C                   parm      0             xxspulb
+     C                   parm      0             xxspuam
+     C                   parm      0             xxtpulb
+     C                   parm      0             xxtpuam
+     C                   parm      0             xxsllb
+     C                   parm      0             xxslam
+     C                   parm      0             xxpulb
+     C                   parm      0             xxpuam
+      *
+      * Retrieve the BOM record where this Item produces Itself to get the SalesYld%
+      * and the Pump%...turn them into Rates.
+      *
+     C     key03         chain     pdiorel4                           92
+     C                   if        *in92 = *off
+     C                   eval      wkrate = iobopr / 100
+     C                   eval      wkpump = (iobmy2 / 100) + 1
+     C                   else
+     C                   z-add     0             wkrate
+     C                   z-add     0             wkpump
+     C                   endif
+      *
+      *
+     C                   select
+      * BoneIn Logic
+     C                   when      wkitcd = 9309 or wkitcd = 9317
+     C                   if        wkpump <> 0
+     C                   eval(h)   wkpulb = xxpulb / wkpump
+     C                   add       wkpulb        totsrlnlb
+     C                   add       wkpulb        totsrbilb
+     C                   endif
+      * BoneLess
+     C                   when      wkitcd = 5832 or wkitcd = 9831
+     C                   if        wkpump <> 0 and wkrate <> 0
+     C                   eval(h)   wkpulb = (xxpulb / wkpump) / wkrate
+     C                   add       wkpulb        totsrlnlb
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    ldcono
+     C                   kfld                    ldwedt
+     C                   kfld                    wkcgcd
+     C                   kfld                    wksgcd
+      *
+     C     key02         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    ldcono
+      *
+     C     key03         klist
+     C                   kfld                    ldcono
+     C                   kfld                    wkitcd
+     C                   kfld                    wkitcd
+     ‚* Project-S009004-START
+     C     Key04         KList
+     C                   KFld                    YDTFCLCD
+     C                   KFld                    YDISTYCD
+     C                   KFld                    YDISGRCD
+     C                   KFld                    YDISCLCD
+     ‚* Project-S009004-END
+      *
+      *
+      * Retrieve the RO Header using a key of:
+      *   1) Week-ending date
+      *   2) Company
+      *
+     C     key02         chain(n)  rol100a                            92
+      *
+     C                   endsr
+      /eject

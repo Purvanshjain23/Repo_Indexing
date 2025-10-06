@@ -1,0 +1,267 @@
+/*********************************************************************/
+/*     Program: PDHEUPR                                              */
+/*       Title: Print Bank Deposit G/L Listing from Post.            */
+/*        Date: 03/06/95                                             */
+/*                                                                   */
+/* Description: - Calls print options prompt program                 */
+/*              - Calls program to post A/R deposits to JDE          */
+/*                and depending on the duplicate spool file          */
+/*                flag passed back from the called program,          */
+/*                a duplicate spool file may be produced for Triumph */
+/*                or one of the Daily Foods locations.               */
+/*                                                                   */
+/*  Parameters:                                                      */
+/*  Usage   Field       Field Description                            */
+/*  -----   ---------   ------------------------------------------   */
+/*    I     &COMPANY    Company Number                               */
+/*    I     &BANK       Lockbox Number                               */
+/*    I     &DEPDAT     Deposit Date                                 */
+/*    I     &DEPTIM     Deposit TIME                                 */
+/*    I     &OUTQ       Output Queue                                 */
+/*    I     &HOLD       Hold Spool File                              */
+/*    I     &SAVE       Save Spool File                              */
+/*    I     &COPY       Number of Copies                             */
+/*                                                                   */
+/*********************************************************************/
+/* Modifications:                                                    */
+/*                                                                   */
+/*   Date     Pgmr     Description                                   */
+/* -------- ---------- --------------------------------------------  */
+/* 09/02/98 ISBLAWS    Defaulted hold & save status to *yes          */
+/* 11/09/98 ISBLAWS    Moved print options prompt screen to previous */
+/*                     program.                                      */
+/* 05/03/05 ISRCENT    Removed company & added deposit time to call  */
+/*                     ardepjde                                      */
+/* 02/20/06 ISBGUTI    Added the DUPSPLF command for the report out */
+/*                     of ARDEPJDE.  We need a copy of the 960      */
+/*                     entries to print in Triumphs outq (TFPRT01). */
+/* 02/24/06 ISBGUTI    CHANGED OUTQ TFPRT01 TO TFPRTDUP.            */
+/* 02/27/06 ISBGUTI    Removed sbdprtovr.  No longer needed with    */
+/*                     newer technology of printers.                */
+/* 03/02/06 ISLRAMS    Made DUPSPLF conditional based on returned   */
+/*                     value in new parm &TFFLAG.                   */
+/* 04/28/06 ISLRAMS    Added the OUTQ parm to the OVRPRTF command.  */
+/* 10/26/07 ISPPATE    Added DUPSPLF FOR DAILY'S                    */
+/* 11/26/07 ISBGUTI  - Changed how the dupsplf is being used.       */
+/*                     If the value in $dupsplf is a 'T', Triumph   */
+/*                     will get a duplicate spool file.  If it is   */
+/*                     a 'D', one of the Daily Foods will get a     */
+/*                     duplicate spool file.                        */
+/*                   - Changed &TFFLAG to &DUPSPLF                  */
+/*                   - Removed &PLT, &ORG, and call to PMOVXFR to   */
+/*                     determine if a Dailys company or not.        */
+/*                   - Added retrieval of User Profile to determine */
+/*                     which spool file needed duplication for      */
+/*                     Dailys by using the job description of the   */
+/*                     user who is executing this function.         */
+/* 02/09/10 LJB E000512  ADDED SUB LEDGER FIELD TO THE              */
+/*                     A/R POSTING AND REPORTING WORK FILE.         */
+/* 06/29/15 BLG E000503  Added code for when we go live with the    */
+/* 03/17/16 RMC E000503  DO THE M3 CODE FIRST, UPD FILES IF       */
+/*                       LIVE WITH M3, THEN CALL THE ARDEPJDE WHICH */
+/*                       UPDATES THE AR HDR, DTL, BANK DEPOSIT      */
+/* E8287 RMC 3/13/17   ADD M3PARALLEL EMAIL                           */
+/* R9083 RMC 5/23/17   SCAN: R9083     */
+/*        GET EMAIL DIST LIST FROM COMPANY VALUES SO IT WILL WORK IN TEST */
+/* 03/23/20 RMC P16169   CHECK IF LIVE WITH NEW JDE ENTERPRISE 1  */
+/*                       AND CALL NEW ARDEPJE1 WHICH IS OVER E1 TABLES  */
+/*                       AND ADDED PARM TO ARDEPJDE1 & ARDEPJ1E1 FOR    */
+/*                       LIVE-WITH-WORLD AND LIVE-WITH-E1 RESPECTIVELY. */
+/*                       DONT UPDATE FILES IF NOT LIVE                  */
+/*              AT END, CALL PGM E1LDXFR TO PUSH E1 BATCHES TO Z PROCESSOR */
+/*                FROM RUN LOG WORKFILE QTEMP/E1B9CPP                        */
+/*                Call program E1LRXFR to send an email of all*/
+/*                of the Batch Numbers in the E1B9CPP file    */
+/*********************************************************************/
+      PGM  PARM(&COMPANY &BANK &DEPDAT &DEPTIM &OUTQ &HOLD &SAVE &COPY)
+/* Parameter Fields */
+             DCL  VAR(&RETRN) TYPE(*CHAR) LEN(7)
+             DCL  VAR(&DUPSPLF)  TYPE(*CHAR) LEN(1)
+             DCL  VAR(&COMPANY) TYPE(*DEC)  LEN(3 0)
+             DCL  VAR(&BANK)    TYPE(*CHAR) LEN(6)
+             DCL  VAR(&DEPDAT)  TYPE(*DEC)  LEN(7 0)
+             DCL  VAR(&DEPTIM)  TYPE(*DEC)  LEN(4 0)    /*   DEPOSIT TIME */
+             DCL  VAR(&OUTQ)    TYPE(*CHAR) LEN(10)
+             DCL  VAR(&HOLD)    TYPE(*CHAR) LEN(4)
+             DCL  VAR(&SAVE)    TYPE(*CHAR) LEN(4)
+             DCL  VAR(&COPY)    TYPE(*DEC)  LEN(2 0)
+             DCL  VAR(&JOBD)    TYPE(*CHAR)  LEN(10)
+             DCL  VAR(&USER) TYPE(*CHAR) LEN(10)
+             DCL  VAR(&GRPPRF) TYPE(*CHAR) LEN(10)
+             DCL  VAR(&RETRN) TYPE(*CHAR) LEN(7)
+             DCL  VAR(&ACO) TYPE(*CHAR) LEN(3)
+             DCL  VAR(&LIVEM3) TYPE(*CHAR) LEN(1)
+             DCL  VAR(&LIVEE1) TYPE(*CHAR) LEN(1)
+             DCL  VAR(&LIVEJW) TYPE(*CHAR) LEN(1)
+             DCL  VAR(&DATAS) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&EMAIL) TYPE(*CHAR) LEN(25)
+             DCL        VAR(&SUBJ) TYPE(*CHAR) LEN(35)
+ P16169:     DCL        VAR(&SOURCE) TYPE(*CHAR) LEN(25) VALUE('OMS +
+                          Bank Deposit Post')
+             DCL        VAR(&BCHDSC) TYPE(*CHAR) LEN(25) VALUE('GL +
+                          Entry')
+             DCL        VAR(&RECIP)  TYPE(*CHAR) LEN(30)
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(40) +
+                          VALUE('OMS Bank Deposit Post to JDE')
+
+/* Internal Work Fields */
+             DCL  VAR(&ERROR)   TYPE(*CHAR) LEN(7)
+             DCL  VAR(&COMMAND) TYPE(*CHAR) LEN(512)
+
+             RTVJOBA    USER(&USER)
+/*  E000503                                                          */
+/*                                                                   */
+/*  CALL PROGRAM TO RETRIEVE THE DEFAULT COMPANY FOR USER.  THIS IS  */
+/*  NEEDED TO BE ABLE TO RETRIEVE WHETHER OR NOT WE'RE LIVE WITH M3. */
+/*                                                                   */
+             CALL       PGM(PMD4XFR) PARM(&RETRN  &ACO)
+             CHGVAR     VAR(&COMPANY) VALUE(&ACO)
+
+/*  EXECUTE THE PROGRAM TO RETRIEVE THE COMP VALULE:  LIVE WITH M3 AR DEPOSIT*/
+/*                                                                   */
+             CALL       PGM(POMTXFR) PARM(&RETRN &COMPANY 'M3ARDEP' +
+                           &LIVEM3)
+        CALL       PGM(POMTXFR) PARM(&RETRN &COMPANY 'M3PARALLEL' &EMAIL)
+JWLIVE:       CALL       PGM(POMTXFR) PARM(&RETRN &COMPANY 'JWLIVE ' +
+                           &LIVEJW)
+E1LIVE:      CALL       PGM(POMTXFR) PARM(&RETRN &COMPANY 'E1LIVE ' +
+                           &LIVEE1)
+
+/**************************************************************************/
+/*   E000503 - A/R Deposit processing:  IF LIVE WITH M3 or Parallel with  */
+/*             M3, run M3 process.                                        */
+/**************************************************************************/
+
+ LIVEYEP:    IF         COND(&LIVEM3 *EQ 'Y' *OR &LIVEM3 *EQ 'P')  THEN(DO)
+
+             RTVUSRPRF  GRPPRF(&GRPPRF)
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+             ADDLIBLE   LIB(PRKFLIB) POSITION(*LAST) /* CROSS REF +
+                          TABLE IS HERE  */
+             MONMSG     MSGID(CPF2103)
+             ENDDO
+
+/* GET THE M3 INTERFACE LIBRARY (M3IFLIB)                    */
+
+             CALL       PGM(PBSHXFR) PARM(' ' &DATAS)
+
+/* Create PLB9CPP and PLCACPP in QTEMP.     */
+
+             CRTDUPOBJ  OBJ(PLB9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PLCACPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             OVRPRTF    FILE(PRINT132) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(*YES) SAVE(*YES)
+
+             CHGVAR VAR(&ERROR) VALUE('       ')
+             CHGVAR VAR(&DUPSPLF) VALUE(' ')
+
+/*  Execute the program to create the M3 GL interface staging tables:*/
+/*      PLB9CPP AND PLCACPP in QTEMP                           */
+
+             CALL       PGM(M3ARDEP) +
+                  PARM(&ERROR &LIVEM3 &BANK &DEPDAT &DEPTIM &DUPSPLF)
+ PARALLEL:    IF         COND(&LIVEM3 *NE 'N')  THEN(DO)
+             IF         COND(&EMAIL *NE 'M3PARALLEL') THEN(CHGVAR +
+                          VAR(&SUBJ) VALUE('Bank Deposit Post +
+                          Report-M3-TEST'))
+             ELSE       CMD(CHGVAR VAR(&SUBJ) VALUE('Bank Deposit +
+                          Post Report-M3'))
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJ) ATTLIST((* +
+                          *PDF *N PRINT132 * *LAST))
+             MONMSG     MSGID(CPF0000)
+                          ENDDO
+
+/*  Copy the detail file first to the M3 Interace libary, then   */
+/*  the header.  This way, the header won't be available for     */
+/*  Informatica to pick up until we know all the detail records  */
+/*  are there for this run.                                      */
+
+             CPYF       FROMFILE(QTEMP/PLCACPP) +
+                          TOFILE(&DATAS/PLCACPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+             CPYF       FROMFILE(QTEMP/PLB9CPP) +
+                          TOFILE(&DATAS/PLB9CPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+
+             DLTF       FILE(QTEMP/PLB9CPP)
+             DLTF       FILE(QTEMP/PLCACPP)
+             DLTOVR     FILE(PRINT132)
+             ENDDO                              /*          END LIVEYEP */
+
+/*            CPYF PDJ5CPP  OMSDEVGEN/PDJ5CPP MBROPT(*ADD)      */
+
+/**************************************************************************/
+/*     Not Live OR IS PARALLEL with M3 - run jde process                  */
+/**************************************************************************/
+
+ LIVENO:     IF         COND(&LIVEM3 *EQ 'N' *OR &LIVEM3 *EQ 'P')  THEN(DO)
+
+/*--------------------------------------------------------*/
+/* Call JDE Deposit Post Program and duplicate            */
+/* the spool file if needed based upon flag passed back   */
+/*--------------------------------------------------------*/
+             OVRPRTF    FILE(PRINT132) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(*YES) SAVE(*YES)
+
+             CHGVAR VAR(&ERROR) VALUE('       ')
+             CHGVAR VAR(&DUPSPLF) VALUE(' ')
+/*                                                                   */
+/*  CREATE E1 RUN LOG WORKFILE - TO USE LATER TO PUSH BATCHES TO E1   */
+/*                                                                   */
+             IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1 *EQ 'P') +
+                          THEN(DO )
+             CRTDUPOBJ  OBJ(E1B9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+                          ENDDO
+
+      IF COND(&LIVEJW *EQ 'P') THEN(CALL PGM(ARDEPJDE) +
+                  PARM(&ERROR &BANK &DEPDAT &DEPTIM &DUPSPLF &LIVEJW))
+      IF COND(&LIVEE1 *EQ 'P')  THEN(CALL PGM(ARDEPJE1) +
+                  PARM(&ERROR &BANK &DEPDAT &DEPTIM &DUPSPLF &LIVEE1))
+      IF COND(&LIVEJW *EQ 'Y')  THEN(CALL PGM(ARDEPJDE) +
+                  PARM(&ERROR &BANK &DEPDAT &DEPTIM &DUPSPLF &LIVEJW))
+      IF COND(&LIVEE1 *EQ 'Y') THEN(CALL PGM(ARDEPJE1) +
+                  PARM(&ERROR &BANK &DEPDAT &DEPTIM &DUPSPLF &LIVEE1))
+
+ PARALLEJ:    IF         COND(&LIVEM3 *EQ 'P')  THEN(DO)
+             IF         COND(&EMAIL *NE 'M3PARALLEL') THEN(CHGVAR +
+                          VAR(&SUBJ) VALUE('Bank Deposit Post +
+                          Report-JDE-TEST'))
+             ELSE       CMD(CHGVAR VAR(&SUBJ) VALUE('Bank Deposit +
+                          Post Report-JDE'))
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJ) ATTLIST((* +
+                          *PDF *N PRINT132 * *ALL))
+             MONMSG     MSGID(CPF0000)
+                          ENDDO
+
+             DLTOVR     FILE(PRINT132)
+             ENDDO                              /*          END LIVENO  */
+
+
+ LIVEE1P:    IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1 *EQ 'P')  THEN(DO)
+
+/*  EXECUTE THE PROGRAM TO READ THE QTEMP RUN LOG HEADER         */
+/*      E1B9CPP AND PUSH THE BATCHES TO E1                      */
+/*                                                                   */
+             CALL       PGM(E1LDXFR) PARM(&RETRN)
+/**********************************************************************/
+/*                                                                   */
+/*  Send message to user that the batch is ready in JDE              */
+             CHGVAR     VAR(&RECIP) VALUE(&USER)
+             CALL       PGM(E1LRXFR) PARM(&RETRN &SOURCE &BCHDSC +
+                          &RECIP &SUBJECT)
+
+             DLTF       FILE(QTEMP/E1B9CP*)
+             MONMSG     MSGID(CPF2105 CPF2125)
+
+             ENDDO                              /*          END LIVEE1P */
+
+ EXIT:
+             ENDPGM

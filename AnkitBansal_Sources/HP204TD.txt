@@ -1,0 +1,590 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP204TD- Build JDE Upload file: HPS Transfer Out Different Phase
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     08/01/02
+      *
+      * FUNCTION: This program builds an upload file of current period
+      *           data that will be interfaced to JDE.
+      *
+      *           This program is called from HP204CLTD which is called
+      *           from the upload driver CL HP404CL..which is submitted from
+      *           HP404.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 04/05/04  LeAnne Fedor
+      *           We changed the BGF transfer out logic. The new logic includes
+      *           transfers where:
+      *            1) the destination phase is 'nursery' or
+      *            2) the destination phase is 'grow finish' or 'BGF' and
+      *               the 'average received pounds' is 20 pounds or less
+      *
+      * 10/16/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      * 02/28/16  Barb Gutierrez(E5290)
+      *           Added logic to handle new company Iowa Farms.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsl018i   if   e           k disk
+      *    Farm site
+      *    (records selected in open query)
+      *
+      *
+     Fhsl074h   if   e           k disk
+      *  Transfer movement header
+      *  (records selected in open query)
+      *
+      *
+     Fhsp075    if   e           k disk
+      *  Transfer movement detail
+      *
+      *
+     Fhsp204    uf a e           k disk
+      *    HPS to JDE upload file
+      *
+      *
+     Fhsl204a   if a e           k disk    rename(hjrec:hjreca) prefix(p1)
+      *    HPS to JDE upload file
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      *---------------------------------------------------------------
+      * STANDALONE FIELDS
+      *---------------------------------------------------------------
+      *
+      * Control fields
+      *
+     D svcocd          s                   like(fscocd)
+     D svmcu           s                   like(fscjd)
+     D svdesc          s                   like(hjdesc)
+     D svre            s                   like(hjre)
+     D first           s              1    inz('Y')
+      *
+      *
+      * Work fields
+      *
+     D wkmcu           s                   like(hjmcu)
+      *
+      * Workfields for accumulating
+      *
+     D wkdptohd        s                   like(hjhpsval)
+     D wkhpsval        s                   like(hjhpsval)
+     D wkjdeval        s                   like(hjjdeval)
+     D wkhd            s                   like(mdqlhd)
+     D wkavlb          s              7  2
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldacyr                 1      4  0
+     D  ldacpe                 5      6  0
+     D  ldbpdt                 7     14  0
+     D  ldepdt                15     22  0
+     D  ldhucd                23     24
+      *
+     D  ldhuds               100    129
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Perform BGF processing
+      *
+     C                   exsr      $bgf
+      *
+      * Perform Finisher processing (Nursery and Grow Finish)
+      *
+     C                   exsr      $fin
+      *
+      * Write offsetting entries
+      *
+     C                   exsr      $offset
+      *
+      * Set 'new batch number' and 'new document number' flags
+      *
+     C                   exsr      $flags
+      *
+     C                   seton                                        lr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process all BGF farms
+      *--------------------------------------------------------------------------------------
+      *
+     C     $bgf          begsr
+      *
+     C     *loval        setll     hsl018i
+      *
+     C                   dou       *in90 = *on                                  Do BGF farms
+     C                   read      hsl018i                                90
+     C                   if        *in90 = *off and fsppcd = 'BGF  '            If not EOF
+      *
+     C                   if        first = yes
+     C                   exsr      $first
+     C                   endif
+      *
+      *
+      * Control break on company number
+      *   a) write last BGF records to interface file
+      *   b) Write offsetting entries for company
+      *   c) clear accumulators and save cost center
+      *   d) Set new batch number and new document flags
+      *
+     C                   select
+     C**                 when      svcocd <> fscocd
+     C**                 exsr      $bgfjde
+     C**                 exsr      $offset
+     C**                 exsr      $clear
+     C**                 move      fscocd        svcocd
+      *
+      * Control break on cost center
+      *   a) write BGF records to interface file
+      *   b) clear accumulators and save cost center
+      *
+     C                   when      svmcu <> fscjd
+     C                   exsr      $bgfjde
+     C                   exsr      $clear
+     C                   move      fscjd         svmcu
+     C                   move      fscocd        svcocd
+     C                   endsl
+      *
+      * Accumulate detail values for the farm.
+      *
+     C                   exsr      $bgffarm
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do BGF farms
+      *
+      * Last record processing for BGF farms
+      *
+     C                   exsr      $bgfjde
+     C                   exsr      $clear
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Retrieve values for a BGF farm
+      *--------------------------------------------------------------------------------------
+      *
+     C     $bgffarm      begsr
+      *
+      * You will need Transfer movement data for:
+      *    1) Transfer out different phase head
+      *
+     C                   exsr      $bgftran
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Retrieve BGF Transfer data
+      *--------------------------------------------------------------------------------------
+      *
+     C     $bgftran      begsr
+      *
+      * Read all transfer movement headers out of this farm for this period.
+      * Read the detail records.    Accumulate values when:
+      *       a) the destination phase is 'nursery' or
+      *       b) the destination phase is 'grow finish' or 'BGF' and
+      *          the 'average received pounds' is 20 pounds or less
+      *
+      *
+     C     fsfscd        setll     hsl074h
+      *
+     C                   dou       *in91 = *on                                  Do tran hdr
+     C     fsfscd        reade     hsl074h                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C     mhmvsn        setll     hsp075
+     C                   dou       *in93 = *on                                  Do tran dtl
+     C     mhmvsn        reade     hsp075                                 93
+     C                   if        *in93 = *off                                 If record
+      *
+      * Calculate average received pounds when the destination phase is
+      * Grow Finish or BGF.
+      *
+     C                   z-add     0             wkavlb
+     C                   if        mhdnpp = 'GF   ' or mhdnpp = 'BGF  '         If grow finish
+     C     mdrjhd        add       mdqlhd        wkhd
+     C                   if        wkhd <> 0
+     C                   eval(h)   wkavlb = (mdqllb + mdrjlb) / wkhd
+     C                   endif
+     C                   endif                                                  If grow finish
+      *
+     C                   if        (mhdnpp = 'GF   ' and wkavlb <= 20) or       If OK
+     C                             (mhdnpp = 'BGF  ' and wkavlb <= 20) or
+     C                              mhdnpp = 'NUR  '
+     C                   add       mdqlhd        wkdptohd
+     C                   add       mdrjhd        wkdptohd
+     C                   endif
+      *
+     C                   endif                                                  If record
+     C                   enddo                                                  Do tran dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do tran hdr
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write records to the upload file for a BGF cost center
+      *--------------------------------------------------------------------------------------
+      *
+     C     $bgfjde       begsr
+      *
+      * Transfer out different phase
+      *
+     C                   if        wkdptohd <> 0
+     C                   z-add     wkdptohd      hjhpsval
+     C     100           mult      wkdptohd      hjjdeval
+     C                   eval      hjdesc = 'Transfer OUT - Diff Phase'
+     C                   eval      hjobj = '6013'
+     C                   move      *blank        hjre
+     C                   exsr      $write204
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process each Nursery and Grow Finish Farm
+      *--------------------------------------------------------------------------------------
+      *
+     C     $fin          begsr
+      *
+     C                   move      yes           first
+     C     *loval        setll     hsl018i
+      *
+     C                   dou       *in90 = *on                                  Do nur/gf farms
+     C                   read      hsl018i                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             (fsppcd = 'NUR  ' or fsppcd = 'GF   ')
+      *
+     C                   if        first = yes
+     C                   exsr      $first
+     C                   endif
+      * Control break on company number
+      *   a) write last Nur/GF records to interface file
+      *   b) Write offsetting entries for company
+      *   c) clear accumulators and save cost center
+      *   d) Set new batch number and new document flags
+      *
+     C                   select
+     C**                 when      svcocd <> fscocd
+     C**                 exsr      $finjde
+     C**                 exsr      $offset
+     C**                 exsr      $clear
+     C**                 move      fscocd        svcocd
+      *
+      * Control break on cost center
+      *   a) write Finisher records to interface file
+      *   b) clear accumulators and save cost center
+      *
+     C                   when      svmcu <> fscjd
+     C                   exsr      $finjde
+     C                   exsr      $clear
+     C                   move      fscjd         svmcu
+     C                   move      fscocd        svcocd
+     C                   endsl
+      *
+      * Accumulate detail values for the farm.
+      *
+     C                   exsr      $finfarm
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do nur/gf farms
+      *
+      * Last record processing for Finisher farms
+      *
+     C                   exsr      $finjde
+     C                   exsr      $clear
+      *
+     C                   endsr
+      /EJECT
+      *-----------------------------------------------------------------------------------------
+      * Accumulate period values for a Finisher farm
+      *-----------------------------------------------------------------------------------------
+      *
+     C     $finfarm      begsr
+      *
+      * Transfer out different phase
+      *
+     C                   exsr      $fintran
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Retrieve Finisher transfer data
+      *--------------------------------------------------------------------------------------
+      *
+     C     $fintran      begsr
+      *
+     C     fsfscd        setll     hsl074h
+      *
+     C                   dou       *in91 = *on                                  Do trans out
+     C     fsfscd        reade     hsl074h                                91
+     C                   if        *in91 = *off                                 If transfer
+      *
+     C     mhmvsn        setll     hsp075
+     C                   dou       *in93 = *on                                  Do tran dtl
+     C     mhmvsn        reade     hsp075                                 93
+     C                   if        *in93 = *off                                 If record
+      *
+      * Accumulate Transfer Out head
+      *
+     C                   select
+     C                   when      mhorpp <> mhdnpp
+     C                   add       mdqlhd        wkdptohd
+     C                   add       mdrjhd        wkdptohd
+     C                   endsl
+      *
+     C                   endif                                                  If record
+     C                   enddo                                                  Do tran dtl
+      *
+     C                   endif                                                  If transfer
+     C                   enddo                                                  Do trans out
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write records to the interface file for a Finisher cost center
+      *--------------------------------------------------------------------------------------
+      *
+     C     $finjde       begsr
+      *
+      * Transfer out different phase
+      *
+     C                   if        wkdptohd <> 0
+     C                   z-add     wkdptohd      hjhpsval
+     C     100           mult      wkdptohd      hjjdeval
+     C                   eval      hjdesc = 'Transfer OUT - Diff Phase'
+     C                   eval      hjobj = '6013'
+     C                   move      *blank        hjre
+     C                   exsr      $write204
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write record to interface file
+      *--------------------------------------------------------------------------------------
+      *
+     C     $write204     begsr
+      *
+     C                   eval      hjexa = hjdesc
+     C                   move      'AU'          hjtype
+     C                   move      no            hjoffset
+     C                   z-add     0             hjbatval
+     C                   move      svmcu         hjmcu
+     C                   move      *blank        hjsub
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+     C                   move      svcocd        hjcocd
+      *
+     C                   write     hjrec
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Clear accumulators
+      *--------------------------------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   z-add     0             wkdptohd
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process interface records and populate 'new batch number' and 'new doc number' flags
+      *--------------------------------------------------------------------------------------
+      *
+      * The interface file is used by several HPS programs. But, we have written only 1 JDE
+      * program to read the file and write its records into JDE. And, each 'upload' seems to
+      * have different requirements on the number of 'batches' and 'documents'. So, we
+      * customize the 'flag' logic here so that the JDE program can be 'generic'.
+      *
+      * For the HPS upload of 'Transfer Out-Different Phase' we will ultimately:
+      *    1) create a new JDE batch for each unique 'description' per company
+      *    2) retrieve a new JDE 'document' number for each unique 'description'
+      *
+      *
+     C     $flags        begsr
+      *
+     C                   move      *blank        svdesc
+     C                   move      *blank        svre
+     C                   move      *blanks       svcocd
+     C     *loval        setll     hsp204
+      *
+     C                   dou       *in91 = *on                                  Do flag loop
+     C                   read      hsp204                                 91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C                   select
+     C                   when      svdesc <> hjdesc or
+     C                             svcocd <> hjcocd
+     C                   move      hjdesc        svdesc
+     C                   move      hjre          svre
+     C                   move      hjcocd        svcocd
+     C                   move      yes           hjnewbat
+     C                   move      yes           hjnewdoc
+     C                   other
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+     C                   endsl
+      *
+     C                   update    hjrec
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do flag loop
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process interface records and write offsetting records
+      *--------------------------------------------------------------------------------------
+      *
+     C     $offset       begsr
+      *
+     C                   move      yes           first
+     C     *loval        setll     hsl204a
+      *
+     C                   dou       *in91 = *on                                  Do offsets
+     C                   read      hsl204a                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C                   if        first = yes
+     C                   move      no            first
+     C                   move      p1hjdesc      svdesc
+     C                   move      p1hjre        svre
+     C                   move      p1hjcocd      svcocd
+     C                   endif
+      *
+      * Control break on description
+      *   a) write offsetting record to interface file
+      *   b) clear accumulator and save description
+      *
+     C                   if        svdesc <> p1hjdesc or
+     C                             svcocd <> p1hjcocd
+     C                   exsr      $writeoff
+     C                   endif
+      *
+      * Detail processing
+     C                   add       p1hjhpsval    wkhpsval
+     C                   add       p1hjjdeval    wkjdeval
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do offsets
+      *
+      *  Write offsetting record for last description
+      *
+     C                   if        first = no
+     C                   exsr      $writeoff
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write offset records to interface file
+      *--------------------------------------------------------------------------------------
+      *
+     C     $writeoff     begsr
+      *
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+      *
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+     C                   move      'AU'          hjtype
+     C                   move      svcocd        wkmcu
+     C                   eval      hjmcu = wkmcu
+     C                   eval      hjobj = '6020'
+     C                   move      *blank        hjsub
+     C                   move      yes           hjoffset
+      *
+     C                   move      svcocd        hjcocd
+     C                   move      svdesc        hjdesc
+     C                   move      svre          hjre
+     C                   eval      hjexa = hjdesc
+     C     -1            mult      wkhpsval      hjhpsval
+     C     -1            mult      wkjdeval      hjjdeval
+      *
+      * Populate the 'batch header value' field with the 'offset' value. Force the
+      * number to be positive.
+      *
+     C                   select
+     C                   when      hjjdeval >= 0
+     C                   z-add     hjjdeval      hjbatval
+     C                   other
+     C     -1            mult      hjjdeval      hjbatval
+     C                   endsl
+      *
+     C                   write     hjrec
+      *
+     C                   z-add     0             wkhpsval
+     C                   z-add     0             wkjdeval
+     C                   move      p1hjdesc      svdesc
+     C                   move      p1hjre        svre
+     C                   move      p1hjcocd      svcocd
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Subroutine for first time for BGF and first time for Finisher logic
+      *--------------------------------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+     C                   move      fscjd         svmcu
+     C                   move      fscocd        svcocd
+     C                   move      no            first
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Initialization subroutine
+      *--------------------------------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      *
+     C                   endsr
+      /EJECT

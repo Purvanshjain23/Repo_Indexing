@@ -1,0 +1,380 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP3712-Rotational Budgets: Set TO Dates
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     02/25/04
+      *
+      * Function:    We intend that this function will run nightly from the scheduler. It
+      *              can run before or after midnight--it doesn't matter.
+      *                1) Reads all Active Rotational Farm Budgets where the TO date is zero
+      *                2) Attempts to populate the TO date with a subsequent 'Saturday' date
+      *
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 08/26/04  LeAnne Fedor
+      *           Our TO DATE logic is not working. So, we well embellish the rule to say
+      *           that the Scheduled Date must be XXX days AFTER the budget FROM DATE.
+      *
+      * 06/06/05  LeAnne Fedor
+      *           Recompile only. Received Date was added as a key field on
+      *           HSL084C.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp018    if   e           k disk
+      *    Farm sites
+      *
+      *
+     Fhsl074j   if   e           k disk
+      *    Transfer movement header
+      *
+      *
+     Fhsl084c   if   e           k disk
+      *    Sales movement header
+      *
+      *
+     Fhsp185    if   e           k disk
+      *    Budget template header
+      *
+      *
+     Fhsl188i   uf   e           k disk
+      *    Farm budget header
+      *
+      *
+     Fqprint    o    f   80        printer oflind(*inof)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *----------------------------------------------------------------
+      * CONSTANTS
+      *----------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *----------------------------------------------------------------
+      * STANDALONE FIELDS
+      *----------------------------------------------------------------
+      *
+      * Standard fields
+      *
+     D dash            s             80    inz(*all'-')
+     d rtime           s              6  0
+      *
+      *
+      *
+      * Print fields
+      *
+     d l1fmdy          s              6  0
+     d l1tmdy          s              6  0
+      *
+      *
+      * Workfields for date manipulation
+      *
+     d wkdays          s              3  0
+     d wkmindt         s                   like(jhbtdt)
+     D wktcymd         s                   like(jhbtdt)
+     D wkisodate       s               D   datfmt(*iso)
+      *
+      *
+      * Parm fields
+      *
+     d xxprtfl         s              1
+      *
+     D xxname          s              9
+     D xxabbrev        s              4
+      *
+     D xxccyymmdd      s              8  0
+     D xxsatdt         s              8  0
+     D xxcdyr          s              4  0
+     D xxcdwk          s              2  0
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+     C                   except    h1hdr
+      *
+      * Read each Farm Budget Header record. If it is Active and has no TO date,
+      * check that it is a Rotational budget. If so, go see if it is time for a TO date.
+      *
+     C     *loval        setll     hsl188i
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsl188i                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             jhbtdt = 0
+      *
+     C     jhbtcd        chain     hsp185                             92
+     C                   if        *in92 = *off and                             If rotational
+     C                             thcscd = 'R'
+     C                   exsr      $todate
+     C                   endif                                                  If rotational
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * EOF processing
+      *
+     C                   if        xxprtfl = yes
+     C                   else
+     C                   except    nodata
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * To Date logic
+      *---------------------------------------------------------------
+      *
+     C     $todate       begsr
+      *
+      * First, using the Budget Template Weeks value from the Farm Budget Header record,
+      * calculate the minimum number of days to go into the future before setting a TO DATE.
+      * Add these Minimum Days to the From Date to get the minimum future date for a TO DATE.
+      *
+     C                   eval      wkdays = (jhbtwk - 1) * 7
+     C                   movel     jhbfdt        wkisodate
+     C                   adddur    wkdays:*days  wkisodate
+     C                   move      wkisodate     wkmindt
+      *
+      *
+      * Now, go find a TO DATE using either the 'Nursery' logic or the
+      * 'Grow Finish' logic.
+      *
+     C                   z-add     0             wktcymd
+      *
+     C     jhfscd        chain     hsp018                             92
+     C                   select
+     C                   when      *in92 = *on
+      *
+     C                   when      fsppcd = 'NUR  '
+     C                   exsr      $nur
+      *
+     C                   when      fsppcd = 'GF   '
+     C                   exsr      $gf
+     C                   endsl
+      *
+      * If you have a TO date, do the 'Saturday' thing.
+      *
+     C                   if        wktcymd <> 0                                 If to date
+     C                   exsr      $saturday
+     C                   z-add     wktcymd       jhbtdt
+      *
+     C                   update    jhrec
+      *
+      * Format dates for printing
+      *
+     C     *iso          test(d)                 jhbfdt                 92
+     C                   if        *in92 = *off                                 If OK from
+     C                   move      jhbfdt        wkisodate
+     C     *mdy          move      wkisodate     l1fmdy
+     C                   endif                                                  If OK from
+      *
+     C     *iso          test(d)                 wktcymd                92
+     C                   if        *in92 = *off                                 If OK to
+     C                   move      wktcymd       wkisodate
+     C     *mdy          move      wkisodate     l1tmdy
+     C                   endif                                                  If OK to
+      *
+      * Print
+     C                   if        *inof = *on
+     C                   except    h1hdr
+     C                   endif
+      *
+     C                   except    l1dtl
+     C                   move      yes           xxprtfl
+     C                   endif                                                  If to date
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Nursery logic
+      *---------------------------------------------------------------
+      *
+      * Try to find a Scheduled transfer out of the Farm to a Grow Finish
+      * destination--with a scheduled date after the 'mimimum' future date.
+      *
+     C     $nur          begsr
+      *
+     C     jhfscd        setll     hsl074j
+      *
+     C                   dou       *in91 = *on or wktcymd <> 0                  Do transfers
+     C     jhfscd        reade     hsl074j                                91
+     C                   if        *in91 = *off and                             If not EOF
+     C                             mhdnpp = 'GF   ' and
+     C                             mhscdt > wkmindt
+     C                   z-add     mhscdt        wktcymd
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do transfers
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Grow Finish logic
+      *---------------------------------------------------------------
+      *
+      * Try to find a Scheduled Market Sale 'Farm Dump' load for the Farm
+      * with a date greater than the 'minimum' date.
+      *
+     C     $gf           begsr
+      *
+     C     jhfscd        setll     hsl084c
+      *
+     C                   dou       *in91 = *on or wktcymd <> 0                  Do sales
+     C     jhfscd        reade     hsl084c                                91
+     C                   if        *in91 = *off and                             If not EOF
+     C                             shmscd = 'SC' and
+     C                             shltcd = 'FD' and
+     C                             shstcd = 'MRKTS' and
+     C                             shscdt > wkmindt
+     C                   z-add     shscdt        wktcymd
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do sales
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Do the 'Saturday' thing
+      *---------------------------------------------------------------
+      *
+      * The TO Date must always be a Saturday. So, if the TO Date is not
+      * a Saturday, find the Saturday subsequent to the TO Date.
+      *
+     C     $saturday     begsr
+      *
+      * Determine what 'day of the week' the To Date is.
+      *
+     C                   call      'HP8005'
+     C                   parm                    wktcymd
+     C                   parm      *blank        xxname
+     C                   parm      *blank        xxabbrev
+      *
+      *
+      * When the To Date is Saturday,
+      *     No further date logic is required
+      * Otherwise,
+      *     Set the To Date equal to the first Saturday subsequent to the To Date
+      *
+     C                   select
+     C                   when      xxabbrev = 'Sat '
+     C                   other
+      *
+      * Find subsequent Saturday using the generic program.
+      *
+     C                   call      'HP8007'
+     C                   parm      wktcymd       xxccyymmdd
+     C     wktcymd       parm      0             xxsatdt
+     C                   parm      0             xxcdyr
+     C                   parm      0             xxcdwk
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *
+     C     *entry        plist
+     C                   parm                    xxprtfl
+      *
+      * Set up heading info.
+      *
+     C                   time                    rtime
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oqprint    e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           50 'HOG PRODUCTION SYSTEM'
+     O                                           70 'DATE'
+     O                       udate         y     80
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                                           38 'ROTATIONAL BUDGETS'
+     O                                           58 ' THAT GOT "TO" DATES'
+     O                                           70 'TIME'
+     O                       rtime               80 '  :  :  '
+      *
+     O          e            h1hdr          2
+     O                                           70 'PAGE'
+     O                       page          z     80
+      *
+      *
+      *-------------------------------------------------------------
+      * Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr       0  1
+     O                                            5 'Farm'
+     O                                           15 'Budget'
+     O                                           23 'Budget'
+      *
+     O          e            h1hdr       0  1
+     O                                            5 'Site'
+     O                                           15 'Number'
+     O                                           25 'Template'
+     O                                           37 'From Date'
+     O                                           49 'To Date'
+      *
+     O          e            h1hdr       0  2
+     O                       dash                80
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl          1
+     O                       jhfscd        z      5
+     O                       jhfbsn        z     15
+     O                       jhbtcd              23
+     O                       l1fmdy         b    36 '  /  /  '
+     O                       l1tmdy         b    50 '  /  /  '
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata         1
+     O                                           21 'No TO DATES were set.'

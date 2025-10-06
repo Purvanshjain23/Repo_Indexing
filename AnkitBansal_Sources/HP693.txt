@@ -1,0 +1,714 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production
+      * PROGRAM:     HP693
+      * TITLE:       Print Transfer Movement Bill of Lading
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     02/14/96
+      *
+      *  FUNCTION:   This program prints a BOL for a transfer movement.
+      *              This is a rewrite that uses an external print file with an overlay.
+      *              The users no longer want to use preprinted forms. So, we have gone to
+      *              a custom print file using an overlay.
+      *
+      *              Once everybody is using the new form, the original print program
+      *              (HP681) will be replaced everywhere with this new print program.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/06/04  Alice
+      *           Change the format of the BOL print
+      *
+      * 12/07/04  LeAnne Fedor
+      *           Changed the Movement Detail file to a file keyed by Movement/line
+      *           number instead of Movement/Origin Group so that the BOL will print
+      *           in the same order that the user sees the data on the movement screen.
+      *           Also, fixed bug for Section 2 and 3 to retrieve both origin and
+      *           destination group info.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 03/10/11  LeAnne Ramsey  (C1421)
+      *           Program bug. Fields WKORBLCD and WKDNBLCD were not being cleared before
+      *           being populated.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 01/21/21  ISE            TSN593
+      *           Replaced *loval with *start
+      *
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp016    if   e           k disk
+      *    Managers
+      *
+      *
+     Fhsp018    if   e           k disk
+      *    Farm site
+      *
+      *
+     Fhsl034d   if   e           k disk
+      *    Hog group
+      *
+      *
+     Fhsp074    uf   e           k disk
+      * Transfer movement header
+      * (Records selected/keyed in open query)
+      *
+      *
+     Fhsp075    if   e           k disk
+      * Transfer movement detail
+      *
+      *
+     Fqprint    o    f  198        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D procfl          s              1
+      *
+      *
+      * Workfields
+      *
+     D nbrchar         s              1  0
+     D start           s              1  0
+     D wkalphptct      s              3
+      *
+     D wkarea          s              3
+     D wk3alph         s              3
+     D wk4alph         s              4
+     D wk7alph         s              7
+     D wkphone         s             14
+      *
+     D wkschd          s                   like(mdschd)
+     D wkscmdy         s              6  0
+      *
+     D wkorfscd        s                   like(fsfscd)
+     D wkorfsnm        s                   like(fsfsnm)
+     D wkorgtcd        s                   like(fsgtcd)
+     D wkorhgcd        s                   like(hghgcd)
+     D wkorblcd        s                   like(hgblcd)
+     D wkorrmcd        s                   like(hgrmcd)
+      *
+     D wkdnfscd        s                   like(fsfscd)
+     D wkdnfsnm        s                   like(fsfsnm)
+     D wkdnhgcd        s                   like(hghgcd)
+     D wkdnblcd        s                   like(hgblcd)
+     D wkdnrmcd        s                   like(hgrmcd)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+      *
+      * Print fields
+      *
+     D h1desc          s             21
+     D h1reprint       s             13
+      *
+     D h1orpmgcd       s                   like(fspmgcd)
+     D h1orpmgnm       s                   like(mgmgnm)
+     D h1orphone       s             14
+      *
+     D h1ormmgcd       s                   like(fsmmgcd)
+     D h1ormmgnm       s                   like(mgmgnm)
+      *
+     D h1dnpmgcd       s                   like(fspmgcd)
+     D h1dnpmgnm       s                   like(mgmgnm)
+     D h1dnphone       s             14
+      *
+     D h1dnmmgcd       s                   like(fsmmgcd)
+     D h1dnmmgnm       s                   like(mgmgnm)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      *  LDA
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldortocd              25     29
+     D  ldorcell              40     41  0
+     D  lddncell              57     58  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * Read all transfer movements selected by the open query.
+      *
+593  C*    *loval        setll     hsp074
+593  C     *start        setll     hsp074
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsp074                                 90
+     C                   if        *in90 = *off                                 If not eof
+     C                   move      yes           procfl
+      *
+      * Retrieve origin farm Cell and Transporation Office to compare with
+      * user's selections.
+      *
+     C                   if        ldorcell <> 0 or ldortocd <> *blank
+     C     mhorfs        chain     hsp018                             92
+     C                   if        *in92 = *on or
+     C                             (ldorcell <> 0 and ldorcell <> fscell) or
+     C                             (ldortocd <> *blank and fstocd <> ldortocd)
+     C                   move      no            procfl
+     C                   endif
+     C                   endif
+      *
+      * Retrieve 'cell' associated with destination farm and compare to user's
+      * selected 'destination cell'.
+      *
+     C                   if        lddncell <> 0
+     C     mhdnfs        chain     hsp018                             92
+     C                   if        *in92 = *on or lddncell <> fscell
+     C                   move      no            procfl
+     C                   endif
+     C                   endif
+      *
+     C                   if        procfl = yes                                 If process
+      *
+      * Clear workfields
+     C                   exsr      $clear
+      *
+      * Set up/print data from Movement Header
+      *
+     C                   exsr      $header
+      *
+      *
+      * Read/print all movement detail records.
+      *
+     C                   exsr      $detail
+      *
+     C                   add       1             mhptct
+     C                   update    mhrec
+      *
+      * Now, print two more sections:
+      *    Receiving farm receipt
+      *    Shipping farm receipt
+      *
+     C                   exsr      $receiving
+     C                   exsr      $shipping
+      *
+     C                   endif                                                  If process
+     C                   endif                                                  if not eof
+     C                   enddo                                                  Main do
+      *
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * Clear workfields
+      *---------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   z-add     0             wkscmdy
+      *
+     C                   z-add     0             wkorfscd
+     C                   move      *blank        wkorfsnm
+     C                   move      *blank        wkorgtcd
+      *
+     C                   z-add     0             wkdnfscd
+     C                   move      *blank        wkdnfsnm
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve/print info for Movement Header record
+      *---------------------------------------------------------------
+      *
+     C     $header       begsr
+      *
+      * Flip Scheduled Ship Date to MMDDYY format
+      *
+     C     *iso          test(d)                 mhscdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C                   move      mhscdt        wkisodate
+     C     *mdy          move      wkisodate     wkscmdy
+     C                   endif                                                  If OK date
+      *
+      * Retrieve Origin and Destination Farm Site info
+      *
+     C                   exsr      $orfscd
+     C                   exsr      $dnfscd
+      *
+      * Set up transfer description
+      *
+     C                   select
+     C                   when      wkorgtcd = 'G'
+     C                   eval      h1desc = 'Genetic Transfer'
+      *
+     C                   when      mhorpp = 'BGF  ' and mhdnpp = 'NUR  '
+     C                   eval      h1desc = 'Wean/Nursery Transfer'
+     C                   other
+      *
+     C                   eval      h1desc = 'Transfer'
+     C                   endsl
+      *
+      * Is this a reprint of this BOL?
+      *
+     C                   if        mhptct = 0
+     C                   move      *blank        h1reprint
+     C                   else
+     C                   eval      wkalphptct = %triml(%editc(mhptct:'Z'))
+     C                   eval      h1reprint = 'RE-PRINT #' + %trim(wkalphptct)
+     C                   endif
+      *
+      * Print first heading section
+      *
+     C                   except    h1hdr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve Origin Farm Site info
+      *---------------------------------------------------------------
+      *
+     C     $orfscd       begsr
+      *
+     C                   z-add     mhorfs        wkorfscd
+     C     mhorfs        chain     hsp018                             92
+     C                   if        *in92 = *off                                 If orig farm
+     C                   movel     fsfsnm        wkorfsnm
+     C                   move      fsgtcd        wkorgtcd
+     C                   move      fsmmgcd       h1ormmgcd
+     C                   move      fspmgcd       h1orpmgcd
+      *
+      * Multi-manager
+      *
+     C                   if        fsmmgcd <> *blank                            If multi mgr
+     C     fsmmgcd       chain     hsp016                             92
+     C                   if        *in92 = *off
+     C                   movel     mgmgnm        h1ormmgnm
+     C                   endif
+     C                   endif                                                  If multi mgr
+      *
+      * Production manager
+      *
+     C                   if        fspmgcd <> *blank                            If prod mgr
+     C     fspmgcd       chain     hsp016                             92
+     C                   if        *in92 = *off
+     C                   movel     mgmgnm        h1orpmgnm
+      *
+     C                   if        mgtlacno <> 0 or mgtlphno <> 0
+     C                   exsr      $phone
+     C                   eval      h1orphone = wkphone
+     C                   seton                                        97
+     C                   else
+     C                   setoff                                       97
+     C                   endif
+      *
+     C                   endif
+     C                   endif                                                  If prod mgr
+      *
+     C                   endif                                                  If orig farm
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve Destination Farm Site info
+      *---------------------------------------------------------------
+      *
+     C     $dnfscd       begsr
+      *
+     C                   z-add     mhdnfs        wkdnfscd
+     C     mhdnfs        chain     hsp018                             92
+     C                   if        *in92 = *off                                 If farm hit
+     C                   movel     fsfsnm        wkdnfsnm
+     C                   move      fsmmgcd       h1dnmmgcd
+     C                   move      fspmgcd       h1dnpmgcd
+      *
+      * Multi-manager
+      *
+     C                   if        fsmmgcd <> *blank                            If multi mgr
+     C     fsmmgcd       chain     hsp016                             92
+     C                   if        *in92 = *off
+     C                   movel     mgmgnm        h1dnmmgnm
+     C                   endif
+     C                   endif                                                  If multi mgr
+      *
+      * Production manager
+      *
+     C                   if        fspmgcd <> *blank                            If prod mgr
+     C     fspmgcd       chain     hsp016                             92
+     C                   if        *in92 = *off
+     C                   movel     mgmgnm        h1dnpmgnm
+      *
+     C                   if        mgtlacno <> 0 or mgtlphno <> 0
+     C                   exsr      $phone
+     C                   eval      h1dnphone = wkphone
+     C                   seton                                        98
+     C                   else
+     C                   setoff                                       98
+     C                   endif
+      *
+     C                   endif
+     C                   endif                                                  If prod mgr
+      *
+     C                   endif                                                  If farm hit
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Format telephone number
+      *---------------------------------------------------------------
+      *
+     C     $phone        begsr
+      *
+     C                   move      *blank        wkarea
+     C                   move      *blank        wk3alph
+     C                   move      *blank        wk4alph
+     C                   move      *blank        wk7alph
+     C                   move      *blank        wkphone
+      *
+     C                   if        mgtlacno <> 0
+     C                   move      mgtlacno      wkarea
+     C                   endif
+      *
+     C                   if        mgtlphno <> 0
+     C                   movel     mgtlphno      wk7alph
+     C                   eval      wk3alph = %subst(wk7alph:1:3)
+     C                   eval      wk4alph = %subst(wk7alph:4:4)
+     C                   endif
+      *
+     C                   eval      wkphone = '(' + wkarea + ') ' +
+     C                                          wk3alph + '-' + wk4alph
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve/print side-by-side all Detail Lines for the BOL
+      *---------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+      * Print blank lines to position for the first line of the detail data.
+      *
+     C                   do        6
+     C                   except    blank
+     C                   enddo
+      *
+      * Process all movement detail records for this movement.
+      *
+     C     mhmvsn        setll     hsp075
+      *
+     C                   dou       *in91 = *on                                  Do detail
+     C     mhmvsn        reade     hsp075                                 91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C                   z-add     mdschd        wkschd
+      *
+      * Retrieve origin/destination group info
+      *
+     C                   exsr      $orhgsn
+     C                   exsr      $dnhgsn
+      * Print
+     C                   except    l1dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do detail
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve/print the Receiving Farm Receipt
+      *---------------------------------------------------------------
+      *
+     C     $receiving    begsr
+      *
+      * Print the section heading lines
+      *
+     C                   except    h2hdr
+      *
+      * Print blank lines to position for the first detail line.
+      *
+     C                   do        3
+     C                   except    blank
+     C                   enddo
+      *
+      * Process movement detail lines
+      *
+     C     mhmvsn        setll     hsp075
+      *
+     C                   dou       *in91 = *on                                  Do receiving
+     C     mhmvsn        reade     hsp075                                 91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C                   z-add     mdschd        wkschd
+      *
+      * Retrieve origin/destination group info
+      *
+     C                   exsr      $orhgsn
+     C                   exsr      $dnhgsn
+      * Print
+     C                   except    l2dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do receiving
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve/print the Shipping Farm Receipt
+      *---------------------------------------------------------------
+      *
+     C     $shipping     begsr
+      *
+      * Print the section heading lines
+      *
+     C                   except    h3hdr
+      *
+      * Print blank lines to position for the first line of the detail data.
+      *
+     C                   do        4
+     C                   except    blank
+     C                   enddo
+      *
+      * Process movement detail lines
+      *
+     C     mhmvsn        setll     hsp075
+      *
+     C                   dou       *in91 = *on                                  Do shipping
+     C     mhmvsn        reade     hsp075                                 91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C                   z-add     mdschd        wkschd
+      *
+      * Retrieve origin/destination group detail
+      *
+     C                   exsr      $orhgsn
+     C                   exsr      $dnhgsn
+      *
+     C                   except    l3dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do shipping
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve origin group info
+      *---------------------------------------------------------------
+      *
+     C     $orhgsn       begsr
+      *
+     C                   move      *blank        wkorhgcd
+     C                   move      *blank        wkorblcd
+     C                   move      *blank        wkorrmcd
+      *
+     C     mdorsn        chain     hsl034d                            92
+     C                   if        *in92 = *on                                  If hit
+     C                   else
+      *
+     C                   movel     hghgcd        wkorhgcd
+     C                   eval      wkorrmcd = %triml(hgrmcd)
+      *
+     C     ' '           checkr    hgblcd        nbrchar
+     C                   eval      start = 5 - nbrchar + 1
+     C                   eval      %subst(wkorblcd:start) =
+     C                             %subst(hgblcd:1:nbrchar)
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve destination group info
+      *---------------------------------------------------------------
+      *
+     C     $dnhgsn       begsr
+      *
+     C                   move      *blank        wkdnhgcd
+     C                   move      *blank        wkdnrmcd
+     C                   move      *blank        wkdnblcd
+      *
+     C     mddnsn        chain     hsl034d                            92
+     C                   if        *in92 = *on
+     C                   else
+     C                   movel     hghgcd        wkdnhgcd
+     C                   eval      wkdnrmcd = %triml(hgrmcd)
+      *
+     C     ' '           checkr    hgblcd        nbrchar
+     C                   eval      start = 5 - nbrchar + 1
+     C                   eval      %subst(wkdnblcd:start) =
+     C                             %subst(hgblcd:1:nbrchar)
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------
+      * Output specs
+      *-------------------------------------------------------------
+      *
+     Oqprint    e            h1hdr          1  4
+     O                       mhmvsn        z     32
+     O                       mhmvsn        z     91
+      *
+     O          e            h1hdr             6
+     O                       h1desc              30
+     O                       h1reprint           93
+      *
+     O          e            h1hdr             8
+     O                       wkscmdy       y     36
+      *
+     O          e            h1hdr            22
+     O                       h1ormmgcd      b    29
+     O                       h1ormmgnm      b    54
+      *
+     O          e            h1hdr            24
+     O                       h1orpmgcd      b    29
+     O                       h1orpmgnm      b    54
+      *
+     O          e    97      h1hdr            26
+     O                       h1orphone      b    42
+      *
+     O          e            h1hdr            31
+     O                       h1dnmmgcd      b    29
+     O                       h1dnmmgnm      b    54
+      *
+     O          e            h1hdr            33
+     O                       h1dnpmgcd      b    29
+     O                       h1dnpmgnm      b    54
+      *
+     O          e            h1hdr            35
+     O               98      h1dnphone      b    42
+      *
+     O          e            h1hdr            40
+     O                       wkorfscd      z     20
+     O                       wkorfsnm            47
+     O                       wkdnfscd      z     68
+     O                       wkdnfsnm            94
+      *
+      *
+      *---------------------------------------------------------------
+      * Detail line for printing origin/destination data line
+      *---------------------------------------------------------------
+      *
+     O          e            l1dtl          2
+     O                       wkorhgcd            12
+     O                       wkorblcd            18
+     o                                           19 '/'
+     O                       wkorrmcd            24
+     O                       wkschd        k     32
+      *
+     O                       wkdnhgcd            59
+     O                       wkdnblcd            66
+     o                                           67 '/'
+     O                       wkdnrmcd            72
+      *
+      *---------------------------------------------------------------
+      * Receiving Farm Receipt Section--Headings
+      *---------------------------------------------------------------
+      *
+     O          e            h2hdr            58
+     O                       mhmvsn        z     30
+     O                       wkscmdy       y     91
+      *
+     O          e            h2hdr            60
+     O                       wkorfscd      z     20
+     O                       wkorfsnm            47
+     O                       wkdnfscd      z     68
+     O                       wkdnfsnm            94
+      *
+      *---------------------------------------------------------------
+      * Receiving Farm Receipt Section--Detail
+      *---------------------------------------------------------------
+      *
+     O          e            l2dtl          2
+     O                       wkorhgcd            12
+     O                       wkorblcd            18
+     o                                           19 '/'
+     O                       wkorrmcd            24
+     O                       wkschd        k     32
+      *
+     O                       wkdnhgcd            59
+     O                       wkdnblcd            66
+     o                                           67 '/'
+     O                       wkdnrmcd            72
+      *
+      *---------------------------------------------------------------
+      * Shipping Farm Receipt Section--Headings
+      *---------------------------------------------------------------
+      *
+     O          e            h3hdr            73
+     O                       mhmvsn        z     30
+     O                       wkscmdy       y     91
+      *
+     O          e            h3hdr            75
+     O                       wkorfscd      z     20
+     O                       wkorfsnm            47
+     O                       wkdnfscd      z     68
+     O                       wkdnfsnm            94
+      *
+      *---------------------------------------------------------------
+      * Shipping Farm Receipt Section--Detail
+      *---------------------------------------------------------------
+      *
+     O          e            l3dtl          2
+     O                       wkorhgcd            12
+     O                       wkorblcd            18
+     o                                           19 '/'
+     O                       wkorrmcd            24
+     O                       wkschd        k     32
+      *
+     O                       wkdnhgcd            59
+     O                       wkdnblcd            66
+     o                                           67 '/'
+     O                       wkdnrmcd            72
+      *
+      *---------------------------------------------------------------
+      * Print a blank line
+      *---------------------------------------------------------------
+      *
+     O          e            blank          1
+      /EJECT

@@ -1,0 +1,876 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HPS Data Mart
+      * PROGRAM:     HP246 - Download: Market Selector
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     05/29/01
+      *
+      * FUNCTION:    This program builds a file of HPS  data that
+      *              will be FTP'd to the Pork Intranet Site on a nightly
+      *              basis.
+      *
+      *              There is no display file. The CLP (HP246CL) simply
+      *              extracts data from HPS based on the system date.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/28/01  LeAnne Fedor
+      *           Added 100 new fields to file: 50 sire line fields with
+      *           the corresponding percents.  Also, added 'production phase'.
+      *           Added BGF farms for wean pig projections.
+      *
+      * 01/22/02  Alice
+      *           1. Changed Group logic to omit Nursery groups that opened in the
+      *              current week.
+      *           2. Changed BGF logic to send ALL records....not just 19 weeks of data.
+      *           3. Changed BGF logic to be based on a 19-week (133 days)
+      *              breed-to-wean timeframe.
+      *
+      * 03/07/02  LeAnne Fedor
+      *           Removed the 100 sire line fields added on 11/28/01.
+      *
+      * 06/26/02  LeAnne Fedor
+      *           Changed logic for 'weighted open date'.
+      *
+      * 09/26/02  LeAnne Fedor
+      *           Changed logic for head/pounds for Sales. We will now go against the
+      *           Sales Movement files; prior to this change, we used the Check Detail
+      *           file to get the sales head/pounds.
+      *
+      * 12/29/02  LeAnne Fedor
+      *           Added 3 new fields to group file:
+      *                group type
+      *                stayed/moved code
+      *                stocking density code
+      *
+      * 01/12/04  LeAnne Fedor
+      *           Per Brad Hamilton, changed logic to exclude CULL Sales.
+      *
+      * 09/13/04  LeAnne Fedor
+      *           Recompile only. New Projected Wean fields were added to the
+      *           Datamart file.
+      *
+      * 04/11/06  LeAnne Fedor
+      *           Per Brad Hamilton, use "live" head/pounds instead of "shipped"
+      *           values when retrieving the "sales" info.
+      *
+      * 05/16/06  LeAnne Fedor
+      *           Per Brad Hamilton, use "shipped" head/pounds when status is 'SH'
+      *           otherwise, use "live" for the "sales" info.
+      *
+      * 09/20/06  LeAnne Fedor
+      *           Added a new field to group file:
+      *                origin BGF pod
+      *
+      * 08/10/07  LeAnne Ramsey
+      *           Recompile only. New "target" fields renamed in the Datamart Group
+      *           Header file.
+      *
+      * 09/21/07  LeAnne Ramsey
+      *           Recompile only. New "target" fields added/removed in the Datamart Group
+      *           Header file.
+      *
+      * 04/10/08  LeAnne Ramsey
+      *           Per John Zimmerman, override Cell 5 to be Cell 4 in the download files.
+      *           Sunray Feed Mill is causing a problem in the pc functions. This hardcoded
+      *           override will be temporary--just until the new programmer can change/fix
+      *           the pc functions. (FYI: They do not want to change the cell in HPS.)
+      *
+      * 07/02/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 10/18/10  LeAnne Ramsey  (E1079)
+      *           Recompile only. Sire Line Company is now 2-characters instead
+      *           of one.
+      *
+      * 05/20/11  LeAnne Ramsey (E1557)
+      *           Recompile only. Added Yard Dead to HSJ085E.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 09/08/16  Danny Nguyen (E7186)
+      *           Per John Zimmerman, we can remove the override of Cell 5 to be Cell 4 for
+      *           the download file.
+      *
+      * 10/14/16  Barb Gutierrez
+      *           Recompile only. Added fields Sold days in phase, Avg Sold days in phase,
+      *           Wgt open date, and company number to HPPF034.         E6136
+      *
+      * 03/26/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /eject
+      **************************************************************************************
+      * FILE SPECIFICATIONS
+      **************************************************************************************
+      *
+     Fhsp018    if   e           k disk
+      *    Farm site
+      *
+      *
+     Fhsp034    if   e           k disk
+      *    Hog group
+      *    (records selected with open query)
+      *
+      *
+     Fhsl038e   if   e           k disk
+      *    Feed ticket detail (key fields set in CL with override)
+      *
+      *
+     Fhsp074    if   e           k disk
+      *  Transfer movement header
+      *
+      *
+     Fhsj075i   if   e           k disk
+      *  Transfer movement detail + Transfer movement header
+      *
+      *
+     Fhsj085e   if   e           k disk
+      *  Sale movement detail + Sales movement header
+      *
+      *
+     Fhppf034   if   e           k disk    rename(hgrec:hgrecf) prefix(p1)
+      *   Datamart FIN: Group header
+      *
+      *
+     Fhplb192a  if   e           k disk
+      *  Datamart BGF: Wean pig projections
+      *
+      *
+     Fhsp246    o    e           k disk
+      *   Download: Market selector
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D procfl          s              1
+      *
+      *
+      * Workfields
+      *
+     D wktihd          s                   like(gpihd)
+      *
+     D wkrchd          s                   like(gpihd)
+     D wkhd            s                   like(gpihd)
+     D wkdays          s              3  0
+     D wkpercent       s              7  4
+     D wkfld           s              7  4
+     D wkresult        s              7  4
+     D wkfactor        s              3  0
+      *
+     D wkalphsvwk      s              2
+     D wkalphfscd      s              5
+      *
+     D wkopyr          s                   like(xxcdyr)
+     D wkopwk          s                   like(xxcdwk)
+     D wkcuyr          s                   like(xxcdyr)
+     D wkcuwk          s                   like(xxcdwk)
+      *
+      *
+      * Parms
+      *
+     D xxccyymmdd      s                   like(hgopdt)
+      *
+     D xxreturn        s              7a
+     D xxcocd          s              3  0 inz(350)
+     D xxcyymmddi      s              7  0
+     D xxjulian        s              5  0
+     D xxacyr          s              4  0
+     D xxacpe          s              2  0
+     D xxacwk          s              2  0
+     D xxday           s              1a
+     D xxwk            s              2  0
+     D xxpicdt         s              5  0
+     D xxcdyr          s              4  0
+     D xxcdwk          s              2  0
+      *
+      *
+      * Define parms for the generic movement program
+      *
+     D zzcymd          s              8  0
+      *
+     D @@nu50          s              5  0
+     D gpihd           s                   like(@@nu50)
+     D pinhd           s                   like(@@nu50)
+     D tinhd           s                   like(@@nu50)
+     D tisphd          s                   like(@@nu50)
+     D tidphd          s                   like(@@nu50)
+     D pouhd           s                   like(@@nu50)
+     D touhd           s                   like(@@nu50)
+     D tosphd          s                   like(@@nu50)
+     D todphd          s                   like(@@nu50)
+     D rinhd           s                   like(@@nu50)
+     D rouhd           s                   like(@@nu50)
+     D qinhd           s                   like(@@nu50)
+     D qouhd           s                   like(@@nu50)
+     D morhd           s                   like(@@nu50)
+     D inahd           s                   like(@@nu50)
+      *
+     D @@nu92          s              9  2
+     D pinlb           s                   like(@@nu92)
+     D tinlb           s                   like(@@nu92)
+     D tisplb          s                   like(@@nu92)
+     D tidplb          s                   like(@@nu92)
+     D poulb           s                   like(@@nu92)
+     D toulb           s                   like(@@nu92)
+     D tosplb          s                   like(@@nu92)
+     D todplb          s                   like(@@nu92)
+     D rinlb           s                   like(@@nu92)
+     D roulb           s                   like(@@nu92)
+     D qinlb           s                   like(@@nu92)
+     D qoulb           s                   like(@@nu92)
+     D morlb           s                   like(@@nu92)
+      *
+      *
+      *
+      * Workfields for dates
+      *
+     D wkisoopdt       s               D   datfmt(*iso)
+     D wkisorcdt       s               D   datfmt(*iso)
+     D wkcymdiso       s               D   datfmt(*iso)
+      *
+     D wkccyymmdd      s              8  0
+     D wkyymmdd        s              6  0
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Process Nursery and Grow Finish Groups
+      *
+     C                   exsr      $groups
+      *
+      * Process BGF farms
+      *
+     C                   exsr      $bgffarms
+      *
+     C                   seton                                        lr
+      /eject
+      *----------------------------------------------------------------------
+      * Process groups selected by open query
+      *----------------------------------------------------------------------
+      *
+     C     $groups       begsr
+      *
+      * Read the hog group master file. (Records were selected with open
+      * query. But, add 1 additional selection to limit Nursery groups to
+      * open groups only.)
+      *
+     C                   dou       *in90 = *on                                  Do groups
+     C                   read      hsp034                                 90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             (hgppcd = 'GF   ' or
+     C                             (hgppcd = 'NUR  ' and hggscd = 'OP'))
+      *
+      * Move the incoming parm of system date to 'as of date'.
+      *
+     C                   z-add     xxccyymmdd    d3asofdt
+      *
+      *
+      * If this is a Nursery group, make an additional 'opened week' check
+      * to determine if you want to process the group.
+      *
+     C                   if        hgppcd = 'NUR  '
+     C                   exsr      $nursery
+     C                   else
+     C                   move      yes           procfl
+     C                   endif
+      *
+      * If you are processing this group
+      *
+     C                   if        procfl = yes                                 If process
+      *
+      * Perform the following:
+      *     1) Setup fields that map directly from the HPS Hog Group file
+      *     2) Retrieve Origin BGF Pod from the Datamart file
+      *     3) Retrieve farm site name
+      *
+     C                   exsr      $directmap
+     C                   exsr      $obpod
+     C                   exsr      $fsnm
+      *
+      *
+      * Retrieve/calculate the following data:
+      *     1) Transfer in and current inventory
+      *     2) Adjusted transfers in
+      *     3) Sales--live head and pounds
+      *     4) Date of last market sale for group
+      *     5) Feed
+      *
+     C                   exsr      $tran
+     C                   exsr      $adjtran
+     C                   exsr      $sales
+     C                   exsr      $market
+     C                   exsr      $feed
+      *
+      * Now, do a bunch of stuff to arrive at the 'weighted open date'
+      *
+     C                   exsr      $wtopdt
+      *
+      * Temporary override of Cell 5 to be Cell 4.
+      * E7186-Removed override of Cell 5 to be Cell 4.
+E7186C***                if        d3cell = 5
+E7186C***                z-add     4             d3cell
+E7186C***                endif
+      *
+     C                   write     d3rec
+     C                   endif                                                  If process
+      *
+     C                   clear                   d3rec
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do groups
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------
+      * Check if this Nursery group opened this week
+      *----------------------------------------------------------------------
+      *
+      * Nursery groups that Opened in the current week will be excluded from processing.
+      *
+     C     $nursery      begsr
+      *
+      * Determine the calendar year/week associated with the group's open date.
+      *
+     C                   z-add     hgopdt        wkccyymmdd
+     C                   exsr      $synon
+     C                   z-add     xxcdyr        wkopyr
+     C                   z-add     xxcdwk        wkopwk
+      *
+      *
+      * Nursery groups that Opened in the current week will be excluded from processing.
+      * Set the process flag.
+      *
+     C                   select
+     c                   when      wkopyr <>  wkcuyr
+     C                   move      yes           procfl
+     c                   when      wkopwk <>  wkcuwk
+     C                   move      yes           procfl
+     C                   other
+     C                   move      no            procfl
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------
+      * Setup and format fields that map directly from the HPS Hog Group file
+      *----------------------------------------------------------------------
+      *
+     C     $directmap    begsr
+      *
+     C                   movel(p)  hghgcd        d3ds
+     C                   z-add     hgfscd        d3fscd
+     C                   movel     hgblcd        d3blcd
+     C                   movel     hgsxcd        d3sxcd
+     C                   movel     hgppcd        d3ppcd
+     C                   movel     hgsdcd        d3sdcd
+     C                   movel     hgsmcd        d3smcd
+     C                   movel     hggtcd        d3gtcd
+      *
+      * Set open date up as an iso date
+      *
+     C                   movel     hgopdt        wkisoopdt
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------
+      * Retrieve Origin BGF Pod from Datamart file
+      *------------------------------------------------------------------------
+      *
+     C     $obpod        begsr
+      *
+     C     hghgcd        chain     hppf034                            92
+     C                   if        *in92 = *off
+     C                   z-add     p1hgobpod     d3obpod
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------
+      * Retrieve feed for the group
+      *------------------------------------------------------------------------
+      *
+     C     $feed         begsr
+      *
+     C     hghgsn        setll     hsl038e
+      *
+     C                   dou       *in91 = *on                                  Feed loop
+     C     hghgsn        reade     hsl038e                                91
+     C                   if        *in91 = *off                                 If not EOF
+     C                   add       fdfdlb        d3fdlb
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Feed loop
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------
+      * Retrieve farm site name
+      *----------------------------------------------------------------------
+      *
+     C     $fsnm         begsr
+      *
+     C     hgfscd        chain     hsp018                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   move      fsfsnm        d3fsnm
+     C                   z-add     fscell        d3cell
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve transfer in head and current inventory head
+      *---------------------------------------------------------------
+      *
+     C     $tran         begsr
+      *
+     C                   movel     xxccyymmdd    zzcymd
+     C                   call      'HPMOVE'      plist01
+     C                   z-add     tinhd         wktihd
+      *
+      * Populate current inventory head.
+      *
+     C                   z-add     gpihd         d3hd
+      *
+      * Calculate the average pounds transferred in to the group
+      *
+     C                   if        tinhd <> 0                                   If trans in
+     C     tinlb         div(h)    tinhd         d3inavlb
+     C                   endif                                                  If trans in
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculate the 'adjusted transfer in' head as transfers in less
+      * transfers out in the first 7 days.
+      *---------------------------------------------------------------
+      *
+     C     $adjtran      begsr
+      *
+      * Add 7 days to group's open date.
+      *
+     C     wkisoopdt     adddur    7:*days       wkcymdiso
+      *
+      * Retrieve transfers out and calculate adjusted transfers in
+      *
+     C                   movel     wkcymdiso     zzcymd
+     C                   call      'HPMOVE'      plist01
+     C     wktihd        sub       touhd         d3ajtihd
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve sales info  (exclude Cull Sales)
+      *---------------------------------------------------------------
+      *
+     C     $sales        begsr
+      *
+     C     hghgsn        setll     hsj085e
+      *
+     C                   dou       *in93 = *on                                  Do sales
+     C     hghgsn        reade     hsj085e                                93
+     C                   if        *in93 = *off and                             If sale
+     C                             shstcd <> 'CULLS'
+      *
+     C                   select
+     C                   when      shmscd = 'SC'
+      *
+     C                   when      shmscd = 'SH'
+     C                   add       sgshhd        d3lvhd
+     C                   add       sgshlb        d3lvlb
+     C                   other
+      *
+     C                   add       sglvhd        d3lvhd
+     C                   add       sglvlb        d3lvlb
+     C                   endsl
+      *
+     C                   endif                                                  If sale
+     C                   enddo                                                  Do sales
+      *
+      * Calculate average live weight from sales
+      *
+     C                   if        d3lvhd <> 0
+     C     d3lvlb        div       d3lvhd        d3avlvlb
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve date of last market sale for group
+      *---------------------------------------------------------------
+      *
+     C     $market       begsr
+      *
+     C     hghgsn        setll     hsj085e
+      *
+     C                   dou       *in93 = *on                                  Do market sale
+     C     hghgsn        reade     hsj085e                                93
+     C                   if        *in93 = *off and shrcdt > d3rcdt             If sale
+     C                             and shstcd = 'MRKTS'
+     C                   z-add     shrcdt        d3rcdt
+     C                   endif                                                  If sale
+     C                   enddo                                                  Do market sale
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculate the weighted open date for each group
+      *---------------------------------------------------------------
+      *
+     C     $wtopdt       begsr
+      *
+      * Accumulate the some head received into the group during its life
+      *
+     C                   exsr      $rchd
+      *
+      * Reread the 'transfer in' detail records performing detail calculations
+      *
+     C                   exsr      $detail
+      *
+     C     wkisoopdt     adddur    wkfactor:*d   wkcymdiso
+     C                   movel     wkcymdiso     d3wtopdt
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Accumulate some of the head received into the group
+      *---------------------------------------------------------------
+      *
+      *  Received head includes: quality + reject head that were received into the group
+      *
+      *
+     C     $rchd         begsr
+      *
+     C                   z-add     0             wkrchd
+     C     hghgsn        setll     hsj075i
+      *
+     C                   dou       *in91 = *on                                  Do received in
+     C     hghgsn        reade     hsj075i                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * NOTE:  For Nursery groups, use only transfers in from BGF groups
+      *        For Grow Finish groups, use only transfers in from Nursery groups
+      *
+     C                   if        (hgppcd = 'NUR  ' and
+     C                              mhorpp = 'BGF  ') or
+     C                             (hgppcd = 'GF   ' and
+     C                              mhorpp = 'NUR  ')
+     C                   add       mdqlhd        wkrchd
+     C                   add       mdrjhd        wkrchd
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do received in
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------------
+      * Perform detail processing/calculations on transfers in
+      *------------------------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+     C                   z-add     0             wkresult
+      *
+      * Read the transfer movement detail records for transfers into the group.
+      *
+     C     hghgsn        setll     hsj075i
+      *
+     C                   dou       *in91 = *on                                  Do received in
+     C     hghgsn        reade     hsj075i                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * NOTE:  For Nursery groups, use only transfers in from BGF groups
+      *        For Grow Finish groups, use only transfers in from Nursery groups
+      *
+     C                   if        (hgppcd = 'NUR  ' and                        If go ahead
+     C                              mhorpp = 'BGF  ') or
+     C                             (hgppcd = 'GF   ' and
+     C                              mhorpp = 'NUR  ')
+      *
+     C     mdqlhd        add       mdrjhd        wkhd
+      *
+      * For each transfer movement detail record,
+      * Calculate the percent of total received head represented by each
+      * record. (Leave the result as a rate. IE: 20% will be .20)
+      *
+     C                   if        wkrchd <> 0
+     C     wkhd          div       wkrchd        wkpercent
+     C                   else
+     C                   z-add     0             wkpercent
+     C                   endif
+      *
+      * Calculate the elapsed days between the group's open date and the
+      * received date of the transfer movement.
+      *
+     C                   exsr      $days
+      *
+      * Multiple the elapsed days times the rate. Accumulate the result.
+      *
+     C     wkdays        mult      wkpercent     wkfld
+     C                   add       wkfld         wkresult
+      *
+     C                   endif                                                  If go ahead
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do received in
+      *
+      * You have now processed all detail records for the group. Round the
+      * accumulated result field into a whole number that will be used as the
+      * weighting factor.
+      *
+     C                   z-add(h)  wkresult      wkfactor
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------
+      * Calculate the elapsed days between the group's open date and the received date
+      *--------------------------------------------------------------------------------
+      *
+     C     $days         begsr
+      *
+     C                   z-add     0             wkdays
+      *
+      * Retrieve movement header to get received date
+      *
+     C     mdmvsn        chain     hsp074                             92
+     C                   if        *in92 = *off                                 If header
+      *
+      * Test received date for a valid date. If it is valid, find the
+      * days difference between it and the group's open date.
+      *
+     C     *iso          test(d)                 mhrcdt                 92
+     C                   if        *in92 = *off                                 If valid date
+     C                   movel     mhrcdt        wkisorcdt
+     C     wkisorcdt     subdur    wkisoopdt     wkdays:*d
+     C                   endif                                                  If valid date
+      *
+     C                   endif                                                  If header
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Process BGF farms for wean pig projections
+      *---------------------------------------------------------------
+      *
+      * We are going to read all records for each BGF farm that has any
+      * data on/after the current week in the Datamart Wean Pig Projections file.
+      *
+     C     $bgffarms     begsr
+      *
+     C     *loval        setll     hsp018
+      *
+     C                   dou       *in90 = *on                                  Do BGF farms
+     C                   read      hsp018                                 90
+     C                   if        *in90 = *off and fsppcd = 'BGF  '            If not EOF
+      *
+     C     key01         setll     hplb192a                               92
+     C                   if        *in92 = *on                                  If wean pigs
+      *
+     C                   clear                   d3rec
+     C                   z-add     xxccyymmdd    d3asofdt
+     C                   z-add     fsfscd        d3fscd
+     C                   z-add     fscell        d3cell
+     C                   move      fsfsnm        d3fsnm
+     C                   move      fsppcd        d3ppcd
+      *
+     C                   exsr      $weanpigs
+     C                   endif                                                  If wean pigs
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do BGF farms
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write wean pig records for the BGF farm
+      *---------------------------------------------------------------
+      *
+     C     $weanpigs     begsr
+      *
+     C                   dou       *in91 = *on                                  Wean pig loop
+     C     fsfscd        reade     hplb192a                               91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * Predicted wean head
+     C                   z-add     wpwnhd        d3projhd
+      *
+      * Calculate the Service Year/Week (alias: breed year/week) to be
+      * 19 weeks prior the the calendar year/week in the file.
+      *
+     C                   exsr      $svyrwk
+      *
+      * Concatenate a description that is: BGF + week + farm site code
+      *
+     C                   movel     d3svwk        wkalphsvwk
+     C                   movel     d3fscd        wkalphfscd
+      *
+     C                   eval      d3ds = 'BGF' + %trim(wkalphsvwk) +
+     C                                     %trim(wkalphfscd)
+      *
+      * Temporary override of Cell 5 to be Cell 4.
+      * E7186-Removed override of Cell 5 to be Cell 4.
+E7186C***                if        d3cell = 5
+E7186C***                z-add     4             d3cell
+E7186C***                endif
+      *
+     C                   write     d3rec
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Wean pig loop
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculate the service year/week
+      *---------------------------------------------------------------
+      *
+     C     $svyrwk       begsr
+      *
+      * Calculate the service date as 19 weeks (133 days) prior to the week-ending
+      * date in the file.
+      *
+     C     wpwndt        subdur    133:*days     wkcymdiso
+     C                   move      wkcymdiso     wkccyymmdd
+     C                   exsr      $synon
+     C                   z-add     xxcdyr        d3svyr
+     C                   z-add     xxcdwk        d3svwk
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Retrieve the HPS calendar year/week associated with a date from OMS calendar file
+      *----------------------------------------------------------------------------------
+      *
+     C     $synon        begsr
+      *
+      * You will be calling a SYNON program. You must send input parms of 1) company number
+      * and 2) date in the SYNON format of CYYMMDD.
+      *
+     C                   z-add     wkccyymmdd    wkyymmdd
+     C                   if        wkccyymmdd >= 20000000
+     C     wkyymmdd      add       1000000       xxcyymmddi
+     C                   else
+     C                   z-add     wkyymmdd      xxcyymmddi
+     C                   endif
+      *
+     C                   call      'POF3XFR'
+     C                   parm      *blank        xxreturn
+     C                   parm      350           xxcocd
+     C                   parm                    xxcyymmddi
+     C                   parm      0             xxjulian
+     C                   parm      0             xxacyr
+     C                   parm      0             xxacpe
+     C                   parm      0             xxacwk
+     C                   parm      *blank        xxday
+     C                   parm      0             xxwk
+     C                   parm      0             xxpicdt
+     C                   parm      0             xxcdyr
+     C                   parm      0             xxcdwk
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      *
+      * Parm lists
+      *
+     C     *entry        plist
+     C                   parm                    xxccyymmdd
+      *
+      * Determine the calendar year/week associated with the incoming system date.
+      *
+     C                   z-add     xxccyymmdd    wkccyymmdd
+     C                   exsr      $synon
+     C                   z-add     xxcdyr        wkcuyr
+     C                   z-add     xxcdwk        wkcuwk
+      *
+      *
+     C     plist01       plist
+     C                   parm                    hghgsn
+     C                   parm                    zzcymd
+      * Head
+     C                   parm                    gpihd                          GROUP INV
+     C                   parm                    pinhd                          PIG IN
+     C                   parm                    tinhd                          TRSF IN
+     C                   parm                    tisphd                         SAME PHASE
+     C                   parm                    tidphd                         DIFF PHASE
+     C                   parm                    pouhd                          PIGS OUT
+     C                   parm                    touhd                          TRSF OUT
+     C                   parm                    tosphd                         SAME PHASE
+     C                   parm                    tosphd                         DIFF PHASE
+     C                   parm                    rinhd                          REJECT IN
+     C                   parm                    rouhd                          REJECT OUT
+     C                   parm                    qinhd                          QUALITY IN
+     C                   parm                    qouhd                          QUALITY OUT
+     C                   parm                    morhd                          MORTALITY
+     C                   parm                    inahd                          INV ADJ
+      * Pounds
+     C                   parm                    pinlb                          PIG IN
+     C                   parm                    tinlb                          TRSF IN
+     C                   parm                    tisplb                         SAME PHASE
+     C                   parm                    tidplb                         DIFF PHASE
+     C                   parm                    poulb                          PIG OUT
+     C                   parm                    toulb                          TRSF OUT
+     C                   parm                    tosplb                         SAME PHASE
+     C                   parm                    todplb                         DIFF PHASE
+     C                   parm                    rinlb                          REJECT IN
+     C                   parm                    roulb                          REJECT OUT
+     C                   parm                    qinlb                          QUALITY IN
+     C                   parm                    qoulb                          QUALITY OUT
+     C                   parm                    morlb                          MORTALITY
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    fsfscd
+     C                   kfld                    wkcuyr
+     C                   kfld                    wkcuwk
+      *
+      *
+     C                   endsr
+      /eject

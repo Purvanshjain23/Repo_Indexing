@@ -1,0 +1,551 @@
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Resource Optimization
+      * PROGRAM:     RO222
+      * TITLE:       Byproduct Splits  (BP1 BP3 BP5 BP6 BP7 OFF)  (FG only)
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     04/20/07
+      *
+      * FUNCTION:    This program is probably more an "unsplit" than a "split" program.
+      *              It is bringing pounds/$$$ of the Produced Component Items back to the
+      *              Item Structure/Meat Cost Group of the Item itself.
+      *
+      *              It then creates Product Exception records to add/subtract from the
+      *              appropriate Groups.
+      *
+      *              Only Finished Goods Items are processed here.
+      *
+      ***************************************************************************************
+      * MODIFICATIONS:
+      ***************************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 06/12/07  LeAnne Ramsey
+      *           Since we now can have zero "pounds" in this system (prior to this we
+      *           forced a '1' into Produced Pounds, we tweaked the code to prevent
+      *           "divide by zero" errors.
+      *
+      * 08/02/07  LeAnne Ramsey
+      *           We do not want to process any 'Work in Process' items in this program.
+      *
+      * 11/28/07  Alice Brownfield
+      *           Added logic for the new fields
+      *           1.  Produced Start Weight fields
+      *           2.  Pump Yield
+      *
+      * 12/04/07  Alice Brownfield
+      *           Changed in PRODUCTION because we were in the middle of another change
+      *                   in DEVELOPMENT.
+      *           Changed to re-calc Packaging & Labor costs/LB on the summary record.
+      *
+      * 12/05/07  LeAnne Ramsey
+      *           The code is not updating the summary and exception records correctly
+      *           on the "other side of the split" (the negative side). Apparently, the
+      *           key fields are wrong for KEY05 and KEY07.
+      *
+      * 01/24/08  Alice Brownfield
+      *           Added modification comments for 12/4/07 change--no actual source changes
+      *
+      * 01/25/08  Alice Brownfield
+      *           Changed to include BP7's as well as BP1's.
+      *
+      * 02/19/08  Alice Brownfield
+      *           Changed to include BP6's.  also change to NOT write other side of the
+      *           split if the component item's Meat Cost Group is FAT - Previously
+      *           it was only checking for BNIN.
+      *
+      * 02/20/08  Alice Brownfield
+      *           Changed to use the Price for the summary record if it is BP6 even if it
+      *           is BNIN.  Previously all BNIN used the Detail item's net price
+      *
+      * 06/05/08  LeAnne Ramsey
+      *           Removed the TF Byproduct Mix Summary file and logic from this program.
+      *           New fields (Ingredient and Other Cost) added to multiple files.
+      *
+      * 06/12/08  Alice Brownfield
+      *           Changed to write "split" records to the Product Exception file (tfp019)
+      *           instead of directly to the ROP122 Byproduct Detail file.
+      *
+      * 09/11/08  LeAnne Ramsey
+      *           Recompile only. Export/Domestic Flag was added to TFP010-
+      *           Weekly Product Revenue Detail file.
+      *
+      * 11/21/08  LeAnne Ramsey
+      *           As part of synchronizing the LDAs between the TFS Margin Adjustment Close
+      *           and the Meat Costing, we changed the LDA positions.
+      *
+      * 03/24/09  LeAnne Ramsey
+      *           Changed to include OFF's per Damon Ginther.
+      *
+      * 04/02/09  LeAnne Ramsey
+      *           Recompile only. Field 'Producing Company' added to Byproduct Detail.
+      *
+      * 01/04/10  LeAnne Ramsey
+      *           Per Damon Ginther, we will now include BP3 INSH and OUSH (except Items
+      *           12721, 12730, 12740, 79810---which are handled in RO229.)
+      *
+      * 03/03/10  LeAnne Ramsey
+      *           Per Damon Ginther, they have a new BP5 Item (28037). They want to "split"
+      *           it using its BOM. According to Damon, it should work like the BP1s.
+      *
+      * 02/07/11  LeAnne Ramsey  (E1298)
+      *           Damon G. is having us use a different formula when calc'ing Split Pounds
+      *           for Items where the Yield% is not 100%.
+      *           (Note: Companion code for StartWeight was added to RO221.)
+      *
+      * 03/10/11  LeAnne Ramsey  (C1416)
+      *           Damon G. realized that we need to calc the Agg Net Produced Price/Lb
+      *           for all the BNIN items the same way that we are currently doing for the
+      *           BNIN BP6 items. (See $split)
+      *
+      * 09/19/11  LeAnne Ramsey (E1748)
+      *           Damon G. had us remove all hardcoded logic for Items 12721, 12730, 12740 and
+      *           79810. He has changed the SalesYld% for these in the BOM; so, they flow thru
+      *           MeatCosting without any special processing.
+      *
+      * 11/14/17  Danny Nguyen  (R12011A-Weekly Product Revenue)
+      *           Recompile only. Added 25 STF fields to TFP010 file.
+      *
+      * 05/17/22  Danny Nguyen  (DO2484 - WI 479 STF Variance Reporting)
+      *           Recompile only. Added 2 STF fields to TFP010 file.
+      *           PRXYPC   - STF STD YIELD %
+      *           PRXPMPPC - STF PUMP %
+      *
+      * W105621 RMC 10/10/2022 INCREASE FIELD SIZES TO HANDLE PRICES > 999.99
+      *         CHANGE @@ANPRPR TO SIZE 10.6
+      *           CHANGES PRANPRPR IN TFP010
+      *
+      /EJECT
+      ***************************************************************************************
+      * FILE SPECIFICATION
+      ***************************************************************************************
+      *
+     fpdiorel4  if   e           k disk
+      *  Item bill of material
+      *  (LF selects Active/Produced Items)
+      *
+      *
+     frol122a   if   e           k disk    rename(ydrec:ydreca) prefix(p3)
+      *  Byproduct detail
+      *
+      *
+     frol122b   if   e           k disk    rename(ydrec:ydrecb) prefix(p1)
+      *  Byproduct detail
+      *
+      *
+     frol122f   if   e           k disk    rename(ydrec:ydrecf) prefix(p2)
+      *  Byproduct detail
+      *
+      *
+     ftfp010    if   e           k disk
+      *  Weekly product revenue detail
+      *
+      *
+     ftfp019    o    e           k disk
+      *  Product exceptions
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Workfields
+      *
+     d wkitcd          s              7
+     d wksypcrt        s              9  6
+     d wkioboprrt      s              9  6
+     d wkam            s                   like(p1ydapuam)
+     d wklb            s                   like(p1ydapulb)
+      *
+      * Aggregate
+     d wkapulb         s                   like(p1ydapulb)
+     d wkanpupr        s                   like(p1ydnpupr)
+      *
+      * Seaboard
+     d wkspulb         s                   like(p1ydapulb)
+     d wkspuam         s                   like(p1ydapuam)
+      *
+      * Triumph
+     d wktpulb         s                   like(p1ydapulb)
+     d wktpuam         s                   like(p1ydapuam)
+      *
+      *
+      * Parms
+      *
+     D xxsn            s                   like(pepesn)
+     D xxpfcd          s              1
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwedt                29     36  0
+      *
+     D  ldcono                82     84  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      **********************************************************************************
+      * Mainline
+      **********************************************************************************
+      *
+      * Read each record in the Byproduct Detail file for this Week.
+      * Process a record when:
+      *   1) TF Classification Code is:
+      *         BP1-Loin Credits, BP6-MISC, BP7-Trim Blend, OFF-Offal or
+      *         BP3-Ham Credits Meat Cost Groups INSH/OUSH
+      *         BP5 Item 28037-Pk Bnls Pic Cush Meat 92%
+      *   2) The Item is a Finished Good (no WIPs)
+      *   3) Sales Yield % is not 100 and is NOT 0
+      *   4) Aggregate Produced pounds are NOT 1 and NOT 0
+      *
+     C     ldwedt        setll     rol122b
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C     ldwedt        reade     rol122b                                90
+     C                   if        *in90 = *off and                             If process
+     C                             (p1ydtfclcd  = 'BP1' or
+     C                              p1ydtfclcd  = 'BP6' or
+     C                              p1ydtfclcd  = 'BP7' or
+     C                              p1ydtfclcd  = 'OFF' or
+      *
+     C                              (p1ydtfclcd = 'BP3' and
+     C                                (p1ydcgcd = 'INSH' or p1ydcgcd = 'OUSH'))
+      *
+     C                             or (p1ydtfclcd = 'BP5' and p1yditcd = 28037))
+      *
+     C                             and p1ydittycd = 'FG'
+     C                             and p1ydsypc <> 100 and p1ydsypc <> 0
+     C                             and p1ydapulb <> 1 and p1ydapulb <> 0
+      *
+      * Read the BOM file for this Item to find all "P"roduced records
+      * (other then itself) so we can determine what other Meat Cost Groups
+      * we need to move pounds to/from. Only process records where the
+      * Sales Yield % is not zero.
+      *
+     C     key01         setll     pdiorel4
+     C                   dou       *in91 = *on                                  Do BOM
+     C     key01         reade     pdiorel4                               91    If not EOF
+     C                   if        *in91 = *off and
+     C                             ioc9nb <> p1yditcd and
+     C                             iobopr <> 0
+      *
+      * Retrieve the Byproduct Detail record for this:
+      *    WeekEnding Date
+      *    Component Item
+      * If you get a record, do "Split" logic.
+      *
+     C     key02         chain     rol122a                            92
+     C                   if        *in92 = *off
+     C                   exsr      $split
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  DO BOM
+      *
+     C                   endif                                                  If process
+     C                   enddo                                                  Main do
+      *
+      * EOF processing
+     C                   seton                                        lr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Split logic
+      *-----------------------------------------------------------------------------------
+      *
+     C     $split        begsr
+      *
+      * Calc the Aggregate Net Produced Price/Lb by:
+      *    summing up the ByProduct Detail records for the Meat Cost Group/Item Structure
+      *      the Meat Cost Group/Item Structure
+      *
+     C                   exsr      $price
+      *
+      * Get the Yield %'s into "rates":
+      *   1) Yield % from the original Item
+      *   2) Yield % from the BOM Component Item
+      *
+     C                   eval      wksypcrt = p1ydsypc / 100
+     C                   eval      wkioboprrt = iobopr / 100
+      *
+      * Calc the Pounds difference using these Yield Rates
+      * (NOTE: As of Feb 2011, we use StartWeight in the calc when the Yld% is not
+      *  100% and Pump% is not 0%. Otherwise, we use the original formula which
+      *  uses Produced Pounds.)
+      *
+     C                   select
+     C                   when      wksypcrt <> 1 and p1ydpumppc <> 0
+     C                   eval(h)   wkspulb = (p1ydspuslb /wksypcrt) * wkioboprrt
+     C                   eval(h)   wktpulb = (p1ydtpuslb /wksypcrt) * wkioboprrt
+     C                   eval(h)   wkapulb = (p1ydapuslb /wksypcrt) * wkioboprrt
+     C                   other
+     C                   eval(h)   wkspulb = (p1ydspulb / wksypcrt) * wkioboprrt
+     C                   eval(h)   wktpulb = (p1ydtpulb / wksypcrt) * wkioboprrt
+     C                   eval(h)   wkapulb = (p1ydapulb / wksypcrt) * wkioboprrt
+     C                   endsl
+      *
+      * Calc the $$$ difference using the Aggregate Price of the Component
+      * Meat Cost Group
+      *
+     C                   eval(h)   wkspuam = wkspulb * wkanpupr
+     C                   eval(h)   wktpuam = wktpulb * wkanpupr
+      *
+      * IF there ARE any aggregate pounds,
+      *    Setup the fields that are common to both records
+      *    Write an Exception record for the original item
+      *    If not BNIN or FAT, write the other side of the split
+      *
+     C                   if        wkapulb <> 0                                 If pounds
+     C                   exsr      $common
+     C                   exsr      $wrt019a
+      *
+      *    If the Component Item Meat Cost Group is NOT BNIN or FAT
+      *    write the other side (the reverse side) of the split:
+      *
+     C                   if        p3ydcgcd <> 'BNIN' and p3ydcgcd <> 'FAT'
+     C                   exsr      $wrt019b
+     C                   endif
+      *
+      *    Call the program to write the Product Exception records written here to
+      *    the ByProduct Detail file.
+      *
+     C                   call      'RO220'
+     C                   parm                    xxsn
+     C                   endif                                                  If pounds
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Get an Aggregate Net Produced Price/Lb by reading/summing ByProduct Detail records
+      *-----------------------------------------------------------------------------------
+      *
+     C     $price        begsr
+      *
+     C                   z-add     0             wkam
+     C                   z-add     0             wklb
+     C                   z-add     0             wkanpupr
+      *
+      * Process all Byproduct Detail records for this:
+      *   WeekEnding date/meat cost group/IS type/IS group/IS class
+      *
+     C     key03         setll     rol122f
+     C                   dou       *in93 = *on                                  Do detail
+     C     key03         reade     rol122f                                93
+     C                   if        *in93 = *off                                 If not eof
+      *
+      * If BNIN and Multiplier not 100,
+      *    sum net prices to get group price
+      * ELSE
+      *    sum values for later calc of group price
+      *
+     C                   if        p2ydcgcd = 'BNIN' and p2ydmupc <> 100        If bnin
+     C                   add       p2ydnpupr     wkanpupr
+     C                   else
+     C                   add       p2ydapuam     wkam
+     C                   sub       p2ydapcoam    wkam
+     C                   sub       p2ydalcoam    wkam
+     C                   sub       p2ydaicoam    wkam
+     C                   sub       p2ydaocoam    wkam
+     C                   add       p2ydapulb     wklb
+     C                   endif                                                  If bnin
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do detail
+      *
+      * Calculate Price
+     C                   if        wklb <> 0 and wkanpupr = 0
+     C                   eval(h)   wkanpupr = wkam / wklb
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Setup fields that are common to both records
+      *-----------------------------------------------------------------------------------
+      *
+     C     $common       begsr
+      *
+      * Hardcoded values
+     C                   move      'Y'           pesysfl
+     C                   eval      pepgm = sdpgm
+      *
+      * Get a Product Exception Number (these are system-assigned)
+      *
+     C                   call      'TF810'
+     C                   parm      ldpfcd        xxpfcd
+     C     pepesn        parm      0             xxsn
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Retrieve the "Include in Volume" flag from the Weekly Produce Revenue Detail file
+      *-----------------------------------------------------------------------------------
+      *
+     C     $volfl        begsr
+      *
+      * Key values:
+      *  Product Code
+      *  WeekEnding Date
+      *
+     C     key04         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   move      prvolfl       pevolfl
+     C                   else
+     C                   move      'N'           pevolfl
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Write a record for the original item
+      *-----------------------------------------------------------------------------------
+      *
+     C     $wrt019a      begsr
+      *
+      * Write a record for this Item based on the Item that was originally read.
+      *
+     C                   z-add     ldyr          peyr
+     C                   z-add     ldwk          pewk
+     C                   z-add     p1ydwedt      pewedt
+     C                   move      p1ydtfclcd    petfclcd
+     C                   move      p1ydtfcgcd    petfcgcd
+     C                   move      p1ydcgcd      pecgcd
+     C                   move      p1ydsgcd      pesgcd
+     C                   move      p1ydmixfl     pemixfl
+     C                   move      p1ydmixgrp    pemixgrp
+     C                   z-add     p1yditcd      peprcd
+     C                   movel     p1ydittycd    peitycd
+     C                   z-add     p1ydistycd    peistycd
+     C                   z-add     p1ydisgrcd    peisgrcd
+     C                   z-add     p1ydisclcd    peisclcd
+     C                   move      p1ydisclds    peisclds
+      *
+      *            SBD:
+     C                   z-add     wkspulb       pesexpulb
+     C                   z-add     wkspuam       pesexpuam
+      *            TF:
+     C                   z-add     wktpulb       petexpulb
+     C                   z-add     wktpuam       petexpuam
+      *
+      * Setup an Exception Comment that includes the Component Item Code
+      *
+     c                   move      p3yditcd      wkitcd
+     C                   eval      peexcom = 'FROM:' + p3ydcgcd + '.' + wkitcd
+      *
+      * Retrieve the "Include in Volume Flag"
+      *
+     C                   exsr      $volfl
+      *
+     c                   write     perec
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Write a record for the Component Item
+      *-----------------------------------------------------------------------------------
+      *
+     C     $wrt019b      begsr
+      *
+      * Write a detail record for this Item based on the Component Item from the BOM
+      *
+     C                   z-add     ldyr          peyr
+     C                   z-add     ldwk          pewk
+     C                   z-add     p3ydwedt      pewedt
+     C                   move      p3ydtfclcd    petfclcd
+     C                   move      p3ydtfcgcd    petfcgcd
+     C                   move      p3ydcgcd      pecgcd
+     C                   move      p3ydsgcd      pesgcd
+     C                   move      p3ydmixfl     pemixfl
+     C                   move      p3ydmixgrp    pemixgrp
+     C                   z-add     p3yditcd      peprcd
+     C                   movel     p3ydittycd    peitycd
+     C                   z-add     p3ydistycd    peistycd
+     C                   z-add     p3ydisgrcd    peisgrcd
+     C                   z-add     p3ydisclcd    peisclcd
+     C                   move      p3ydisclds    peisclds
+      *           SBF:
+     C                   z-sub     wkspulb       pesexpulb
+     C                   z-sub     wkspuam       pesexpuam
+      *            TF:
+     C                   z-sub     wktpulb       petexpulb
+     C                   z-sub     wktpuam       petexpuam
+      *
+      * Setup an Exception Comment that includes the Original Item Code
+      *
+     c                   move      p1yditcd      wkitcd
+     C                   eval      peexcom = 'TO:' + p1ydcgcd + '.' + wkitcd
+      *
+      * Retrieve the "Include in Volume Flag"
+      *
+     C                   exsr      $volfl
+      *
+     c                   write     perec
+     c                   clear                   perec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    ldcono
+     C                   kfld                    p1yditcd
+      *
+     C     key02         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    ioc9nb
+      *
+     C     key03         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    p3ydcgcd
+     C                   kfld                    p3ydistycd
+     C                   kfld                    p3ydisgrcd
+     C                   kfld                    p3ydisclcd
+      *
+     C     key04         klist
+     C                   kfld                    peprcd
+     C                   kfld                    pewedt
+      *
+     C                   endsr
+      /eject

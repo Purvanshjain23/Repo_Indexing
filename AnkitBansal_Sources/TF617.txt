@@ -1,0 +1,1247 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF617
+      * TITLE:       Margin: Mix Adjustment Report
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     10/17/05
+      *
+      * FUNCTION:  Batch program to print the Mix Adjustment report using
+      *            the Product Margin Adjustment Transaction Detail file and the
+      *            Mix Summary file.
+      *
+      *            The report prints:
+      *              1) a Summary Section from the TFP315-Mix Summary workfile.
+      *                 We use a copy in the CL to populate the workfile with
+      *                 the appropriate records--"weekly" from TFP015 or "period"
+      *                 from TFP115.
+      *
+      *              2) a Detail Section from the TFP014-Detail file
+      *
+      *            This 'report' is generated:
+      *               1) On-demand
+      *               2) From the Margin Adjustment Close function
+      *
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/13/06  LeAnne Ramsey
+      *           We now print an "*" beside TFP014 records that have been tweaked with
+      *           Product Exception and/or Product Split stuff.
+      *
+      * 10/26/06  LeAnne Ramsey
+      *           Added 'Sold Margin per Sold Pound'.
+      *           Removed 'Item Type' and 'TF Class' columns to make room.
+      *
+      * 11/13/06  LeAnne Ramsey
+      *           Changed logic to handle new Week/Period processing.
+      *
+      * 02/15/07  LeAnne Ramsey
+      *           Changed layout to show all "cost" fields.
+      *
+      * 03/14/07  LeAnne Ramsey
+      *           The users now want all "MIX" logic based on "produced" values instead
+      *           of "sold" values. Just in case they want to revert back to "sold"
+      *           values in the future, we have left the "sold" logic intact and added
+      *           "produced" fields/logic. So, for this report we will use "sold" or
+      *           "produced" based on the value in the LDA field (LDSPCD).
+      *
+      * 04/04/07  LeAnne Ramsey
+      *           Changed report layout.
+      *           1) The "based on" section at the top is being changed to mimic the Volume
+      *              report.
+      *           2) We will now print only the Seaboard Mix Adjustment Payment line.
+      *           3) We have gone from 11,2 to 9,0 for pounds/dollars in the Detail section.
+      *           4) We have added a calculated "per pound' field in the Detail section that
+      *              reflects appropriately the "revenue" or "produced value" per pound.
+      *
+      * 06/19/07  LeAnne Ramsey
+      *           For the new "CoOwned" functionality, we now extract "Work in Process"
+      *           Items for the Mix report. The WP Items will be printed separately after
+      *           the Finished Good Items.
+      *
+      * 07/13/07  LeAnne Ramsey
+      *           Added a 'half adjust' when we put the Produced Value Amounts into
+      *           non-decimal fields on the Detail Section Total line.
+      *
+      * 08/27/08  LeAnne Ramsey
+      *           Removed "sales" logic; we will now only have "production" logic.
+      *
+      * 11/21/08  LeAnne Ramsey
+      *           As part of synchronizing the LDAs between the TFS Margin Adjustment Close
+      *           and the Meat Costing, we changed the LDA positions.
+      *
+      * 09/05/12  LeAnne Ramsey (E2243)
+      *           Per Damon G. we now write more/special records to TFP014 for the
+      *           Items that receive lbs/dollars from Skirt Meat Items!!  I had to add
+      *           special logic to RO214-Calc Meat Cost-Component Items and TF216-Extract
+      *           Revenue Data for Margin Detail. Damon wants these new special exception
+      *           records to be printed individually instead of being rolled up into a single
+      *           record for the Item.
+      *           To do this printing the way Damon wants, I had to add a new field to TFP014:
+      *                               ADSMSFL-Skirt Meat Split Flag
+      *           And, I had to change the break logic in $detail.
+      *
+      * 02/08/22  Danny Nguyen   - DO2484 - WI479 STF Variance Reporting
+      *           Recompile only due to TFP014 DBF change. Added the following fields:
+      *             ADXPULB  - STF PRODUCED LBS
+      *             ADXPUSLB - STF PRODUCED START WEIGHT
+      *             ADXYPC   - STF STD YIELD %
+      *             ADXPMPPC - STF PUMP %
+      *             ADXSLLB  - STF SOLD LBS
+      *             ADXSLSLB - STF SOLD START WEIGHT
+      *          ‚The 6 new STF fields will NOT be added to this report per project WI479.
+      *
+      * 10/10/22  R Centonze   W105621 - Increase price fields to handle > 999.99
+      *         COPY @@SPU1MG TO  @@SPU1MG10 SIZE 10.6  -> FIELD TFP014.ADSPU1MG
+      *         COPY @@TPU1MG TO  @@TPU1MG10 SIZE 10.6  -> FIELD TFP014.ADTPU1MG
+      *         COPY @@SSL1MG TO  @@SSL1MG10 SIZE 10.6  -> FIELD TFP014.ADSSL1MG
+      *         COPY @@SSL2MG TO  @@SSL2MG10 SIZE 10.6  -> FIELD TFP014.ADSSL2MG
+      *         COPY @@TSL1MG TO  @@TSL1MG10 SIZE 10.6  -> FIELD TFP014.ADTSL1MG
+      *         COPY @@TSL2MG TO  @@TSL2MG10 SIZE 10.6  -> FIELD TFP014.ADTSL2MG
+      *          ‚Not changing tfp315 at this time!
+      * 05/07/24  Santosh Patil P310149 - Field length is increased in TPF315
+      *           & function is recompiled only.
+      *           @@SSLMGAM 11.2 to 13.2  -> TFP315.MSSSLMGAM
+      *           @@ASLMGAM 11.2 to 13.2  -> TFP315.MSASLMGAM
+      *           @@SSL2MGM 9.6 to 11.6   -> TFP315.MSSSL2MG
+      *
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Ftfl014d   if   e           k disk
+      *  Product margin adjustment transaction detail
+      *    (records selected by open query)
+      *
+      *
+     Ftfp315    if   e           k disk
+      *    Workfile: Mix summary
+      *    (records selected by open query)
+      *
+      *
+     Ftfl315a   if   e           k disk    rename(msrec:msreca)
+      *    Workfile: Mix summary
+      *
+      *
+     Fome8rel0  if   e           k disk
+      *    Product types
+      *
+      *
+     Fppamrel1  if   e           k disk
+      *    TF Classification
+      *
+      *
+     Fombyrel1  if   e           k disk
+      *    Item Default
+      *
+      *
+     ‚* Project-JM-P310149-START
+     FPPAOREL1  IF   E           K Disk
+     ‚* Project-JM-P310149-END
+     Fprint198  o    f  198        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     ‚* Project-JM-P310149-START
+     D Triumph         c                   'T'
+     ‚* Project-JM-P310149-END
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     d rtime           s              6  0
+      *
+      *
+      * Control fields
+      *
+     D gotdata         s              1    inz('N')
+     D firstdtl        s              1    inz('Y')
+     D sectionfl       s              1
+     D fgfl            s              1    inz('N')
+     D wpfl            s              1    inz('N')
+      *
+      *
+      * Workfields
+      *
+     D wkitycd         s                   like(aditycd)
+      *
+     D wkamam          s                   like(mssslmam)
+     D wkalam          s                   like(msssllam)
+     D wkakam          s                   like(mssslkam)
+     D wkaiam          s                   like(msssliam)
+     D wkaoam          s                   like(msssloam)
+     D wkapam          s                   like(mssslpam)
+     D wkamgam         s                   like(msaslmgam)
+      *
+     D wkslb           s                   like(adssllb)
+     D wksslb          s                   like(adsslslb)
+     D wksam           s                   like(adsnpram)
+      *
+     D wktlb           s                   like(adtsllb)
+     D wktslb          s                   like(adtslslb)
+     D wktam           s                   like(adtnpram)
+      *
+      * Print fields
+      *
+     D dash            s            198    inz(*all'-')
+     D dash2           s             26    inz(*all'-')
+     D dash3           s            198    inz(*all'-')
+      *
+     d h1demand        s             35
+     D h1istyds        s             30
+     D h1tfclds        s             30
+      *
+     D l1desc          s              8
+     D l1ypc           s                   like(mssslypc)
+     D l1mco           s                   like(mssslmco)
+     D l1lco           s                   like(msssllco)
+     D l1kco           s                   like(mssslkco)
+     D l1ico           s                   like(mssslico)
+     D l1oco           s                   like(msssloco)
+     D l1pco           s                   like(mssslpco)
+     D l1pr            s                   like(mssslpr)
+     D l11mg           s                   like(msssl1mg)
+     D l1mgam          s                   like(mssslmgam)
+     D l1lb            s                   like(msssllb)
+     D l1slb           s                   like(mssslslb)
+     D l12mg           s                   like(msssl2mg)
+      *
+     D l2mixam         s                   like(msslmixam)
+      *
+     D c3desc          s             15
+      *
+     D l3prcd          s                   like(adprcd)
+     D l3prds          s                   like(byavna)
+     D l3star          s                   like(adstar)
+      *
+     D l3slb           s              9  0
+     D l3sslb          s              9  0
+     D l3sam           s              9  0
+      *
+     D l3tlb           s              9  0
+     D l3tslb          s              9  0
+     D l3tam           s              9  0
+      *
+     D l3pr            s                   like(mssslpr)
+      *
+     D l3aypc          s                   like(msaslypc)
+     D l3amco          s                   like(msaslmco)
+     D l3alco          s                   like(msasllco)
+     D l3akco          s                   like(msaslkco)
+     D l3aico          s                   like(msaslico)
+     D l3aoco          s                   like(msasloco)
+     D l3apco          s                   like(msaslpco)
+      *
+     D l3a1mg          s                   like(msasl1mg)
+      *
+     D t3desc          s             12
+     D t3slb           s              9  0
+     D t3sslb          s              9  0
+     D t3sam           s              9  0
+      *
+     D t3tlb           s              9  0
+     D t3tslb          s              9  0
+     D t3tam           s              9  0
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwemdy               44     49  0
+      *
+     D  ldpe                  51     52  0
+     D  ldpbmdy               61     66  0
+     D  ldpemdy               75     80  0
+      *
+     D  ldwpfl               134    134
+      *
+     D  ldtfcgcd             139    140
+     D  ldtfcgds             141    155
+      *
+     D  ldtfclcd             156    158
+     D  ldtfclds             159    188
+      *
+     D  ldistycd             189    191  0
+     D  ldistyds             192    221
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * MAINLINE
+      ***************************************************************************************
+      *
+      * Process all records selected by the open query. (Only the "total"
+      * records are processed.)
+      *
+     C     *loval        setll     tfp315
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      tfp315                                 90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             (mstfcgcd = 'CV' or mstfcgcd = 'NV')
+      *
+     C                   move      yes           gotdata
+      *
+      * Set indicator to control printing of "mix group" in heading.
+      *
+     C                   if        msmixgrp <> *blank
+     C                   seton                                        94
+     C                   else
+     C                   setoff                                       94
+     C                   endif
+      *
+      * Retrieve description for TF Classification Code
+      *
+     C     mstfclcd      chain     ppamrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      h1tfclds = amq0na
+     C                   else
+     C                   move      *blank        h1tfclds
+     C                   endif
+      *
+      * Retrieve description for Item Structure Type Code
+      *
+     C     msistycd      chain     ome8rel0                           92
+     C                   if        *in92 = *off
+     C                   eval      h1istyds = e8dctx
+     C                   else
+     C                   move      *blank        h1istyds
+     C                   endif
+      *
+      * Print headings for Summary Section
+      *  1) Report
+      *  2) Column
+     C                   move      'S'           sectionfl
+     C                   exsr      $h1hdr
+      *
+      * Print 3 detail lines:
+      *   Seaboard
+      *   Triumph
+      *   Total
+     C                   exsr      $seaboard
+     C                   exsr      $triumph
+     C                   exsr      $aggregate
+      *
+      * Print the line showing the Mix Adjustment to "pay".
+      *
+     C                   exsr      $pay
+      *
+      * Print the Detail Section(s) for this Summary record.
+      *  1) Finished Goods
+      *  2) Work in Process
+      *
+     C                   move      no            fgfl
+     C                   move      no            wpfl
+      *
+     C                   move      'FG '         wkitycd
+     C                   eval      c3desc = 'Finished Goods'
+     C                   exsr      $detail
+      *
+     C                   move      'WP '         wkitycd
+     C                   eval      c3desc = 'Work in Process'
+     C                   exsr      $detail
+      *
+      * If you printed both FG and WP data,
+      *        print a "total" for both combined
+      *
+     C                   if        fgfl = yes and wpfl = yes
+     C                   move      *blank        wkitycd
+     C                   eval      t3desc = 'FG/WP Total:'
+     C                   seton                                        85
+     C                   exsr      $t3tot
+     C                   setoff                                       85
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * Print a heading and the standard 'no data' message if you had
+      * no data.
+     C                   if        gotdata = no
+     C                   except    nodata
+     C                   endif
+      *
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * Set up/print the Seaboard detail line in the Summary Section
+      *---------------------------------------------------------------
+      *
+     C     $seaboard     begsr
+      *
+     C                   eval      l1desc = 'Seaboard'
+      *
+     C                   z-add     msspuypc      l1ypc
+     C                   z-add     msspumco      l1mco
+      *
+     C                   z-add     msspulco      l1lco
+     C                   z-add     msspukco      l1kco
+     C                   z-add     msspuico      l1ico
+     C                   z-add     msspuoco      l1oco
+     C                   z-add     msspupco      l1pco
+      *
+     C                   z-add     msspupr       l1pr
+     C                   z-add     msspu1mg      l11mg
+     C                   z-add     msspumgam     l1mgam
+      *
+     C                   z-add     msspulb       l1lb
+     C                   z-add     msspuslb      l1slb
+     C                   z-add     msspu2mg      l12mg
+      *
+     C                   exsr      $l1dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Set up/print the Triumph detail line in the Summary Section
+      *---------------------------------------------------------------
+      *
+     C     $triumph      begsr
+      *
+     C                   eval      l1desc = 'Triumph'
+      *
+     C                   z-add     mstpuypc      l1ypc
+     C                   z-add     mstpumco      l1mco
+     C                   z-add     mstpulco      l1lco
+     C                   z-add     mstpukco      l1kco
+     C                   z-add     mstpuico      l1ico
+     C                   z-add     mstpuoco      l1oco
+     C                   z-add     mstpupco      l1pco
+      *
+     C                   z-add     mstpupr       l1pr
+     C                   z-add     mstpu1mg      l11mg
+     C                   z-add     mstpumgam     l1mgam
+      *
+     C                   z-add     mstpulb       l1lb
+     C                   z-add     mstpuslb      l1slb
+     C                   z-add     mstpu2mg      l12mg
+      *
+     C                   exsr      $l1dtl
+     C                   except    underscore
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Set up/print the Aggregate detail line in the Summary Section
+      *---------------------------------------------------------------
+      *
+     C     $aggregate    begsr
+      *
+     C                   eval      l1desc = 'TOTAL'
+      *
+     C                   z-add     msapuypc      l1ypc
+     C                   z-add     msapumco      l1mco
+     C                   z-add     msapulco      l1lco
+     C                   z-add     msapukco      l1kco
+     C                   z-add     msapuico      l1ico
+     C                   z-add     msapuoco      l1oco
+     C                   z-add     msapupco      l1pco
+      *
+     C                   z-add     msapupr       l1pr
+     C                   z-add     msapu1mg      l11mg
+     C                   z-add     msapumgam     l1mgam
+      *
+     C                   z-add     msapulb       l1lb
+     C                   z-add     msapuslb      l1slb
+     C                   z-add     msapu2mg      l12mg
+      *
+     C                   exsr      $l1dtl
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------------------------
+      * Print the Mix Adjustment "pay" line
+      *------------------------------------------------------------------------------------
+      *
+      * The users want us to now print only the "seaboard" field.
+      *
+     C     $pay          begsr
+      *
+     C                   z-add     mspumixam     l2mixam
+      *
+     C                   except    l2dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print detail line in Summary Section
+      *---------------------------------------------------------------
+      *
+     C     $l1dtl        begsr
+      *
+     C                   except    l1dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Detail Section
+      *---------------------------------------------------------------
+      *
+      * An open query:
+      *       1) selects records where Mix Flag is YES
+      *       2) omits records with TF Class Group Code of OT or BP
+      *
+     C     $detail       begsr
+      *
+     C                   move      yes           firstdtl
+     C                   move      'D'           sectionfl
+      *
+      *
+     C     key01         setll     tfl014d
+      *
+     C                   dou       *in91 = *on                                  Do detail
+     C     key01         reade     tfl014d                                91
+     C                   if        *in91 = *off                                 If not EOF
+     ‚* Project-JM-P310149-START
+     ‚* Exclude vol flag = 'N' items from calculations
+     C     Key04         Chain     PPAOREL1
+     C                   If        %Found(PPAOREL1) And
+     C                             AOSXSX = No And AOD3TX = Triumph
+     C                   Iter
+     C                   EndIf
+     ‚* Project-JM-P310149-END
+      *
+      * Exclude records where:
+      *  SBF and TF Produced Pounds are zero
+      *
+     C                   select                                                 Exclude
+     C                   when      adspulb = 0 and adtpulb = 0
+     C                   other
+      * Break logic
+     C                   select
+      *     1) first time
+     C                   when      firstdtl = yes
+     C                   except    c3hdr
+     C                   move      no            firstdtl
+     C                   z-add     adprcd        l3prcd
+      *
+     C                   select
+     C                   when      wkitycd = 'FG '
+     C                   move      yes           fgfl
+     C                   when      wkitycd = 'WP '
+     C                   move      yes           wpfl
+     C                   endsl
+      *     2) item break
+     C                   when      adprcd <> l3prcd
+     C                   exsr      $l3dtl
+      *     3) skirt meat
+     C                   when      adprcd = l3prcd and adsmsfl = yes
+     C                   exsr      $l3dtl
+     C                   endsl
+      *
+      * Detail logic
+     C                   if        adstar <> *blank
+     C                   move      adstar        l3star
+     C                   endif
+      * Accumulate
+     C                   add       adspuam       wksam
+     C                   add       adtpuam       wktam
+      *
+     C                   add       adspulb       wkslb
+     C                   add       adspuslb      wksslb
+     C                   add       adtpulb       wktlb
+     C                   add       adtpuslb      wktslb
+      *
+     C                   add       adspumam      wkamam
+     C                   add       adtpumam      wkamam
+      *
+     C                   add       adspulam      wkalam
+     C                   add       adtpulam      wkalam
+     C                   add       adspukam      wkakam
+     C                   add       adtpukam      wkakam
+     C                   add       adspuiam      wkaiam
+     C                   add       adtpuiam      wkaiam
+     C                   add       adspuoam      wkaoam
+     C                   add       adtpuoam      wkaoam
+      *
+     C                   add       adspupam      wkapam
+     C                   add       adtpupam      wkapam
+     C                   add       adspumgam     wkamgam
+     C                   add       adtpumgam     wkamgam
+      *
+     C                   endsl                                                  Exclude
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do detail
+      *
+      * Print
+      *   1) last detail line
+      *   2) total line
+     C                   if        firstdtl = no
+     C                   exsr      $l3dtl
+     C                   exsr      $t3tot
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print detail line in Detail Section
+      *---------------------------------------------------------------
+      *
+     C     $l3dtl        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+      * Retrieve Product Description
+      *
+     C     l3prcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      l3prds  = byavna
+     C                   else
+     C                   move      *blank        l3prds
+     C                   endif
+      *
+      * Yield Percents:
+      *    SOLD:     (sold pounds / sold start weight) * 100
+      *    PRODUCED: (produced pounds / produced start weight) * 100
+      *
+     C                   if        (wksslb + wktslb) <> 0
+      *
+     C                   eval(h)   l3aypc = ((wkslb + wktlb) /
+     C                                        (wksslb + wktslb)) * 100
+     C                   endif
+      *
+      * Costs:
+     C                   if        (wkslb + wktlb) <> 0
+      *
+     C                   eval(h)   l3amco = wkamam /                             Meat
+     C                                        (wkslb + wktlb)
+      *
+     C                   eval(h)   l3alco = wkalam /                             Labor
+     C                                        (wkslb + wktlb)
+      *
+     C                   eval(h)   l3akco = wkakam /                             Packaging
+     C                                        (wkslb + wktlb)
+      *
+     C                   eval(h)   l3aico = wkaiam /                            Ingredient
+     C                                        (wkslb + wktlb)
+      *
+     C                   eval(h)   l3aoco = wkaoam /                            Other
+     C                                        (wkslb + wktlb)
+      *
+     C                   eval(h)   l3apco = wkapam /                            Total Product
+     C                                        (wkslb + wktlb)
+     C                   endif
+      *
+      *
+     C                   if        (wkslb + wktlb) <> 0                         If pounds
+      *
+      * Margin per pound:
+      *    SOLD:     Aggregate Sold Margin Amount / Aggregate Sold Pounds
+      *    PRODUCED: Aggregate Produced Margin Amount / Aggregate Produced Pounds
+      *
+     C                   eval(h)   l3a1mg = wkamgam / (wkslb + wktlb)
+      * Value per Pound
+      *    SOLD:     Aggregate Net Product Revenue Amount / Aggregate Sold Pounds
+      *    PRODUCED: Aggregate Produced Value Amount / Aggregate Produced Pounds
+      *
+     C                   eval(h)   l3pr   = (wksam + wktam) / (wkslb + wktlb)
+     C                   endif                                                  If pounds
+      *
+      *
+      * Get values into print fields with zero decimal positions.
+      *
+     C                   z-add(h)  wkslb         l3slb
+     C                   z-add(h)  wksslb        l3sslb
+     C                   z-add(h)  wksam         l3sam
+     C                   z-add(h)  wktlb         l3tlb
+     C                   z-add(h)  wktslb        l3tslb
+     C                   z-add(h)  wktam         l3tam
+      * Print
+     C                   except    l3dtl
+      *
+      * Save control value
+      *
+     C                   z-add     adprcd        l3prcd
+      *
+      * Clear accumulators
+      *
+     C                   z-add     0             wkamam
+     C                   z-add     0             wkalam
+     C                   z-add     0             wkakam
+     C                   z-add     0             wkaiam
+     C                   z-add     0             wkaoam
+     C                   z-add     0             wkapam
+     C                   z-add     0             wkamgam
+      *
+     C                   z-add     0             wkslb
+     C                   z-add     0             wksslb
+     C                   z-add     0             wksam
+     C                   z-add     0             wktlb
+     C                   z-add     0             wktslb
+     C                   z-add     0             wktam
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print total line in Detail Section
+      *---------------------------------------------------------------
+      *
+     C     $t3tot        begsr
+      *
+      * You will be printing a total for either:
+      *     1) finished goods
+      *     2) work in process
+      *     3) the combined total for FG and WP
+      * So, retrieve the "summary" record that you need.
+      *
+     C     key02         chain     tfl315a                            92
+     C                   if        *in92 = *off                                 If summary
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+      * Plop fields into print fields with zero decimals positions.
+      *
+      * Seaboard:
+     C                   z-add(h)  msspulb       t3slb
+     C                   z-add(h)  msspuslb      t3sslb
+     C                   z-add(h)  msspuam       t3sam
+      * Triumph:
+      *
+     C                   z-add(h)  mstpulb       t3tlb
+     C                   z-add(h)  mstpuslb      t3tslb
+     C                   z-add(h)  mstpuam       t3tam
+      *
+     C                   except    t3tot
+     C                   endif                                                  If summary
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print report headings
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+      *
+     C                   select
+     C                   when      sectionfl = 'S'
+     C                   except    c1hdr
+      *
+     C                   when      sectionfl = 'D'
+     C                   except    c3hdr
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    wkitycd
+     C                   kfld                    mstfclcd
+     C                   kfld                    msistycd
+     C                   kfld                    msmixgrp
+      *
+      *
+     C     key02         klist
+     C                   kfld                    ldyr
+     C                   kfld                    ldwk
+     C                   kfld                    wkitycd
+     C                   kfld                    mstfclcd
+     C                   kfld                    msistycd
+     C                   kfld                    msmixgrp
+     ‚* Project-JM-P310149-START
+     C     Key04         KList
+     C                   KFld                    ADTFCLCD                       TF CLASSIFICATION
+     C                   KFld                    ADISTYCD                       ITEM STRUC TYPE CODE
+     C                   KFld                    ADISGRCD                       ITEM STRUC GROUP COD
+     C                   KFld                    ADISCLCD                       ITEM STRUC CLASS COD
+     ‚* Project-JM-P310149-END
+      *
+      *
+      * Retrieve time for report heading.
+      *
+     C                   time                    rtime
+      *
+      *
+      * This report can be generated for "weekly" data or "period" data.
+      *
+     C                   select
+     C                   when      ldwpfl = 'W'
+     C                   seton                                        88
+     C                   when      ldwpfl = 'P'
+     C                   seton                                        89
+     C                   endsl
+      *
+      *
+      * This report is generated on-demand and also from the
+      * Margin Adjustment Close function.
+      *
+     C                   select
+     C                   when      ldpfcd = 'D'
+     C                   eval      %subst(h1demand:13:9) = 'On-Demand'
+      *
+     C                   when      ldpfcd = 'F'
+     C                   eval      %subst(h1demand:4:29) =
+     C                             'Final Margin Adjustment Close'
+      *
+     C                   when      ldpfcd = 'P'
+     C                   eval      %subst(h1demand:1:35) =
+     C                             'Preliminary Margin Adjustment Close'
+     C                   endsl
+      *
+      *
+      * When the report is generated on-demand, the user can enter selections.
+      *
+      * TF class group code
+      *
+     C                   if        ldtfcgcd = *blank
+     C                   seton                                        95
+     C                   endif
+      *
+      * TF classification code
+      *
+     C                   if        ldtfclcd = *blank
+     C                   seton                                        96
+     C                   endif
+      *
+      * Item structure type code
+      *
+     C                   if        ldistycd = 0
+     C                   seton                                        97
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report lines
+      *-------------------------------------------------------------
+      *
+     Oprint198  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                          103 'Mix Adjustment Report'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                       h1demand           111
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+     O          e            h1hdr          1
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+      *
+     O          e    88      h1hdr          1
+     O                                           25 'Year/week:'
+     O                       ldyr          z     31
+     O                       ldwk          z     35
+      *
+      *
+     O          e    88      h1hdr          1
+     O                                           25 'Week-ending date:'
+     O                       ldwemdy             35 '  /  /  '
+      *
+      *
+     O          e    89      h1hdr          1
+     O                                           25 'Year/period:'
+     O                       ldyr          z     31
+     O                       ldpe          z     35
+     O                       ldpbmdy             46 '  /  /  '
+     O                                           49 'to'
+     O                       ldpemdy             58 '  /  /  '
+      *
+      *
+     O          e            h1hdr          1
+     O                                           25 'TF classification code:'
+     O                       mstfclcd            30
+     O                       h1tfclds            68
+     O               94                          80 'Mix group:'
+     O               94      msmixgrp            83
+      *
+      *
+     O          e            h1hdr          2
+     O                                           25 'Item structure type code:'
+     O                       msistycd      z     30
+     O                       h1istyds            68
+      *
+      *
+      *
+      *-------------------------------------------------------------
+      * Column headings for Summary Section
+      *-------------------------------------------------------------
+      *
+     O          e            c1hdr          0
+     O                                          105 'Based on PRODUCED Pounds'
+     O                                          177 'Starting Pounds'
+     O          e            c1hdr          1
+     O                                          105 'Based on PRODUCED Pounds'
+     O                                          177 'Starting Pounds'
+      *
+     O          e            c1hdr          1
+     O                       dash2              182
+      *
+     O          e            c1hdr          1
+     O                                           19 'STD'
+     O                                           34 'STD'
+     O                                           47 'STD'
+     O                                           59 'STD'
+     O                                           72 'STD'
+     O                                           85 'STD'
+     O                                           98 'STD'
+     O                                          110 'Prod Value'
+     O                                          122 'Margin'
+     O                                          138 'Prod Wgt'
+     O                                          154 'Produced'
+     O                                          170 'Produced'
+     O                                          182 'Margin'
+      *
+     O          e            c1hdr          1
+     O                                           19 'Yld'
+     O                                           34 'Meat Cost'
+     O                                           47 'Labor Cost'
+     O                                           59 'Pkg Cost'
+      *
+     O                                           72 'Ing Cost'
+     O                                           85 'Other Cost'
+      *
+     O                                           98 'Total Cost'
+     O                                          110 'per lb'
+     O                                          122 'per lb'
+     O                                          138 'Margin $$'
+     O                                          154 'Pounds'
+     O                                          170 'Start Lbs'
+     O                                          182 'per lb'
+      *
+     O          e            c1hdr          0
+     O                                           19 '--------'
+     O                                           34 '----------'
+     O                                           47 '----------'
+     O                                           59 '----------'
+     O                                           72 '----------'
+     O                                           85 '----------'
+     O                                           98 '----------'
+     O                                          110 '----------'
+     O                                          122 '----------'
+     O                                          138 '--------------'
+     O                                          154 '--------------'
+     O                       dash2              182
+      *
+      *
+      *-------------------------------------------------------------
+      * Detail line in Summary Section
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       1
+     O                       l1desc               8
+     O                       l1ypc               20 '   .    %'
+     O                       l1mco         k     35
+     O                       l1lco         k     48
+     O                       l1kco         k     60
+     O                       l1ico         k     73
+     O                       l1oco         k     86
+     O                       l1pco         k     99
+     O                       l1pr          k    111
+     O                       l11mg         k    123
+     O                       l1mgam        k    139
+     O                       l1lb          k    155
+      * Starting pounds
+     O                       l1slb         k    171
+     O                       l12mg         k    183
+      *
+      *-------------------------------------------------------------
+      * Underscores for Summary Total
+      *-------------------------------------------------------------
+      *
+     O          e            underscore  1  0
+     O                                           19 '--------'
+     O                                           34 '----------'
+     O                                           47 '----------'
+     O                                           59 '----------'
+     O                                           72 '----------'
+     O                                           85 '----------'
+     O                                           98 '----------'
+     O                                          110 '----------'
+     O                                          122 '----------'
+     O                                          138 '--------------'
+     O                                          154 '--------------'
+     O                                          170 '--------------'
+     O                                          182 '----------'
+      *
+      *-------------------------------------------------------------
+      * "Pay" Section
+      *-------------------------------------------------------------
+      *
+     O          e            l2dtl       3  0
+     O                                           24 'Mix Adjustment: Seaboard'
+     O                       l2mixam       k     40
+      *
+     O                                           77 'CoOwned Transfer Product '
+     O                                           82 'Cost:'
+     O                       msstrpam      k     98
+      *
+     O                                          118 'Total Payment:'
+     O                       msputotam     k    136
+      *
+      *
+     O          e            l2dtl       0  1
+     O                                           24 'Mix Adjustment: Seaboard'
+     O                       l2mixam       k     40
+      *
+     O                                           77 'CoOwned Transfer Product '
+     O                                           82 'Cost:'
+     O                       msstrpam      k     98
+      *
+     O                                          118 'Total Payment:'
+     O                       msputotam     k    136
+      *
+     O          e            l2dtl       0  1
+     O                                           40 '--------------'
+      *
+      *
+      ***********************************************************************************
+      * Detail Section
+      ***********************************************************************************
+      *
+      *-------------------------------------------------------------
+      * Column headings for Detail Section
+      *-------------------------------------------------------------
+      *
+     O          e            c3hdr       1  0
+     O                       c3desc              15
+      *
+     O          e            c3hdr       0  1
+     O                       c3desc              15
+     O                                           80 '------ Standard Costs per '
+     O                                           93 'Pound -------'
+     O          e            c3hdr          1
+      *
+     O                                           64 'Meat'
+     O                                           76 'Labor'
+     O                                           88 'Pkg'
+      *
+     O                                          106 'Prod Value'
+     O                                          119 'Prod'
+     O                                          132 'SBF'
+     O                                          145 'SBF Prod'
+     O                                          158 'SBF'
+      *
+     O                                          171 'TF'
+     O                                          184 'TF Prod'
+     O                                          197 'TF'
+      *
+     O          e            c3hdr          1
+     O                                           11 'Description'
+     O                                           39 'Item'
+     O                                           52 'STD Yield'
+      *
+     O                                           69 'Ing'
+     O                                           81 'Other'
+     O                                           93 'Total'
+      *
+     O                                          106 'per LB'
+      *
+     O                                          119 'Margin/lb'
+      *
+     O                                          132 'Prod LBS'
+     O                                          145 'Start LBS'
+     O                                          158 'Prod Value'
+     O                                          171 'Prod LBS'
+     O                                          184 'Start LBS'
+     O                                          197 'Prod Value'
+      *
+     O          e            c3hdr          0
+     O                       dash3              198
+      *
+      *-------------------------------------------------------------
+      * Detail line in Detail Section
+      *-------------------------------------------------------------
+      *
+     O          e            l3dtl       1
+     O                       l3prds         b    30
+     O                       l3prcd        z     39
+     O                       l3star         b    41
+      *
+     O                       l3aypc         b    52 '   .    %'
+     O                       l3amco        kb    65
+     O                       l3alco        kb    77
+     O                       l3akco        kb    89
+      *
+     O                       l3pr          kb   107
+     O                       l3a1mg        kb   120
+      *
+     O                       l3slb         kb   133
+     O                       l3sslb        kb   146
+     O                       l3sam         kb   159
+      *
+     O                       l3tlb         kb   172
+     O                       l3tslb        kb   185
+     O                       l3tam         kb   198
+      *
+     O          e            l3dtl       1
+     O                       l3aico        kb    70
+     O                       l3aoco        kb    82
+     O                       l3apco        kb    94
+      *
+      *-------------------------------------------------------------
+      * Total line for Detail Section
+      *-------------------------------------------------------------
+      *
+     O          e   n85      t3tot       1  1
+     O                                           52 '---------'
+     O                                           80 '--------------------------'
+     O                                           93 '-------------'
+      *
+     O                                          132 '-----------'
+     O                                          145 '-----------'
+     O                                          158 '-----------'
+      *
+     O                                          171 '-----------'
+     O                                          184 '-----------'
+     O                                          197 '-----------'
+      * For FG/WP Total only:
+     O          e    85      t3tot       0  0
+     O                       t3desc              12
+      *
+     O          e    85      t3tot       0  1
+     O                       t3desc         b    12
+      *
+      *
+      *
+      *
+     O          e            t3tot       0  1
+      *
+     O                       msapuypc            52 '   .    %'
+     O                       msapumco      k     65
+     O                       msapulco      k     77
+     O                       msapukco      k     89
+     O                       t3slb         kb   133
+     O                       t3sslb        kb   146
+     O                       t3sam         kb   159
+      *
+     O                       t3tlb         kb   172
+     O                       t3tslb        kb   185
+     O                       t3tam         kb   198
+      *
+     O          e            t3tot       0  2
+     O                       msapuico      k     70
+     O                       msapuoco      k     82
+     O                       msapupco      k     94
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank       1
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata         1 01
+     O                       sdpgm               10
+     O                                          100 'Mix Adjustment Report'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+      *
+     O          e            nodata         1
+     O                       sdusr               10
+     O                       h1demand           108
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+     O          e            nodata         1
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+     O          e    88      nodata         1
+     O                                           25 'Year/week:'
+     O                       ldyr          z     31
+     O                       ldwk          z     35
+     O                                           54 'Week-ending date:'
+     O                       ldwemdy             64 '  /  /  '
+      *
+     O          e    89      nodata         1
+     O                                           25 'Year/period:'
+     O                       ldyr          z     31
+     O                       ldpe          z     35
+     O                       ldpbmdy             46 '  /  /  '
+     O                                           49 'to'
+     O                       ldpemdy             58 '  /  /  '
+      *
+      *
+     O          e            nodata         1
+     O                                           25 'TF class group code:'
+     O               95                          30 'All'
+     O              n95      ldtfcgcd            29
+     O              n95      ldtfcgds            53
+      *
+     O          e            nodata         1
+     O                                           25 'TF classification code:'
+     O               96                          30 'All'
+     O              n96      ldtfclcd            30
+     O              n96      ldtfclds            68
+      *
+     O          e            nodata         2
+     O                                           25 'Item structure type code:'
+     O               97                          30 'All'
+     O              n97      ldistycd      z     30
+     O              n97      ldistyds            68
+      *
+     O          e            nodata         1
+     O                       dash               198
+      *
+      *
+     O          e            nodata
+     O                                           19 'No data meets your'
+     O                                           39 'selection criteria.'
+      /eject

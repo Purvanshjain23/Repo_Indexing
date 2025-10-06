@@ -1,0 +1,558 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF223 - Eopfees: Freight Variance--Unpaid Loads with Listing
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     04/13/05
+      *
+      * Function:    This program prints a listing of Unpaid Loads and creates workfile
+      *              records.
+      *
+      ****************************************************************************************
+      * MODIFICATIONS:
+      ****************************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 03/20/06  LeAnne Fedor
+      *           Changed logic to read our new file of loads that are "frozen" for the Period.
+      *
+      * 04/07/06  LeAnne Fedor
+      *           Added "difference amount" to the Freight Variance Detail file. Changed the
+      *           logic to use the new file field instead of calculating the value.
+      *
+      * 11/22/06  LeAnne Fedor
+      *           Added more fields to Freight Variance Detail file. Changed field name/text
+      *           for "actual freight amount" to "allocated actual freight amount".
+      *
+      * 05/14/07  LeAnne Ramsey
+      *           Added parms to the call to TF813:
+      *               Co-owned Flag
+      *               Producing Company
+      *
+      * 08/13/07  LeAnne Ramsey
+      *           Added parm on the call to TF813:
+      *               Item Type Code
+      *
+      * 05/29/08  LeAnne Ramsey
+      *           Changed sort sequence to: Company/Actual Ship Date/Carrier/Load
+      *                               from: Company/Load
+      *           Changed layout of first 4 columns to be in the new sequence.
+      *
+      * 07/16/08  LeAnne Ramsey
+      *           In file TFP027-Freight Variance Detail, we:
+      *              Replaced: FDAACTFAM  Allocated Actual Freight Amount
+      *                  With: FDALFAM    Allocated Load Total Freight Amount
+      *           So, in this program, we:
+      *             1) changed the field name
+      *             2) changed the column heading
+      *
+      * 09/11/08  LeAnne Ramsey
+      *           Added parm to the call to TF813:
+      *               Export/Domestic Flag
+      *
+      * 03/10/09  LeAnne Ramsey
+      *           The users want to revert back to Allocated Actual Freight Amount
+      *           from Allocated Load Total Freight Amount.
+      *           This will reverse the change of 07/16/08 above!
+      *           We have decided to keep two sets of fields in TFP027-Freight
+      *           Variance Detail:
+      *               ALLOCATED LOAD TOT FRT AM       FDALFAM
+      *               LOAD TOTAL DIFFERENCE AMT       FDLDIFFAM
+      *               LOAD TOTAL PRIOR DIFF AMT       FDLPDIFFAM
+      *               ALLOCATED ACTUAL FRT AMT        FDAAFAM
+      *               ACTUAL DIFFERENCE AMT           FDADIFFAM
+      *               ACTUAL PRIOR DIFF AMT           FDAPDIFFAM
+      *           For this report, we will now be printing "Actual" values...not Load Total.
+      *
+      * 04/13/09  LeAnne Ramsey
+      *           The "Actual" value was being printed in the "Difference" column
+      *           on the Detail line (Total Line as OK). Changed the program to
+      *           print the "difference" value. NOTE: All data in file was correct.
+      *
+      * 01/21/21  ISE             TSN593
+      *           Replaced *loval with *start
+      *
+      /eject
+      ****************************************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************************************
+      *
+     Ftfp027    if   e           k disk
+      *    Freight variance--detail (records selected/keyed by open query)
+      *
+      *
+     Ftfp001    if   e           k disk
+      *    Preliminary/Final
+      *
+      *
+     Ftfp317    uf a e           k disk
+      *    Workfile: Freight Variance--Product Level
+      *
+      *
+     Fprint132  o    f  132        printer oflind(*inof)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+     D arabsam         s             11  2 dim(3)
+     D araam           s             11  2 dim(3)
+     D ardiffam        s             11  2 dim(3)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D dash97          s             97    inz(*all'-')
+     d rtime           s              6  0
+
+
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D svcono          s                   like(fdcono)
+     D svload          s                   like(fdload)
+      *
+      *
+      * Work fields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+      *
+      *
+      * Parms
+      *
+     D xxprcd          s                   like(w1prcd)
+     D xxistycd        s                   like(w1istycd)
+     D xxisgrcd        s                   like(w1isgrcd)
+     D xxisclcd        s                   like(w1isclcd)
+     D xxtfclcd        s                   like(w1tfclcd)
+     D xxtfcgcd        s                   like(w1tfcgcd)
+     D xxglsub         s              3
+     D xxitycd         s              3
+     D xxedfl          s              1
+     D xxcoownfl       s              1
+     D xxprdcmp        s              3
+      *
+      *
+      * Array index
+      *
+     d x               s              1  0
+      *
+      *
+      * Print fields
+      *
+     d h1pfds          s                   like(pfpfds)
+      *
+     d l1cacd          s                   like(fdcacd)
+     d l1asdtmdy       s              6  0
+      *
+     d t1desc          s             14
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+     D  ldcyr                  2      5  0
+     D  ldcpe                  6      7  0
+      *
+     D  ldcbdt                 8     15  0
+     D  ldcbmdy               16     21  0
+     D  ldcbsyn               22     28  0
+      *
+     D  ldcedt                29     36  0
+     D  ldcemdy               37     42  0
+     D  ldcesyn               43     49  0
+      *
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      **********************************************************************************
+      * Mainline
+      **********************************************************************************
+      *
+      * Print headings.
+     C                   exsr      $h1hdr
+      *
+      * By the time you get to this program, you are processing loads where:
+      *          1) Load Status is I=Invoiced
+      *          2) Actual Ship Date is on/before the period end date
+      *          3) Loads are Prepaid (have a 'P' in the first position of Shipping Method)
+      *          4) Loads have an LH Carrier Payment Status of ' '=Unpaid
+      *                     - OR -
+      *             Loads have an LH Carrier Payment Status of 'P'=Paid AND a
+      *             Carrier Paid Date after the period end date
+      *
+593  C*    *loval        setll     tfp027
+593  C     *start        setll     tfp027
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      tfp027                                 90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   z-add     fdcono        svcono
+     C                   exsr      $load
+      *
+     C                   when      svcono <> fdcono
+     C                   exsr      $loadtot
+     C                   exsr      $comptot
+      *
+     C                   when      svload <> fdload
+     C                   exsr      $loadtot
+     C                   endsl
+      *
+      *
+      * Accumulate freight into arrays for printing load/company/report totals.
+      * Note: As of March 2009, we are using "Actual" instead of "Load Total" values.
+      *   1) Absorbed
+      *   2) Allocated
+      *   3) Difference
+      *
+     C                   add       fdabsfam      arabsam
+     C                   add       fdaafam       araam
+     C                   add       fdadiffam     ardiffam
+      *
+      * Write/Update the Freight Amounts by Product on the Workfile record
+      *
+     C                   exsr      $upd317
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *-------------------------
+      * EOF processing
+      *-------------------------
+      *
+     C                   select
+     C                   when      first = yes
+     C                   except    nodata
+     C                   other
+      *
+      * Print totals for load/company/report
+      *
+     C                   exsr      $loadtot
+     C                   exsr      $comptot
+     C                   exsr      $rpttot
+     C                   endsl
+      *
+     C                   seton                                        lr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Set up print fields for the load
+      *----------------------------------------------------------------------------------
+      *
+     C     $load         begsr
+      *
+      * Get Actual Ship Date into MMDDYY format for printing
+      *
+     C     *iso          test(d)                 fdasdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C                   move      fdasdt        wkisodate
+     C     *mdy          move      wkisodate     l1asdtmdy
+     C                   endif                                                  If OK date
+      *
+      * Carrier code
+     C                   move      fdcacd        l1cacd
+      *
+      * Save control field
+     C                   z-add     fdload        svload
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Update/write a Workfile record at the Product Level
+      *---------------------------------------------------------------
+      *
+     C     $upd317       begsr
+      *
+      * If you already have a record for this product in the workfile, update
+      * it with the amounts. (Use Shipped Item Number for the retrieval.)
+      *
+     C     fdprcd        chain     tfp317                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   add       fdabsfam      w1uabsam
+     C                   add       fdaafam       w1uaam
+     C                   add       fdadiffam     w1udiffam
+     C                   update    w1rec
+     C                   else
+      *
+      * Set up amounts
+     C                   z-add     fdabsfam      w1uabsam
+     C                   z-add     fdaafam       w1uaam
+     C                   z-add     fdadiffam     w1udiffam
+      *
+      * Retrieve the Item Structure for this Product. Then, write workfile
+      * record.
+     C                   z-add     fdprcd        w1prcd
+      *
+     C                   call      'TF813'
+     C                   parm      w1prcd        xxprcd
+     C     w1istycd      parm      0             xxistycd
+     C     w1isgrcd      parm      0             xxisgrcd
+     C     w1isclcd      parm      0             xxisclcd
+     C     w1tfclcd      parm      *blank        xxtfclcd
+     C     w1tfcgcd      parm      *blank        xxtfcgcd
+     C                   parm      *blank        xxglsub
+     C                   parm      *blank        xxitycd
+     C                   parm      *blank        xxcoownfl
+     C                   parm      *blank        xxprdcmp
+     C                   parm      *blank        xxedfl
+      *
+     C                   write     w1rec
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print report headings for Load Section
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Load Total line
+      *---------------------------------------------------------------
+      *
+     C     $loadtot      begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   z-add     1             x
+      *
+     C                   except    l1dtl
+     C                   exsr      $clear
+     C                   exsr      $load
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print total line
+      *---------------------------------------------------------------
+      *
+     C     $t1tot        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   except    t1tot
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Clear array entries
+      *---------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   z-add     0             arabsam(x)
+     C                   z-add     0             araam(x)
+     C                   z-add     0             ardiffam(x)
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print the Company Total
+      *---------------------------------------------------------------
+      *
+     C     $comptot      begsr
+      *
+     C                   z-add     2             x
+     C                   eval      t1desc = 'Company Total:'
+      *
+     C                   exsr      $t1tot
+      *
+      * Clear Company totals from arrays
+      *
+     C                   exsr      $clear
+      *
+      * Save Company
+     C                   z-add     fdcono        svcono
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print the Report Total
+      *---------------------------------------------------------------
+      *
+     C     $rpttot       begsr
+      *
+     C                   z-add     3             x
+     C                   except    blank
+     C                   eval      t1desc = ' Report Total:'
+     C                   seton                                        88
+     C                   exsr      $t1tot
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Set up heading info.
+      *
+     C                   time                    rtime
+      *
+      *
+      * Retrieve 'preliminary/final' description
+      *
+     C     ldpfcd        chain     tfp001                             92
+     C                   if        *in92 = *off
+     C                   move      pfpfds        h1pfds
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines for Section 1: Orders/Loads
+      *-------------------------------------------------------------
+      *
+     Oprint132  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           47 'VERIFICATION FOR FREIGHT'
+     O                                           56 ' VARIANCE'
+     O                                           87 'DATE'
+     O                       udate         y     97
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                       h1pfds              47
+     O                                           87 'TIME'
+     O                       rtime               97 '  :  :  '
+      *
+      *
+     O          e            h1hdr          2
+     O                                           47 'Unpaid Loads'
+     O                                           87 'PAGE'
+     O                       page          z     97
+      *
+      *
+     O          e            h1hdr          1
+     O                                           18 'Year/Period .....:'
+     O                       ldcyr         z     24
+     O                       ldcpe         z     28
+      *
+     O          e            h1hdr          1
+     O                                           18 'Period begin date:'
+     O                       ldcbmdy             28 '  /  /  '
+      *
+     O          e            h1hdr          2
+     O                                           18 'Period end date .:'
+     O                       ldcemdy             28 '  /  /  '
+      *
+      *
+      *-------------------------------------------------------------
+      * Column headings for Section 1: Orders/Loads
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr       0  1
+     O                                            7 'Company'
+     O                                           18 'Actual'
+     O                                           27 'Carrier'
+     O                                           36 'Load'
+      *
+     O                                           64 'Absorbed'
+     O                                           80 'Actual'
+     O                                           96 'Difference'
+      *
+     O          e            h1hdr       0  1
+     O                                            6 'Number'
+     O                                           18 'Ship Date'
+     O                                           26 'Code'
+     O                                           36 'ID'
+      *
+     O                                           64 'Freight'
+     O                                           80 'Freight'
+     O                                           96 'Amount'
+      *
+     O          e            h1hdr          0
+     O                       dash97              97
+      *
+      *
+      *-------------------------------------------------------------
+      * Detail line for Section 1: Load
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       1
+     O                       svcono        z      5
+     O                       l1asdtmdy           18 '  /  /  '
+     O                       l1cacd              25
+     O                       svload        z     36
+     O                       arabsam(x)    k     65
+     O                       araam  (x)    k     81
+     O                       ardiffam(x)   k     97
+      *
+      *-------------------------------------------------------------
+      * Total line for Section 1: Loads
+      *-------------------------------------------------------------
+      *
+     O          e   n88      t1tot       1  1
+     O                                           64 '---------------'
+     O                                           80 '---------------'
+     O                                           96 '---------------'
+      *
+     O          e            t1tot       0  1
+     O                       t1desc              49
+     O                       arabsam(x)    k     65
+     O                       araam  (x)    k     81
+     O                       ardiffam(x)   k     97
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank       1
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata      1
+     O                                           20 'There are no unpaid'
+     O                                           27 ' loads.'
+      /eject

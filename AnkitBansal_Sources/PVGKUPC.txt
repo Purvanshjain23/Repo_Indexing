@@ -1,0 +1,185 @@
+/***************************************************************** */
+/*  PROGRAM:       PVGKUPC                                         */
+/*  PROGRAM DESC:  EXC UPLOAD CSV & EXCPG2CL EXECUTE USER PROGRAM  */
+/*  PROGRAMMER:    DANNY NGUYEN                                    */
+/*  DATE:          07/24/2024                                      */
+/*                                                                 */
+/*  PURPOSE:       Conversion (or on demand) program to copy CSV/  */
+/*                 text file & upload to DB2 table on IBMi.        */
+/*                 The program will be called from GoAnywhere      */
+/*                 agent.                                          */
+/*                                                                 */
+/*     NOTES:     CSV/Text file will be saved in the following IFS */
+/*                directory for WIM Restoration:                   */
+/*     DEV:  /QOpenSys/opt/eradani/dev/wim-pfs-restoration/latest/ */
+/*     QUA:  /QOpenSys/opt/eradani/qua/wim-pfs-restoration/latest/ */
+/*     UAT:  /QOpenSys/opt/eradani/uat/wim-pfs-restoration/latest/ */
+/*     PRD:  /QOpenSys/opt/eradani/prd/wim-pfs-restoration/latest/ */
+/*                                                                 */
+/* PARMS:                                                          */
+/*                &FRSTRMFIL = From Stream File                    */
+/*                &CPYTOLIB = Copy to Library.                     */
+/*                &CPYTOFILE = Copy to File Name.                  */
+/*                &FLDDELMTR = Field Delimiter.                    */
+/*                &COMPANY = Company Number                        */
+/*******************************************************************/
+/*  Modification History                                           */
+/*                                                                 */
+/*******************************************************************/
+             PGM        PARM(&FRSTRMFIL &CPYTOLIB &CPYTOFILE +
+                          &FLDDELMTR &COMPANY)
+
+             DCL        VAR(&FRSTRMFIL) TYPE(*CHAR) LEN(500) /* Path & +
+                         CSV/TXT File Name */
+             DCL        VAR(&CPYTOLIB) TYPE(*CHAR) LEN(10) /* Copy +
+                          To Library */
+             DCL        VAR(&CPYTOFILE) TYPE(*CHAR) LEN(10) /* Copy To +
+                          DB2 File Name */
+             DCL        VAR(&FLDDELMTR) TYPE(*CHAR) LEN(1) /* Field +
+                          Delimiter */
+             DCL        VAR(&COMPANY) TYPE(*CHAR) LEN(3) /* +
+                          Company Nbr */
+
+
+             DCL        VAR(&CMPNBR) TYPE(*DEC) LEN(3 0)
+             DCL        VAR(&CURDTE)  TYPE(*CHAR) LEN(6)
+             DCL        VAR(&CURDTE2) TYPE(*CHAR) LEN(8)     /* *YYMD */
+             DCL        VAR(&CURDTE3) TYPE(*DEC) LEN(8 0)
+             DCL        VAR(&CURDTE4) TYPE(*CHAR) LEN(10)    /* *ISO */
+             DCL        VAR(&CURTMESTMP) TYPE(*CHAR) LEN(26)
+             DCL        VAR(&SQLSTMT) TYPE(*CHAR) LEN(150) VALUE(' ')
+
+             DCL        VAR(&MSG) TYPE(*CHAR) LEN(512)
+             DCL        VAR(&MSGID) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&MSGL) TYPE(*DEC) LEN(5 0)
+
+
+/*-----------------------------------------------------------------*/
+/* GET CURRENT SYSTEM DATE                                         */
+/*-----------------------------------------------------------------*/
+             RTVSYSVAL  SYSVAL(QDATE) RTNVAR(&CURDTE)
+             CVTDAT     DATE(&CURDTE) TOVAR(&CURDTE2) FROMFMT(*MDY) +
+                          TOFMT(*YYMD) TOSEP(*NONE)
+             CVTDAT     DATE(&CURDTE) TOVAR(&CURDTE4) FROMFMT(*MDY) +
+                          TOFMT(*ISO) TOSEP(*NONE)
+
+/*-----------------------------------------------------------------*/
+/* Validate Copy to Library/Filename Exist.                        */
+/*-----------------------------------------------------------------*/
+             CHKOBJ     OBJ(&CPYTOLIB/&CPYTOFILE) OBJTYPE(*FILE)
+             MONMSG     MSGID(CPF9801) EXEC(DO)
+             SNDPGMMSG  MSG('Copy To File ' *CAT &CPYTOLIB *CAT '/' +
+                          *CAT &CPYTOFILE *TCAT ' not found.')
+             GOTO       CMDLBL(MSGTRAP)
+             ENDDO
+
+/*-----------------------------------------------------------------*/
+/* Copy From Import File                                           */
+/*-----------------------------------------------------------------*/
+
+    /* Copy CSV File to AS400 File. */
+             CPYFRMIMPF FROMSTMF(&FRSTRMFIL) +
+                          TOFILE(&CPYTOLIB/&CPYTOFILE) +
+                          MBROPT(*UPDADD) RCDDLM(*ALL) +
+                          STRDLM(*NONE) STRESCCHR(*NONE) +
+                          RMVBLANK(*BOTH) FLDDLM(&FLDDELMTR) +
+                          DATSEP(*BLANK) TIMSEP(*BLANK) +
+                          RPLNULLVAL(*FLDDFT) IDCOL(*FROMFLD) +
+                          RMVCOLNAM(*NO)
+             MONMSG     MSGID(CPF0000) EXEC(DO)
+
+         /*‚Copy Error Occurred */
+            /* If WIM PFS Inv Restoration (PUCYCPP) Table, then delete +
+                current records per Company/TransDate */
+             IF         COND(&CPYTOFILE *EQ 'PUCYCPP') THEN(DO)
+
+             CALLSUBR   SUBR(DLTONHAND)     /* FOR ONHAND FILE */
+
+             ENDDO
+
+            /* If WIM PFS Inv Rst Hold (PUC0CPP) Table, then delete +
+                current records per Company/TransDate for both +
+                OnHold & OnHand files. */
+             IF         COND(&CPYTOFILE *EQ 'PUC0CPP') THEN(DO)
+
+             CALLSUBR   SUBR(DLTONHOLD)     /* FOR ONHOLD FILE */
+
+             CHGVAR     VAR(&CPYTOFILE) VALUE('PUCYCPP')
+             CALLSUBR   SUBR(DLTONHAND)     /* FOR ONHAND FILE */
+
+             ENDDO      /* &CPYTOFILE = PUC0CPP */
+
+
+             GOTO CMDLBL(MSGTRAP)
+
+             ENDDO      /* CPF0000 */
+
+
+             GOTO       CMDLBL(END)
+
+
+/*----------------------RECEIVE MESSAGES----------------------------*/
+ MSGTRAP:    RCVMSG     MSGTYPE(*EXCP) MSGDTA(&MSG) MSGDTALEN(&MSGL) +
+                          MSGID(&MSGID)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(END))
+
+             SNDPGMMSG  MSGID(&MSGID) MSGF(QCPFMSG) MSGDTA(%SST(&MSG +
+                          1 &MSGL)) MSGTYPE(*ESCAPE)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(END))
+
+
+/**********************************************************************/
+/*SUBROUTINE:                                                        */
+/**********************************************************************/
+    /*------------------------------------------------------------*/
+    /*DLTONHAND:  DELETE ONHAND RECORDS IN PUCYCPP BY CO/DATE.   */
+    /*------------------------------------------------------------*/
+             SUBR       SUBR(DLTONHAND)
+
+             CHGVAR     VAR(&SQLSTMT) VALUE(' ')
+             CHGVAR     VAR(&CMPNBR) VALUE(&COMPANY)
+             CHGVAR     VAR(&CURDTE3) VALUE(&CURDTE2)
+
+            /* Build & Execute SQL Delete Statement */
+             CHGVAR     VAR(%SST(&SQLSTMT 1 12)) VALUE('DELETE FROM ')
+             CHGVAR     VAR(%SST(&SQLSTMT 13 21)) VALUE(&CPYTOLIB +
+                          *TCAT '/' *TCAT &CPYTOFILE)
+             CHGVAR     VAR(%SST(&SQLSTMT 34 13)) VALUE('WHERE CYY1NX=')
+             CHGVAR     VAR(%SST(&SQLSTMT 47 3)) VALUE(&CMPNBR)
+             CHGVAR     VAR(%SST(&SQLSTMT 51 11)) VALUE('AND CYAID8=')
+             CHGVAR     VAR(%SST(&SQLSTMT 62 8)) VALUE(&CURDTE3)
+             CHGVAR     VAR(%SST(&SQLSTMT 71 11)) VALUE('AND CYUXSX=')
+             CHGVAR     VAR(%SST(&SQLSTMT 82 11)) VALUE('''0''')
+
+             RUNSQL     SQL(&SQLSTMT) COMMIT(*NONE)
+
+             ENDSUBR
+
+    /*------------------------------------------------------------*/
+    /*DLTONHOLD:  DELETE ONHOLD RECORDS IN PUC0CPP BY CO/DATE.   */
+    /*------------------------------------------------------------*/
+             SUBR       SUBR(DLTONHOLD)
+
+             CHGVAR     VAR(&SQLSTMT) VALUE(' ')
+             CHGVAR     VAR(&CMPNBR) VALUE(&COMPANY)
+             CHGVAR     VAR(&CURTMESTMP) VALUE(&CURDTE4 *CAT +
+                          '-00.00.00.000000')
+
+            /* Build & Execute SQL Delete Statement */
+             CHGVAR     VAR(%SST(&SQLSTMT 1 12)) VALUE('DELETE FROM ')
+             CHGVAR     VAR(%SST(&SQLSTMT 13 21)) VALUE(&CPYTOLIB +
+                          *TCAT '/' *TCAT &CPYTOFILE)
+             CHGVAR     VAR(%SST(&SQLSTMT 34 13)) VALUE('WHERE C0Y1NX=')
+             CHGVAR     VAR(%SST(&SQLSTMT 47 3)) VALUE(&CMPNBR)
+             CHGVAR     VAR(%SST(&SQLSTMT 51 13)) VALUE('AND C0BNTS>=')
+             CHGVAR     VAR(%SST(&SQLSTMT 64 30)) +
+                          VALUE('''' *TCAT &CURTMESTMP *TCAT '''')
+             CHGVAR     VAR(%SST(&SQLSTMT 93 11)) VALUE('AND C0UXSX=')
+             CHGVAR     VAR(%SST(&SQLSTMT 104 11)) VALUE('''0''')
+
+             RUNSQL     SQL(&SQLSTMT) COMMIT(*NONE)
+
+             ENDSUBR
+
+
+ END:        ENDPGM

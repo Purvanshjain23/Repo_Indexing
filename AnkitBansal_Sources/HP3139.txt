@@ -1,0 +1,317 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP3139-Update Average Days Old In for Open Groups
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     09/08/04
+      *
+      * Function:    Read all Open Nur/GF groups. Process all transfers into these groups.
+      *
+      *              This program is called nightly from the Job Scheduler.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/04/04  LeAnne Fedor
+      *           Users are now maintaining the ADOI for groups with Group Types of
+      *           Boar and GDU. So, we added logic to omit these groups from processing.
+      *
+      * 02/03/05  LeAnne Fedor
+      *           Recompile only. New field "Transferred In Open Gilts" added
+      *           to BGF Daily Production file.
+      *
+      * 08/23/05  LeAnne Fedor
+      *           Recompile only. New field "Man Hours" added to BGF Daily Production file.
+      *
+      * 08/01/08  LeAnne Ramsey
+      *           Recompile only. Removed fields from BGF Daily Production file.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 03/30/16  Barb Gutierrez
+      *           Only calculate the average days old in when the open date on the group is
+      *           not zero.      C005494
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp025    if   e           k disk
+      *    Group type
+      *
+      *
+     Fhsl034d   if   e           k disk    rename(hgrec:hgrecd) prefix(p1)
+      *    Hog group
+      *
+      *
+     Fhsl034p   uf   e           k disk
+      *    Hog group (open groups only)
+      *
+      *
+     Fhsj075i   if   e           k disk
+      *    Transfer detail + Transfer header
+      *
+      *
+     Fhsl082a   if   e           k disk
+      *  BGF daily production
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *----------------------------------------------------------------
+      * CONSTANTS
+      *----------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *----------------------------------------------------------------
+      * STANDALONE FIELDS
+      *----------------------------------------------------------------
+      *
+      * Workfields
+      *
+     D wkavrclb        s              7  2
+     D wkadoi          s             15  2
+     D wknewadoi       s             15  2
+     D wktotadoi       s             15  2
+     D wktothd         s              5  0
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkcymdiso       s               D   datfmt(*iso)
+     D wkrcdtiso       s               D   datfmt(*iso)
+     D wkopdtiso       s               D   datfmt(*iso)
+     D wkadoidt        s                   like(hgopdt)
+     D wkdays          s              3  0
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * Process Open Hog Groups---omit all of the following groups:
+      *   1) BGF groups
+      *   2) Boar groups
+      *   3) GDU groups
+      *
+     C     *loval        setll     hsl034p
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsl034p                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             hgppcd <> 'BGF  ' and
+     C                             hggtcd <> 'B' and
+     C                             hggtcd <> 'G'
+      *
+      * Clear accumulators
+      *
+     C                   z-add     0             wktotadoi
+     C                   z-add     0             wktothd
+     C                   z-add     0             wknewadoi
+      *
+      * Add 7 days to the Open Date. We will process all transfers into
+      * the group with Received Dates on/before this date.
+      *
+     C                   movel     hgopdt        wkcymdiso
+     C                   adddur    7:*days       wkcymdiso
+     C                   move      wkcymdiso     wkadoidt
+      *
+     C                   exsr      $transfers
+      *
+      * Calculate new ADOI for the group.
+      *
+     C                   if        wktothd <> 0
+     C                   eval      wknewadoi = wktotadoi / wktothd
+     C                   endif
+      *
+      * Retrieve the ADOI associated with the group type and compare to your
+      * calculated value. If your calculated value exceeds the file value or is
+      * zero, use the file value.
+      *
+     C     hggtcd        chain     hsp025                             92
+     C                   if        *in92 = *off and                             If valid type
+     C                             (wknewadoi = 0 or wknewadoi > gtadoi)
+     C                   z-add     gtadoi        wknewadoi
+     C                   endif                                                  If valid type
+      *
+     C                   z-add(h)  wknewadoi     hgadoi
+     C                   update    hgrec
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Process Transfers into this Destination Group
+      *---------------------------------------------------------------
+      *
+     C     $transfers    begsr
+      *
+     C     hghgsn        setll     hsj075i
+      *
+     C                   dou       *in91 = *on                                  Do tran in
+     C     hghgsn        reade     hsj075i                                91
+     C                   if        *in91 = *off and mhmscd <> 'SC'              If not eof
+     C                             and mhrcdt <= wkadoidt
+      *
+      * Determine Average Days Old In for the detail line.
+      *
+     C                   exsr      $adoi
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do tran in
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Average Days Old In
+      *----------------------------------------------------------------
+      *
+     C     $adoi         begsr
+      *
+      * Calculate Average Received Pounds
+      *
+     C                   z-add     0             wkavrclb
+     C                   if        mdqlhd <> 0 or mdrjhd <> 0
+     C                   eval      wkavrclb = (mdqllb + mdrjlb) /
+     C                                        (mdqlhd + mdrjhd)
+     C                   endif
+      *
+      *
+      * Try to come up with an Average Days Old In value:
+      *  1) If out of BGF,
+      *       a) use Wean logic for:
+      *            1) small pigs going anywhere
+      *            2) transfers into GF WTF groups
+      *       b) do nothing for large pigs; we will let it fall thru the Default logic
+      *  2) If out of NUR or GF
+      *       a) add ADOI of the origin group to the difference between Open Date of the
+      *          Origin Group and Received Date of this transfer.
+      *
+     C                   z-add     0             wkadoi
+      *
+     C                   select
+     C                   when      mhorpp = 'BGF  '
+     C                   if        wkavrclb <= 20 or
+     C                             (mhdnpp = 'GF   ' and hggtcd = 'W')
+     C                   exsr      $wean
+     C                   endif
+     C                   other
+      *
+     C     mdorsn        chain     hsl034d                            92
+     C                   if        *in92 = *off
+     C     *iso          move      mhrcdt        wkrcdtiso
+      *
+      * Iowa farms that were imported in from a xls is causing issues with this calculation.
+      * The open date gets populated when pigs wean from the Nursery.  Because of how they were
+      * imported into the AS/400, this date did not get populated.  The live office will have to
+      * research each group and determine what needs to happen.  Until then, to keep this program
+      * from blowing up, we'll only do the calculation if the open date is populated.
+      *
+     C                   if        p1hgopdt <> 0
+     C     *iso          move      p1hgopdt      wkopdtiso
+     C     wkrcdtiso     subdur    wkopdtiso     wkdays:*d
+     C     wkdays        add       p1hgadoi      wkadoi
+     C                   else
+     C                   z-add     0             wkadoi
+     C                   endif
+      *
+     C                   endif
+     C                   endsl
+      *
+      * If your Average Days Old In value is zero, default something.
+      *
+     C                   select
+     C                   when      wkadoi <> 0
+      *
+     C                   when      mhdnpp = 'NUR  ' or
+     C                             (mhorpp = 'BGF  ' and wkavrclb <= 20) or
+     C                             (mhorpp = 'BGF  ' and mhdnpp = 'GF   ' and
+     C                              hggtcd = 'W')
+     C                   z-add     18            wkadoi
+     C                   other
+      *
+     C                   z-add     67            wkadoi
+     C                   endsl
+      *
+      * Calc ADOI Days for pigs on this detail line as:
+      *    ADOI  times  Received Head
+      *
+     C                   eval      wkadoi = wkadoi * (mdqlhd + mdrjhd)
+      *
+      *
+      * Accumulate the Line ADOI and Received Head for the group.
+      *
+     C                   add       wkadoi        wktotadoi
+     C                   add       mdqlhd        wktothd
+     C                   add       mdrjhd        wktothd
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------
+      * Derive an Average Days Old In value when Under 20 pounds and out of BGF
+      *----------------------------------------------------------------------------
+      *
+      * Get the Average Age Piglet Weaned from the BGF Daily Production file for the
+      * Origin Farm Site/Received Date. If you don't get a direct hit or the retrieved
+      * record has a value of zero, read prior records for the Farm until you find one
+      * with a value.
+      *
+     C     $wean         begsr
+      *
+     C     key01         chain     hsl082a                            92
+     C                   if        *in92 = *off and bdadwn <> 0                 If hit
+     C                   z-add     bdadwn        wkadoi
+     C                   else
+      *
+     C     key01         setgt     hsl082a
+     C                   dou       wkadoi <> 0 or *in93 = *on
+     C     mhorfs        readpe    hsl082a                                93
+     C                   if        *in93 = *off and bdadwn <> 0
+     C                   z-add     bdadwn        wkadoi
+     C                   endif
+     C                   enddo
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    mhorfs
+     C                   kfld                    mhrcdt
+      *
+     C                   endsr
+      /eject

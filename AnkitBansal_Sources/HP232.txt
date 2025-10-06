@@ -1,0 +1,625 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP232 - BATCH EDIT OF EXPENSE EDIT FILE
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     12/31/97
+      *
+      * FUNCTION: THIS PROGRAM PERFORMS A BATCH EDIT OF THE RECORDS
+      *           IN THE EDIT FILE FOR THE G/L EXPENSE INTERFACE TO HPS.
+      *
+      *           A LISTING IS GENERATED. IT PRINTS EACH RECORD AND
+      *           LISTS ALL ERROR MESSAGES FOR EACH RECORD (UP TO A
+      *           MAXIMUM OF 20 PER RECORD.)
+      *
+      *           THIS PROGRAM IS AUTOMATICALLY SUBMITTED BY TWO FUNCTIONS:
+      *            1) AS THE FINAL STEP IN THE COPYING OF DATA FROM THE
+      *               G/L SYSTEM TO HPS (THIS FUNCTION IS USER-SUBMITTED
+      *               THROUGH HP428 (HP428CL))
+      *            2) AS THE FIRST STEP WHEN THE USER SUBMITS THE
+      *               POSTING FUCNTION THROUGH HP449 (HP449CL)
+      *
+      *           THIS PROGRAM CAN ALSO BE CALLED ON DEMAND BY THE USER
+      *           THROUGH HP432-SPECIFY BATCH EDIT OF EXPENSE EDIT FILE.
+      *
+      *           IF THIS PROGRAM FINDS ANY ERRORS,
+      *              THE RECORD IS FLAGGED WITH AN ERROR AND THE LDA
+      *              IS SET TO INDICATE THAT ERRORS EXIST.
+      *
+      *  ERROR MESSAGES
+      *
+      *           ERROR MESSAGES ARE PRINTED FOR EACH RECORD.
+      *           THE MESSAGES ARE RETRIEVED THROUGH A
+      *           CALL TO CLP UT80046A USING THE SAME USER MESSAGE
+      *           FILE, ARRAYS AND ARRAY LOGIC AS IN THE INTERACTIVE
+      *           PROGRAMS.  HOWEVER, THEY ARE PRINTED FROM THE CL
+      *           USING THE COMMAND 'CLPRINTA' THAT WAS CREATED BY
+      *           ERNIE WALLACE.
+      *
+      *           QPRINT IS USED FOR THE OUTPUT FILE SINCE THE
+      *           COMMAND 'CLPRINTA' PRINTS TO QPRINT.
+      *           QPRINT IS OVERRIDDEN IN THE SUBMISSION CLP
+      *           TO 'SHARE = YES' TO ALLOW BOTH THIS RPG PROGRAM AND
+      *           CLP UT80046A TO WRITE TO THE SAME PRINT FILE.
+      *
+      *           SINCE THE 'CLPRINTA' COMMAND LOGIC IN UT80046A IS NOT
+      *           BEING USED TO PRINT HEADINGS, COUNT LINES OR PAGE
+      *           BREAK, THESE FUNCTIONS ARE CONTROLLED FROM THIS RPG
+      *           PROGRAM BY COUNTING THE LINES.
+      *
+      *           THIS PROGRAM PAGE-BREAKS WHEN THE LINE COUNT
+      *           REACHES 62 LINES BECAUSE THIS REPORT IS DESIGNED
+      *           TO RUN ON PAPER THAT IS 68 LINES LONG. THEREFORE,
+      *           IF THE USERS GENERATE THIS REPORT ON VARIOUS
+      *           LASER PRINTERS WITH DIFFERENT PAGE LENGTHS, THE
+      *           PAGE BREAKS MAY BE GOOFY.
+      /EJECT
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 08/22/01  LeAnne Fedor
+      *           There is no longer a 1-to-1 relationship in HPS between 'farm site' and
+      *           'cost center'. (ie: A cost center can now be assigned to more than 1 farm
+      *           site.) So, we removed 'farm site' logic from this program.
+      *           And, we replaced the 'farm' break logic with 'cost center' break logic.
+      *
+      *           Also, the logic in $excd now actually updates the record...before it
+      *           populated the error flag field but never updated the record...we don't
+      *           know why.
+      *
+      * 01/29/03  LeAnne Fedor
+      *           Changed 'expense code' edit to actually edit 'expense code'...instead
+      *           of 'expense subclass'.  The old 'goofy' logic was required to handle the
+      *           roll-up logic...but the users are no longer 'rolling up'.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+      *
+     FHSP052    IF   E           K DISK
+      *  EXPENSE CODE
+      *
+      *
+     FHSL231A   UF   E           K DISK
+      *  EDIT FILE FOR G/L TO HPS EXPENSE INTERFACE
+      *
+     FQPRINT    O    F  132        PRINTER OFLIND(*INOF)
+      *
+      /EJECT
+      ****************************************************************
+      * TABLE AND ARRAY SPECIFICATIONS
+      ****************************************************************
+      *
+      *
+      *---------------------------------------------------------------
+      *  PRINT ARRAYS FOR TOTALS
+      *---------------------------------------------------------------
+      *
+     D AM              S             15  2 DIM(3)                               DOLLAR AMOUNT
+      *
+      *---------------------------------------------------------------
+      *  STANDARD MESSAGE ARRAYS
+      *---------------------------------------------------------------
+      *
+      /EJECT
+      ****************************************************************
+      * INPUT SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * STANDARD ERROR MESSAGE HANDLING DATA STRUCTURES
+      *---------------------------------------------------------------
+      *
+      * FOR ERROR MESSAGE HANDLING, A PACKED INDEX (E) IS REQUIRED.
+      * FOR PROGRAM READABILITY, DEFINE A CORRESPONDING ERROR COUNT
+      * FIELD CALLED 'ERROR'
+      *
+     D                 DS                  INZ
+     D  ERROR                  1      2P 0
+     D  E                      1      2P 0
+      *
+      * THIS DATA STRUCTURE SUPPLIES THE NAME OF THE MESSAGE FILE TO
+      * THE MESSAGE HANDLING CL PROGRAM.  THE FIELD NAME MSGFIL MUST BE
+      * CONSTANT. THE VALUE IN QUOTES IS THE NAME OF THE SPECIFIC
+      * MESSAGE FILE CONTAINING THE USER DEFINED MESSAGES.
+      *
+     D                 DS                  INZ
+     D  MSGFIL                 1     10    INZ('HSMSGF    ')
+      *
+      * THE FOLLOWING 3 DATA STRUCTURES ARE USED TO SPEED MESSAGE
+      * HANDLING SINCE IT IS FASTER TO CLEAR DATA STRUCTURES THAN
+      * ARRAYS.  EACH IS ASSOCIATED WITH A STANDARD MESSAGE ARRAY.
+      *
+     D MGI             DS           140    INZ
+     D  MGID                   1    140
+     D                                     DIM(20)                              MSG ID ARRAY
+      *
+     D MGD             DS          1000    INZ
+     D  MGDT                   1   1000
+     D                                     DIM(20)                              MSG PARMS
+      *
+     D MGWK            DS            50    INZ
+     D  MGW                    1     50
+     D                                     DIM(50)                              MSG WORK PARMS
+      *
+      *---------------------------------------------------------------
+      *  LOCAL DATA AREA
+      *---------------------------------------------------------------
+      *
+     D                UDS
+     D  LDERFL                80     80
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *
+      *---------------------------------------------------------------
+      * STANDARD DATABASE FILE INFORMATION DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTDBFR (RECORD FORMAT: FDBCKD)
+     D DBFEED        E DS                  EXTNAME(UTDBFR)
+      *
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+     D TOTCJD          C                   CONST('COST CENTER')
+     D TOTES           C                   CONST('SUBCLASS')
+     D TOTRP           C                   CONST('REPORT')
+      *
+      *
+     D                 DS
+     D  DUMMYD                 1      1
+      *  THE PRECEDING DUMMY DATA STRUCTURE IS ONLY TO KEEP THE I-SPEC
+      *  INFO FROM RUNNING OVER INTO THE 'CALC SPECS' ON THE COMPILE
+      *  LISTING.  IT SERVES NO OTHER PURPOSE AND CAN BE DELETED
+      *  AT ANY TIME!!!
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * PROCESS EACH RECORD IN THE EDIT FILE
+      *
+     C     *LOVAL        SETLL     HSL231A
+      *
+     C     *IN90         DOUEQ     *ON                                          DO STEP 2
+     C                   READ      HSL231A                                90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C                   MOVEL     NO            EEERFL
+      *
+     C     FIRST         IFEQ      YES
+     C                   MOVEL     NO            FIRST
+     C                   MOVEL     EEESCD        SVESCD
+     C                   MOVEL     EECJD         SVCJD
+     C                   ENDIF
+      *
+      * BREAK LOGIC
+      *
+     C                   SELECT
+     C     EEESCD        WHENNE    SVESCD
+     C                   EXSR      $TOTCJD
+     C                   EXSR      $TOTES
+      *
+     C     EECJD         WHENNE    SVCJD
+     C                   EXSR      $TOTCJD
+     C                   ENDSL
+      *
+      *
+      * ACCUMULATE DOLLAR AMOUNT INTO ARRAY
+      *
+     C                   ADD       EEAM          AM
+      *
+      *
+      * ACCUMULATE THE NUMBER OF RECORDS PER COST CENTER.
+      * THIS FIELD WILL BE USED TO DETERMINE WHETHER TO
+      * PRINT A COST CENTER TOTAL.
+      *
+     C                   ADD       1             COUNT
+      *
+      *
+      * VALIDATE EXPENSE CODE
+      *
+     C                   EXSR      $EXCD
+      *
+      * SET UP TO PRINT THE ERROR FLAG ONLY WHEN THERE IS AN ERROR
+      *
+     C                   SELECT
+     C     EEERFL        WHENEQ    YES
+     C                   MOVEL     YES           DTERFL
+     C                   OTHER
+     C                   MOVE      *BLANK        DTERFL
+     C                   ENDSL
+      *
+      * Update the edit file record
+      *
+     C                   UPDATE    EEREC
+      *
+      * PRINT THE RECORD
+      *
+     C                   EXSR      $PRINT
+      *
+      * PRINT THE ERROR MESSAGES FOR THE RECORD
+      *
+     C     ERROR         IFNE      0
+     C                   EXSR      $PRMSG
+     C                   ENDIF
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO STEP 2
+      *
+      *
+      * PRINT TOTALS:
+      *    COST CENTER
+      *    EXPENSE SUBCLASS
+      *    REPORT
+      *
+     C                   EXSR      $TOTCJD
+     C                   EXSR      $TOTES
+     C                   EXSR      $TOTRP
+      *
+      *
+      *----------------------------------------------------------------
+      * EOF PROCESSING
+      *----------------------------------------------------------------
+      *
+      * IF NO ERRORS WERE ENCOUNTERED IN THE DATA, THEN PRINT
+      * AN INFORMATIONAL MESSAGE THAT NO ERRORS WERE ENCOUNTERED
+      * OTHERWISE, UPDATE THE LDA TO INDICATE ERRORS EXIST.
+      *
+     C     ERRFL         IFEQ      NO                                           IF NO ERR
+     C                   EXCEPT    NOERR
+     C                   MOVEL     NO            LDERFL
+     C                   ELSE
+     C                   MOVEL     YES           LDERFL
+     C                   ENDIF                                                  IF NO ERR
+      *
+     C                   SETON                                        LR
+      /EJECT
+      *---------------------------------------------------------------
+      * VALIDATE EXPENSE CODE
+      *---------------------------------------------------------------
+      *
+     C     $EXCD         BEGSR
+      *
+     C     EEEXCD        CHAIN     HSP052                             92
+     C     *IN92         IFEQ      *ON                                          IF BAD
+      *
+     C                   MOVEL     YES           EEERFL
+     C                   MOVEL     YES           ERRFL
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00877'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     EEEXCD        MGW(1)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+     C                   ENDIF                                                  IF BAD
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * PRINT COST CENTER TOTAL DOLLARS PER SUBCLASS
+      *---------------------------------------------------------------
+      *
+     C     $TOTCJD       BEGSR
+      *
+     C                   Z-ADD     1             X
+      *
+     C                   SELECT
+     C     COUNT         WHENEQ    1
+     C                   Z-ADD     0             AM(X)
+     C                   OTHER
+      *
+     C     WKCURL        IFGT      WKOVFL
+     C                   EXSR      $HRHDR
+     C                   ENDIF
+      *
+     C                   MOVEL(P)  TOTCJD        TOTDS
+     C                   MOVEL(P)  SVCJD         TOTCD
+     C                   EXCEPT    TOTAL
+     C                   ADD       3             WKCURL
+     C                   ENDSL
+      *
+     C                   MOVEL     EECJD         SVCJD
+     C                   Z-ADD     0             COUNT
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * PRINT SUBCLASS TOTAL DOLLARS
+      *---------------------------------------------------------------
+      *
+     C     $TOTES        BEGSR
+      *
+     C     WKCURL        IFGT      WKOVFL
+     C                   EXSR      $HRHDR
+     C                   ENDIF
+      *
+     C                   MOVEL(P)  TOTES         TOTDS
+     C                   MOVEL(P)  SVESCD        TOTCD
+     C                   Z-ADD     2             X
+     C                   EXCEPT    TOTAL
+     C                   ADD       3             WKCURL
+      *
+     C                   MOVEL     EEESCD        SVESCD
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $TOTRP - PRINT REPORT TOTAL
+      *---------------------------------------------------------------
+      *
+     C     $TOTRP        BEGSR
+      *
+     C     WKCURL        IFGT      WKOVFL
+     C                   EXSR      $HRHDR
+     C                   ENDIF
+      *
+     C                   MOVE      *BLANK        TOTCD
+     C                   MOVEL(P)  TOTRP         TOTDS
+     C                   Z-ADD     3             X
+     C                   EXCEPT    TOTAL
+      *
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $HRHDR - PRINT REPORT HEADINGS
+      *---------------------------------------------------------------
+      *
+      * RESET THE CURRENT LINE TO ZERO
+      * PRINT THE REPORT HEADINGS
+      * INCREMENT THE CURRENT LINE
+      *
+     C     $HRHDR        BEGSR
+      *
+     C                   Z-ADD     0             WKCURL
+     C                   EXCEPT    HRHDR
+     C                   ADD       8             WKCURL
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $PRINT - PRINT THE RECORD
+      *---------------------------------------------------------------
+      *
+      *  PRINT THE RECORD AND INCREMENT LINE COUNTER
+      *
+     C     $PRINT        BEGSR
+      *
+     C     WKCURL        IFGT      WKOVFL
+     C                   EXSR      $HRHDR
+     C                   ENDIF
+      *
+     C                   EXCEPT    DTLINE
+     C                   ADD       1             WKCURL
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------------
+      * $PRMSG - PRINT ERROR MESSAGES
+      *-------------------------------------------------------------------
+      *
+     C     $PRMSG        BEGSR
+      *
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * $WRMSG - SUBROUTINE TO WRITE ERROR MESSAGES TO REPORT
+      *---------------------------------------------------------------
+      *
+     C     $WRMSG        BEGSR
+      *
+      * IF OVERFLOW, PRINT REPORT HEADINGS
+      *
+     C     WKCURL        IFGT      WKOVFL
+     C                   EXSR      $HRHDR
+     C                   ENDIF
+      *
+      * PROGRAM UT80046A DOES NOT PRINT HEADINGS OR CHECK FOR PAGE
+      * BREAKS.  BEFORE CALLING UT80046A, DETERMINE IF ALL THE ERROR
+      * MESSAGES CAN BE PRINTED ON THE CURRENT PAGE.
+      * CALCULATE REMAINING PRINT LINES ON PAGE USING THE OVERFLOW LINE
+      * AND THE CURRENT LINE.
+      *
+     C     WKOVFL        SUB       WKCURL        WKDIFL
+      *
+      * IF YOU HAVE MORE MESSAGES THAN WILL FIT ON THE PAGE, THEN
+      * PAGE BREAK AND PRINT HEADINGS.
+      *
+     C     ERROR         IFGT      WKDIFL
+     C                   EXSR      $HRHDR
+     C                   EXSR      $PRINT
+     C                   ENDIF
+      *
+      * INCREMENT THE CURRENT LINE BY THE NUMBER OF ERROR MESSAGES
+      * YOU WILL BE PRINTING IN UT80046A PLUS ONE FOR THE SPACE AFTER.
+      * THIS SETS THE CURRENT LINE NUMBER PROPERLY FOR WHEN YOU
+      * RETURN FROM UT80046A.
+      *
+     C     WKCURL        ADD       ERROR         WKCURL
+     C                   ADD       1             WKCURL
+      *
+     C                   CALL      'UT80046A'                           43
+     C                   PARM                    MGID
+     C                   PARM                    MGDT
+     C                   PARM                    ERROR
+     C                   PARM      MSGFIL        MSGFL
+      *
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CLMSG - SUBROUTINE TO CLEAR MESSAGES
+      *----------------------------------------------------------------
+      *
+     C     $CLMSG        BEGSR
+      *
+     C                   CALL      'UT80046A'                           43
+     C                   PARM      *BLANK        MGI
+     C                   PARM      *BLANK        MGD
+     C                   PARM      *ZERO         ERROR
+     C                   PARM      MSGFIL        MSGFL
+      *
+     C                   ENDSR
+      *
+      /EJECT
+      *---------------------------------------------------------------
+      * *INZSR - INITIALIZATION SUBROUTINE
+      *---------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      *
+     C                   MOVEL     *ALL'-'       DASH            132
+     C                   TIME                    RTIME             6 0
+      *
+      * DEFINE WORK FIELDS USED IN CONTROLLING LINE COUNTS FOR
+      * PRINTING SINCE DETAIL LINES ARE PRINTED FROM THIS RPG PROGRAM
+      * AND ERROR MESSAGES ARE PRINTED FROM CLP UT80046A.
+      *
+     C                   Z-ADD     0             WKDIFL            3 0          LINES LEFT
+     C                   Z-ADD     62            WKOVFL            3 0          OVERFLOW LIN
+     C                   Z-ADD     0             WKCURL            3 0          CURRENT LINE
+      *
+      * MESSAGE PARMS
+     C                   MOVE      *BLANK        MSGFL            10            MESSAGE FILE
+     C                   Z-ADD     20            MAXMSG            2 0
+      *
+      *
+      * ARRAY INDEX
+     C                   Z-ADD     0             X                 1 0
+      *
+      * WORK FIELDS
+      *
+     C                   MOVEL     NO            ERRFL             1
+      *
+      * SAVE FIELDS
+      *
+     C     *LIKE         DEFINE    EEESCD        SVESCD
+     C     *LIKE         DEFINE    EECJD         SVCJD
+      *
+      * CONTROL FIELDS
+      *
+     C                   MOVEL     YES           FIRST             1
+     C                   Z-ADD     0             COUNT             7 0
+      *
+      * PRINT FIELDS
+      *
+     C     *LIKE         DEFINE    EEERFL        DTERFL
+     C                   MOVE      *BLANK        TOTDS            11
+     C                   MOVE      *BLANK        TOTCD            12
+      *
+      * PRINT REPORT HEADINGS
+      *
+     C                   EXSR      $HRHDR
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------
+      * REPORT HEADING LINES
+      *-------------------------------------------------------------
+      *
+     OQPRINT    E            HRHDR          1 01
+     O                       SDPGM               10
+     O                                           75 'HOG PRODUCTION SYSTEM'
+     O                                          122 'DATE'
+     O                       UDATE         Y    132
+      *
+     O          E            HRHDR          1
+     O                       SDUSR               10
+     O                                           65 'BATCH EDIT LISTING OF'
+     O                                         +  1 'EXPENSE EDIT FILE'
+     O                                          122 'TIME'
+     O                       RTIME              132 '  :  :  '
+      *
+     O          E            HRHDR          2
+     O                                          122 'PAGE'
+     O                       PAGE          Z    132
+      *
+     O          E            HRHDR          1
+     O                                            7 'EXPENSE'
+     O                                           79 'EXPENSE'
+     O                                           91 'ALLOCATION'
+      *
+     O          E            HRHDR          1
+     O                                            8 'SUBCLASS'
+     O                                           22 'COST'
+     O                                           39 'EXPENSE'
+     O                                           78 'CLASS'
+     O                                           89 'METHOD'
+     O                                           99 'REPORT'
+     O                                          108 'COMPANY'
+     O                                          122 '-ACCOUNTING-'
+      *
+     O          E            HRHDR          1
+     O                                            6 'CODE'
+     O                                           24 'CENTER'
+     O                                           37 'CODE'
+     O                                           48 'ACCOUNT'
+     O                                           69 'AMOUNT'
+     O                                           77 'CODE'
+     O                                           88 'CODE'
+     O                                           98 'CODE'
+     O                                          107 'CODE'
+     O                                          114 'YEAR'
+     O                                          122 'PERIOD'
+     O                                          129 'ERROR'
+      *
+     O          E            HRHDR          1
+     O                       DASH               132
+      *
+      *-------------------------------------------------------------
+      * DETAIL LINE
+      *-------------------------------------------------------------
+      *
+     O          E            DTLINE      1  0
+     O                       EEESCD               6
+     O                       EECJD               25
+     O                       EEEXCD              38
+     O                       EEOBJ               47
+      *
+     O                       EEAM          K     70
+      *
+     O                       EEECCD              78
+     O                       EEAMCD              89
+     O                       EERPCD              99
+     O                       EECOCD             106
+     O                       EEACYR        Z    114
+     O                       EEACPE        Z    120
+     O                       DTERFL             126
+      *
+      *
+      *-------------------------------------------------------------
+      * TOTAL LINE
+      *-------------------------------------------------------------
+      *
+     O          E            TOTAL       2  1
+     O                                           13 '*** TOTAL ***'
+     O                       TOTDS               25
+     O                       TOTCD               38
+     O                       AM(X)         KB    70
+     O                                          132 '*** TOTAL ***'
+      *
+      *-------------------------------------------------------------
+      * NO ERROR MESSAGE LINE
+      *-------------------------------------------------------------
+      *
+     O          E            NOERR       2
+     O                                           23 'NO ERRORS WERE FOUND IN'
+     O                                           39 ' THE BATCH EDIT.'

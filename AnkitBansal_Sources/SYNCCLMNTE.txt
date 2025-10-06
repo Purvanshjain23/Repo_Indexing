@@ -1,0 +1,125 @@
+**FREE
+//*****************************************************************************
+// Company: Seaboard Foods Inc.
+// Author : Ankit Bansal
+// Desc   : SYNCCLMNTE - Write Program to Sync-Up Legacy Claim Notes
+// Issue# : P2P CCM - P2P is not writing all the claim notes
+// Date   : 05/20/2025
+//*****************************************************************************
+
+//*****************************************************************************
+// Control Level specifications
+//*****************************************************************************
+Ctl-Opt AlwNull(*UsrCtl)
+        Option(*NoDebugIO:*SrcStmt)
+        DftActGrp(*NO);
+
+//*****************************************************************************
+// File Level specifications
+//*****************************************************************************
+//Dcl-F QSysPrt Printer(132) Oflind(*IN51);
+Dcl-F PDMNCPL1 Disk Usage(*Input) Keyed;
+
+//*****************************************************************************
+// Declare program prototypes
+//*****************************************************************************
+
+Dcl-PR SYNCCLMNTE ExtPgm('SYNCCLMNTE');
+End-PR;
+
+Dcl-PI SYNCCLMNTE
+End-PI;
+
+//*****************************************************************************
+// Declare Standalone Variables
+//*****************************************************************************
+Dcl-S C_Claim_Number Packed(7);
+Dcl-S C_Disposition_Notes Char(2000);
+Dcl-S C_Change_Date Packed(7);
+Dcl-S C_Change_Time Packed(7);
+Dcl-S Legacy_Line_Number Packed(3);
+Dcl-s Legacy_Notes_Line Char(70);
+Dcl-S Position Packed(4);
+Dcl-S Delimiter Char(1) Inz(' ');
+
+// ****************************************************************************
+// Processing logic
+// ****************************************************************************
+
+//‚Set SQL commit options
+Exec Sql Set Option Commit = *NONE, CloSqlCsr = *ENDMOD;
+
+ExSr ZWriteNotes;
+
+// Exit from the program
+*Inlr = *On;
+Return;
+//*****************************************************************************
+
+//*****************************************************************************
+BegSr ZWriteNotes;
+
+  Exec Sql Declare ReadFile Cursor For
+             Select Claim_Number, Disposition_Notes,
+                    Change_Date, Change_Time
+             From AR_Claim_Header
+               Where Disposition_Notes <> ' ';
+
+  Exec Sql Open ReadFile;
+
+  Exec Sql Fetch ReadFile Into :C_Claim_Number, :C_Disposition_Notes,
+                               :C_Change_Date, :C_Change_Time;
+
+  Dow SqlCode = 0;
+
+    Position = 1;
+    Legacy_Line_Number = 1;
+
+    //‚Check if this claim's note already present in AR_CLAIM_EXPLANATION table
+    SetLL C_Claim_Number PDMNCPL1;
+    If %Equal And Not %EoF;
+      Exec Sql Fetch ReadFile Into :C_Claim_Number, :C_Disposition_Notes,
+                                   :C_Change_Date, :C_Change_Time;
+      Iter;
+    EndIf;
+
+    Dow %Len(%TrimR(C_Disposition_Notes)) > 0;
+
+      If C_Disposition_Notes = *Blanks;
+        Leave;
+      ElseIf %Len(%TrimR(C_Disposition_Notes)) <= 70;
+        Legacy_Notes_Line = C_Disposition_Notes;
+        C_Disposition_Notes = ' ';
+      Else;
+        Position = %ScanR(Delimiter:C_Disposition_Notes:1:70);
+        If Position <= 1 Or Position > 70;
+          Position = 70;
+        EndIf;
+
+        Legacy_Notes_Line = %Subst(C_Disposition_Notes: 1: Position);
+        C_Disposition_Notes = %Trim(%Subst(C_Disposition_Notes: Position + 1));
+      Endif;
+
+      Exec Sql Insert InTo AR_CLAIM_EXPLANATION
+                 (CLAIM_NUMBER,CLAIM_EXPLANATION_LINE_NO,CLAIM_EXPLANATION_TEXT,
+                  CLAIM_EXPL_TYPE_OF_NOTE, CLAIM_DEPARTMENT_GROUP,RECORD_STATUS,
+                  CREATE_PROGRAM,CREATE_DATE,CREATE_TIME)
+               Values(:C_Claim_Number, :Legacy_Line_Number, :Legacy_Notes_Line,
+                      'E', 'CAR','A','P2P',:C_Change_Date, :C_Change_Time);
+
+      If Legacy_Line_Number <= 998;
+        Legacy_Line_Number += 1;
+      Else;
+        Leave;
+      EndIf;
+
+    EndDo;
+
+    Exec Sql Fetch ReadFile Into :C_Claim_Number, :C_Disposition_Notes,
+                                 :C_Change_Date, :C_Change_Time;
+  EndDo;
+
+  Exec Sql Close ReadFile;
+
+EndSr;
+//*****************************************************************************

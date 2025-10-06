@@ -1,0 +1,203 @@
+/*******************************************************************/
+/* PROGRAM NUMBER:  PRGPSTO                                        */
+/* PROGRAM NAME  :  POST PURGE PROCESS                             */
+/*  PARAMETERS:                                                    */
+/*  &PCGCODE - PURGE CODE (ARS,CMK,HPE,INV,OMS,TRC,ETC)            */
+/*  &PRODLIB - PRODUCTION LIBRARY THAT IS BEING PURGED             */
+/*  &PCAPPLIC - APPLICATION OR GROUP CODE BEING PURGED             */
+/*  &PRODFILE - PRODUCTION FILE BEING PURGED, A COPY OF THIS IS    */
+/*              CREATED IN THE PURGE LIB TO WRITE PURGED RECS TO   */
+/*  &PRODLGL - LOGICAL OVER PROD FILE IN PURGE LIBRARY USED TO     */
+/*             WRITE PURGED RECS TO PURGE LIB                      */
+/*  &PRGTAPEF - PURGE TAPE FILE IN PURGE LIBRARY (ENDS ...PRG)     */
+/*  &RTNCODE - RETURN CODE, BLANK IF NO ERROR, ELSE ERROR CODE     */
+/*  &PCFIELD - NOT CURRENTLY USED                                  */
+/*  &PRGLIB - PURGE LIBRARY, TAKES THE PLACE OF QTEMP              */
+/*                                                                 */
+/* 1. RETRIEVE NUMBER OF RECORDS TO SEE IF THERE WERE ANY RECORDS  */
+/*    PURGED (THAT NEED TO BE SAVED TO TAPE)                       */
+/* 2. IF THERE WERE PURGED RECORDS, FORMAT THE "Z" MBR NAME BY     */
+/*    CONCATONATING "Z" + PURGE CODE + PURGE THRU DATE             */
+/* 3. COPY THE PURGED RECORDS FROM THE FILE TO THE PURGE TAPE      */
+/*    FILE'S "Z" MEMBER.                                           */
+/* 4. CLEAR THE TEMPORARY FILE                                     */
+/* 5. UPDATE THE MEMBER DESCRIPTION WITH THE PURGE DATE AND THE    */
+/*    PURGE CODE.                                                  */
+/*******************************************************************/
+/* MODIFIED:                                                       */
+/* L BUSER FP1009 08/06/2007                                       */
+/*  PASS IN GROUP CODE, LIBRARY, AND APPLIC CODE, AND ONLY THE     */
+/*  PURGE THRU DATE. ADJUSTED MEMBER DESCRIPTION. CHANGE FIELD     */
+/*  NAMES FOR ACCURACY AND READABILITY.                            */
+/* 10/05/07  CHANGE MBR NAME TO INCLUDE THE PURGE CODE:            */
+/*           Z + PURGE CODE + YEAR + MONTH + DAY                   */
+/* 11/29/07  Z-MEMBER TO USE THE PASSED IN PURGE THRU DATE INSTEAD */
+/*           OF THE JOB DATE                                       */
+/* 01/30/08  CHANGE QTEMP TO THE NEW PASSED IN PARM OF TO LIBRARY. */
+/*  NOT AN ERROR IF THE "Z" MEMBER ALREADY EXISTS IN THE *PRG FILE */
+/*  ATTEMPT TO INCREMENT IT 3 TIMES, COPY ANYWAY IF PROBLEMS.      */
+/*  IF NO COPY ERROR, CLEAR THE PROD FILE IN THE SAVE LIBRARY      */
+/* 01/27/09  CHANGE FIELD NAMES TO MATCH PRGPREO                   */
+/* R15035 DN  06/05/19 - Added 'TEST' verbiage to SNDPGRMSG when   */
+/*   running job in TEST env.                                      */
+/*                                                                 */
+/*******************************************************************/
+ PRGPSTO:    PGM        PARM(&PCGCODE &PRODLIB &APPLCODE &PRODFILE +
+                          &PRGTAPEF &PDTE &PRGLIB)
+
+             DCL        VAR(&PCGCODE) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&PRODLIB) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&APPLCODE) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&PRODFILE) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PRGTAPEF) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&ZMBR) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&ZDATE) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&MDSC) TYPE(*CHAR) LEN(40)
+             DCL        VAR(&PDTE) TYPE(*DEC) LEN(7)
+             DCL        VAR(&PRGLIB) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&NBRCDS) TYPE(*DEC) LEN(10)
+             DCL        VAR(&ERRCOUNT) TYPE(*DEC) LEN(1 0)
+             DCL        VAR(&ERRCNT2) TYPE(*DEC) LEN(1 0)
+             DCL        VAR(&TEXTDATE) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PDTEA) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&DTALIB) TYPE(*CHAR) LEN(10)
+
+/* FORMAT THE "Z" MEMBER USING THE PURGE CODE AND PURGE THRU DATE   */
+/* : Z + PURGE CODE + YEAR + MONTH + DAY                            */
+             CHGVAR     VAR(&PDTEA) VALUE(&PDTE)
+             CHGVAR     VAR(&ZDATE) VALUE(%SST(&PDTEA 2 6))
+             CHGVAR     VAR(&ZMBR) VALUE('Z')
+             CHGVAR     VAR(%SST(&ZMBR 2 3)) VALUE(&PCGCODE)
+             CHGVAR     VAR(%SST(&ZMBR 5 6)) VALUE(&ZDATE)
+             CHGVAR     VAR(&ERRCOUNT) VALUE(0)
+             CHGVAR     VAR(&ERRCNT2) VALUE(0)
+
+
+    /* R15035 - Get System Value For Data File Library to Determine Whether in +
+         PROD or TEST Environment */
+             CALL       PGM(PPJXXFR) PARM(' ' 'DTALIB' &DTALIB)
+
+
+/* SEE IF THERE ARE ANY RECORDS IN THE SAVE LIBRARY FILE             */
+ NORCDS:     RTVMBRD    FILE(&PRGLIB/&PRODFILE) NBRCURRCD(&NBRCDS)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CPYFERR))
+             IF         COND(&NBRCDS *EQ 0) THEN(GOTO CMDLBL(PGMMSG))
+
+ ADDMBR:     ADDPFM     FILE(&PRGLIB/&PRGTAPEF) MBR(&ZMBR)
+             MONMSG     MSGID(CPF3213) EXEC(DO) /* MAX MBRS EXCEEDED */
+               CHGVAR     VAR(&ERRCOUNT) VALUE(&ERRCOUNT + 1)
+               IF         COND(&ERRCOUNT *GT 1) THEN(GOTO +
+                            CMDLBL(ADDMBRERR))
+               CHGPF      FILE(&PRGLIB/&PRGTAPEF) MAXMBRS(*NOMAX) +
+                            SIZE(*NOMAX)
+             GOTO       CMDLBL(ADDMBR)
+             ENDDO
+
+/* IF MEMBER ALREADY EXISTS, CHANGE MBR NAME - 3 TRIES ONLY          */
+             MONMSG     MSGID(CPF7306) EXEC(DO) /* MBR NOT ADDED */
+             CHGVAR     VAR(&ERRCNT2) VALUE(&ERRCNT2 + 1)
+             IF         COND(&ERRCNT2 *GT 3) THEN(GOTO +
+                          CMDLBL(CPYANYWAY))
+               IF         COND(&ERRCNT2 *EQ 1) THEN(DO)
+                 CHGVAR     VAR(%SST(&ZMBR 4 6)) VALUE(&ZDATE)
+                 CHGVAR     VAR(%SST(&ZMBR 10 1)) VALUE('A')
+                 GOTO       CMDLBL(ADDMBR)
+                 ENDDO
+               IF         COND(&ERRCNT2 *EQ 2) THEN(DO)
+                 CHGVAR     VAR(%SST(&ZMBR 4 6)) VALUE(&ZDATE)
+                 CHGVAR     VAR(%SST(&ZMBR 10 1)) VALUE('B')
+                 GOTO       CMDLBL(ADDMBR)
+                 ENDDO
+               IF         COND(&ERRCNT2 *EQ 3) THEN(DO)
+                 CHGVAR     VAR(%SST(&ZMBR 4 6)) VALUE(&ZDATE)
+                 CHGVAR     VAR(%SST(&ZMBR 10 1)) VALUE('C')
+                 GOTO       CMDLBL(ADDMBR)
+                 ENDDO
+             ENDDO
+
+/* IF MORE THAN 3 ATTEMPTS TO ADD THE SAME MBR - COPY ANYWAY        */
+/* COPY QTEMP TO THE NEW MEMBER CREATED FOR SAVING TO TAPE          */
+/* IF NO COPY ERROR, CLEAR THE PROD FILE IN THE SAVE LIBRARY(???)   */
+ CPYANYWAY:  CPYF       FROMFILE(&PRGLIB/&PRODFILE) +
+                          TOFILE(&PRGLIB/&PRGTAPEF) FROMMBR(*FIRST) +
+                          TOMBR(&ZMBR) MBROPT(*ADD)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CPYFERR))
+             CLRPFM     FILE(&PRGLIB/&PRODFILE)
+
+/* CHANGE MEMBER DESCRIPTION                                        */
+/* FORMAT THE "Z" FILE MEMBER DESCRIPTION                           */
+             CVTDAT     DATE(&PDTEA) TOVAR(&TEXTDATE) FROMFMT(*CYMD) +
+                          TOFMT(*MDYY) TOSEP('/')
+
+             CHGVAR     VAR(%SST(&MDSC 1 12)) VALUE('Purge Date: ')
+             CHGVAR     VAR(%SST(&MDSC 13 10)) VALUE(&TEXTDATE)
+             CHGVAR     VAR(%SST(&MDSC 24 3)) VALUE('FOR')
+             CHGVAR     VAR(%SST(&MDSC 28 3)) VALUE(&PCGCODE)
+             CHGVAR     VAR(%SST(&MDSC 32 6)) VALUE(&APPLCODE)
+
+             CHGPFM     FILE(&PRGLIB/&PRGTAPEF) MBR(&ZMBR) TEXT(&MDSC)
+
+             GOTO       CMDLBL(PGMMSG)
+
+/*-----------------------------------------------------------------*/
+/*                     ERROR MESSAGES                              */
+/*-----------------------------------------------------------------*/
+/* R15035 - Added 'TEST' Verbiage to Message if from TEST Env. */
+ ADDMBRERR:  IF         COND(&DTALIB *NE 'PRKFLIB') THEN(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Add Physical File +
+                          Member Error ' *CAT &PRGTAPEF *BCAT '- +
+                          TEST') CONFMSG(*NO)
+             ENDDO
+             ELSE       CMD(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Add Physical File +
+                          Member Error ' *CAT &PRGTAPEF) CONFMSG(*NO)
+             ENDDO
+             GOTO       CMDLBL(ERROR)
+
+/*-----------------------------------------------------------------*/
+/* R15035 - Added 'TEST' Verbiage to Message if from TEST Env. */
+ CPYFERR:    IF         COND(&DTALIB *NE 'PRKFLIB') THEN(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Copy File Error in Post +
+                          Purge program for ' *CAT &PRGTAPEF *BCAT +
+                          '- TEST') CONFMSG(*NO)
+             ENDDO
+             ELSE       CMD(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Copy File Error in Post +
+                          Purge program for ' *CAT &PRGTAPEF) +
+                          CONFMSG(*NO)
+             ENDDO
+             GOTO       CMDLBL(ERROR)
+
+/*-----------------------------------------------------------------*/
+/* R15035 - Added 'TEST' Verbiage to Message if from TEST Env. */
+ ERROR:      IF         COND(&DTALIB *NE 'PRKFLIB') THEN(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Data Purge Ended +
+                          Abnormally in Post Purge for ' *CAT +
+                          &PRGTAPEF *BCAT '- TEST') CONFMSG(*NO)
+             ENDDO
+             ELSE       CMD(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Data Purge Ended +
+                          Abnormally in Post Purge for ' *CAT +
+                          &PRGTAPEF) CONFMSG(*NO)
+             ENDDO
+
+             CHGJOB     LOG(4 00 *SECLVL)
+
+             GOTO       CMDLBL(ENDPGM)
+
+/*-----------------------------------------------------------------*/
+/* R15035 - Added 'TEST' Verbiage to Message if from TEST Env. */
+ PGMMSG:     IF         COND(&DTALIB *NE 'PRKFLIB') THEN(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Data Purge Ended +
+                          Normally in Post Purge for ' *CAT +
+                          &PRGTAPEF *CAT '. Ready to save to tape. +
+                          - TEST')
+             ENDDO
+             ELSE       CMD(DO)
+             SNDPGRMSG  TOPGR(PRKPURGE) MSG('Data Purge Ended +
+                          Normally in Post Purge for ' *CAT +
+                          &PRGTAPEF *CAT '. Ready to save to tape.')
+             ENDDO
+
+ ENDPGM:
+             ENDPGM

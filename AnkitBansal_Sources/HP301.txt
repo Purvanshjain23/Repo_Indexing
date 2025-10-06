@@ -1,0 +1,678 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+     h datedit(*YMD)
+      ****************************************************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP301
+      * TITLE:       BUILD WORKFILES FOR FEED TICKET ALLOCATIONS
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     6/10/94
+      *
+      *  FUNCTION:   THIS BATCH PROGRAM IS CALLED FROM HP468CL.
+      *              IT BUILDS TWO WORKFILES (HSP301, HSP302)
+      *              THAT ARE USED IN FEED TICKET ALLOCATIONS.
+      *              THE USER'S SUBMISSION CRITERIA (BUSINESS OFFICE,
+      *              CUT-OFF DATE, EDIT/FINAL FLAG) ARE PASSED IN THE
+      *              LDA.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 08/30/94  LEANNE FEDOR
+      *           THE LOGIC FOR DETERMINING THE "FROM" DATE FOR
+      *           ALLOCATIONS DID NOT WORK FOR THE "TO BIN" RECORDS ON
+      *           PICKUP TICKETS.  THE LOGIC WAS CHANGED TO USE THE
+      *           TICKET DATE OF THE PICKUP TICKET FOR THE FROM DATE
+      *           INSTEAD OF THE REFERENCE TICKET DATE.  THIS CHANGE
+      *           ONLY APPLIES TO 'TO BIN' RECORDS ON PICKUP TICKETS.
+      *
+      * 09/12/94  LEANNE FEDOR
+      *           REMOVED THE FOLLOWING TIME FIELDS FROM THE FEED
+      *           TICKET HEADER AND DETAIL FILE.
+      *                 COSTED TIME
+      *                 ALLOCATED TIME
+      *                 G/L POST TIME
+      *                 EOP POST TIME
+      *
+      * 01/13/95  LEANNE FEDOR
+      *           RECOMPILE ONLY. SEX ADDED TO HOG GROUP FILE.
+      *
+      * 02/06/95  LEANNE FEDOR
+      *           ADDED CALL TO THE UTILITY CLP TO RECLAIM RESOURCES
+      *           AND CLEAN UP AFTER THE GENERIC PROGRAMS THAT DO NOT
+      *           SET ON THE LAST RECORD INDICATOR.
+      *
+      * 03/13/95  LEANNE FEDOR
+      *           RECOMPILE ONLY. ORIGIN BGF FARM SITE AND ORIGIN
+      *           NURSERY FARM SITE ADDED TO HOG GROUP FILE.
+      *
+      * 04/26/95  LEANNE FEDOR
+      *           CHANGED FARM SITE CODE FROM ALPHA TO NUMERIC.
+      *
+      * 11/01/95  LEANNE FEDOR
+      *           RECOMPILE ONLY. NEW FIELD 'GROUP TYPE' ADDED TO
+      *           HOG GROUP FILE.
+      *
+      * 12/12/95  LEANNE FEDOR
+      *           RECOMPILE ONLY. NEW FIELD 'ROOM STATUS' ADDED TO
+      *           BUILDING ROOM FILE.
+      *
+      * 06/03/97  LEANNE FEDOR
+      *           RECOMPILE ONLY. NEW FIELDS 'PURGE FLAG' AND 'DATE OF
+      *           FIRST PURGE' ADDED TO HOG GROUP FILE.
+      *
+      * 03/09/98  LEANNE FEDOR
+      *           RECOMPILE ONLY. FEED POUNDS AND FEED AMOUNT FIELDS
+      *           INCREASED IN SIZE PER NATHAN MALONE.
+      *
+      * 05/05/00  LEANNE FEDOR
+      *           Pig days were being incorrectly calculated for disposed
+      *           groups. I made two changes. First, no pig days will be
+      *           calculated for disposed groups whose disposed date is
+      *           prior to the 'from' date. Second, if the group's disposed
+      *           date is prior to the 'to' date, the disposed date will
+      *           be passed to the program that calculates pig days instead
+      *           of the calculated 'to' date.
+      *
+      * 01/30/01  LeAnne Fedor
+      *           Production type was removed from the feed ticket files.
+      *           So, removed all production type logic from program.
+      *
+      * 06/28/01  LeAnne Fedor
+      *           Recompile only.
+      *           Manager and supervisor fields removed from Hog Group file.
+      *
+      * 01/02/02  LeAnne Fedor
+      *           Added additional edit: group age cannot be greater than max age on ration.
+      *
+      * 10/20/03  LeAnne Fedor
+      *           Alice does not want ANY group on a feed ticket to have a Create Date
+      *           after the ticket date. So, we added logic to NOT allocate to groups
+      *           whose Create Date is after the Feed Ticket Date.
+      *
+      * 01/18/06  LeAnne Fedor
+      *           Changed join file HSJ036c to use the new Rooms/Bin Sets file instead of
+      *           HSP020-Buildings/Rooms.
+      *
+      * 04/21/08  LeAnne Ramsey
+      *           Lisa McBride was continuing to have tickets that would not allocate
+      *           because there were no groups open for the dates of the ticket. (Basically,
+      *           the old groups were disposed/gone before the ticket date and the
+      *           created groups were opened in the subsequent period. So, we are adding
+      *           logic to, when all else fails, allocate to the created groups.
+      *           To allow our "created" groups to flow thru as much of the existing code
+      *           as possible, we will assign each created group a pig day of 1.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           We added new field 'Continuous Flow Flag' to Hog Group file. If a Group is
+      *           a 'Continuous Flow' group, we will NOT do a "max age" check on the Ration.
+      *
+      * 07/29/09  LeAnne Ramsey
+      *           The "check the group's age against the Max Days for a Ration" comes after the
+      *           "find the TO Date" logic. The TO DATE logic reads a LF of the Feed Ticket Detail
+      *           file. The TO DATE logic is overlaying our "ration code"; so, the AGE check is
+      *           being made with the wrong ration...unless the TO DATE ticket is for the same
+      *           ration...which it often is since the check is made by BIN.
+      *           So, I put a prefix on the logical file fields and also change the $age subroutine
+      *           to use the Ration Code value from the workfile.
+      *
+      * 03/26/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsj036c   if   e           k disk
+      *  Bin set bins + Rooms/bin sets + Hog groups (omits VD and CL Groups)
+      *
+      *
+     Fhsp038    if   e           k disk
+      *  Feed ticket detail
+      *
+      *
+     Fhsl038f   if   e           k disk    rename(fdrec:fdrecf) prefix(p1)
+      *  Feed ticket detail
+      *
+      *
+     Fhsp071    if   e           k disk
+      *  Rations
+      *
+      *
+     Fhsp301    o    e           k disk
+      *  Workfile for Feed Ticket
+      *
+      *
+     Fhsp302    uf a e           k disk
+      *  Workfile for Hog Group
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D includefl       s              1
+      *
+      *
+      * Work fields for date manipulation
+      *
+     D wkisotkdt       s               D   datfmt(*iso)
+     D wkisoopdt       s               D   datfmt(*iso)
+     D wkdays          s              3  0
+      *
+      *
+      * Workfields
+      *
+     D wkcnt           s                   like(wtcnt)
+     D wkinam          s                   like(wtinam)
+     D wkmfam          s                   like(wtmfam)
+     D wkdlam          s                   like(wtdlam)
+     D wkmdam          s                   like(wtmdam)
+     D wkpd            s                   like(wtpd)
+     D wkfdlb          s                   like(wtfdlb)
+     D wktymd          s                   like(fdrtdt)
+     D wkfymd          s                   like(fdrtdt)
+     D wkdiff          s              9  2
+      *
+      *
+      * Parms
+      *
+     D xxtymd          s                   like(fdrtdt)
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * LDA - Local data area
+      *---------------------------------------------------------------
+      *
+     D                uds
+     D  ldcymd                 1     08  0
+     D  ldeffl                 9     09
+     D  ldfmbo                10     14
+     D  ldepdt                15     22  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * Mainline
+      ***************************************************************************************
+      *
+      * Process each Feed Ticket Detail record selected by the Open Query
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsp038                                 90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Initialize accumulator and calculation fields in the Ticket Workfile
+      *
+     C                   z-add     0             wtcnt
+     C                   z-add     0             wtpd
+     C                   z-add     0             wtunin
+     C                   z-add     0             wtunmf
+     C                   z-add     0             wtundl
+     C                   z-add     0             wtunmd
+     C                   z-add     0             wtunlb
+      *
+      * Move values from the Feed Ticket Detail record to the Ticket Workfile
+      * record.
+     C                   movel     fdrgcd        wtrgcd
+     C                   movel     fdfmbo        wtfmbo
+     C                   z-add     fdfscd        wtfscd
+      *
+     C                   z-add     fdtkno        wttkno
+     C                   movel     fdtrcd        wttrcd
+     C                   z-add     fdlnno        wtlnno
+     C                   z-add     fdtkdt        wttkdt
+     C                   movel     fdalfl        wtalfl
+      *
+     C                   z-add     fdrtno        wtrtno
+     C                   z-add     fdrtdt        wtrtdt
+      *
+     C                   movel     fdblcd        wtblcd
+     C                   movel     fdrmcd        wtrmcd
+     C                   movel     fdbncd        wtbncd
+     C                   z-add     fdhgsn        wthgsn
+      *
+     C                   movel     fdftcd        wtftcd
+     C                   movel     fdrncd        wtrncd
+     C                   movel     fdadcd        wtadcd
+     C                   movel     fdftcd        wtftcd
+     C                   z-add     fdfdlb        wtfdlb
+      *
+     C                   z-add     fdinam        wtinam
+     C                   z-add     fdrcdt        wtrcdt
+      *
+     C                   z-add     fdmfam        wtmfam
+     C                   z-add     fdmcdt        wtmcdt
+      *
+     C                   z-add     fddlam        wtdlam
+     C                   z-add     fdmdam        wtmdam
+      *
+      * Determine the "From/To Dates" to use for allocating this Feed Ticket.
+      *
+     C                   exsr      $frdt
+     C                   exsr      $todt
+      *
+      * Process the "active" Hog Groups that ate out of this bin.
+      * If there are no active groups to allocate to, look for Created groups.
+      *
+     C                   exsr      $active
+     C                   if        wtpd = 0
+     C                   exsr      $created
+     C                   endif
+      *
+      * All groups have been processed for this Feed Detail Record.
+      * Always write a Ticket Workfile record.
+      *
+     C                   exsr      $wrt301
+      *
+      * If you found any groups to allocate to,
+      *  Allocate the Ticket Totals to the Groups in the Group workfile
+      *
+     C                   if        wtcnt <> 0
+     C                   exsr      $alloc
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * Call Utility Program to reclaim resources and cleanup after the
+      * generic programs that do not set on the last record indicator.
+      *
+     C                   call      'UTRCRSC'
+     C                   seton                                        lr
+      /EJECT
+      *-----------------------------------------------------------------------------------
+      * Determine the 'From' Date for the Feed Ticket Detail record
+      *-----------------------------------------------------------------------------------
+      *
+      * The 'From' Date will be the Reference Ticket Date for all Tickets--except the
+      * "To Bin" record on a Pickup Ticket where it will be the Ticket Date of the
+      * Pickup Ticket. (The only way to determine the "To Bin" record on Pickups is
+      * that the Pounds will be greater than zero--instead of negative.
+      *
+     C     $frdt         begsr
+      *
+     C                   if        fdtrcd = 'P' and fdfdlb > 0
+     C                   z-add     fdtkdt        wkfymd
+     C                   else
+     C                   z-add     fdrtdt        wkfymd
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------------------------
+      * Determine the 'To' Date for the Feed Ticket Detail record
+      *------------------------------------------------------------------------------------
+      *
+      * The 'TO' Date will be either:
+      *   1) The Ticket Date of the next ticket for the Bin, or
+      *   2) The End of Period Date from the LDA
+      *
+     C     $todt         begsr
+      *
+     C     key01         setgt     hsl038f
+      *
+     C     key02         reade     hsl038f                                92
+     C                   if        *in92 = *off and p1fdrtdt < ldepdt
+     C                   z-add     p1fdrtdt      wktymd
+     C                   else
+     C                   z-add     ldepdt        wktymd
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------
+      * Select/process Active Hog Groups that ate from the Bin
+      *----------------------------------------------------------------------------
+      *
+     C     $active       begsr
+      *
+     C     key03         setll     hsj036c
+      *
+     C                   dou       *in91 = *on                                  Do active
+     C     key03         reade     hsj036c                                91
+     C                   if        *in91 = *off and hggscd <> 'CR'              If not EOF
+      *
+     C                   move      yes           includefl
+      *
+      * If the group was disposed prior to the 'from date', do not include it.
+      *
+     C                   if        hggscd = 'DS' and
+     C                             hgdsdt < wkfymd
+     C                   move      no            includefl
+     C                   endif
+      *
+      * If the 'from date' is before the group's 'create date', do not include
+      * the group. Alice says that a group must have been created prior to feed
+      * being delivered to it.
+      *
+     C                   if        wkfymd < hgcrdt
+     C                   move      no            includefl
+     C                   endif
+      *
+      * Make a comparison between 'max days for a ration' and group age when:
+      *    1) it is not a BGF group
+      *    2) it is not a Continuous Flow group
+      *
+     C                   if        hgppcd <> 'BGF  ' and hgcffl = no
+     C                   exsr      $age
+     C                   endif
+      *
+     C                   if        includefl = yes
+     C                   exsr      $days
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do active
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------
+      * Select/process Created Groups that will be eating from the Bin
+      *----------------------------------------------------------------------------
+      *
+     C     $created      begsr
+      *
+     C     key03         setll     hsj036c
+      *
+     C                   dou       *in91 = *on                                  Do created
+     C     key03         reade     hsj036c                                91
+     C                   if        *in91 = *off and hggscd = 'CR'               If not EOF
+      *
+     C                   move      yes           includefl
+      *
+      * If the 'from date' is before the group's 'create date', do not include
+      * the group. Alice says that a group must have been created prior to feed
+      * being delivered to it.
+      *
+     C                   if        wkfymd < hgcrdt
+     C                   move      no            includefl
+     C                   endif
+      *
+      * Make a comparison between 'max days for a ration' and group age when:
+      *    1) it is not a BGF group
+      *    2) it is not a Continuous Flow group
+      *
+     C                   if        hgppcd <> 'BGF  ' and hgcffl = no
+     C                   exsr      $age
+     C                   endif
+      *
+     C                   if        includefl = yes
+     C                   z-add     1             wkpd
+     C                   exsr      $wrt302
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do created
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Calculate the 'age' of the group and compare it to the ration max age
+      *--------------------------------------------------------------------------------------
+      *
+     C     $age          begsr
+      *
+     C     wtrncd        chain     hsp071                             92
+     C                   if        *in92 = *off                                 If ration hit
+      *
+      * Default the 'age' of the group to the 'average days old in'.
+      *
+     C                   z-add     hgadoi        wkdays
+      *
+      * If the 'from' date is after the 'open date' of the group,
+      * move the 'from' and the 'open date' of the group to date format fields.
+      * Find the number of days between the dates and add to the 'average days
+      * old in.'
+      *
+     C                   if        wkfymd > hgopdt and hgopdt <> 0
+     C     *iso          move      wkfymd        wkisotkdt
+     C     *iso          move      hgopdt        wkisoopdt
+     C     wkisotkdt     subdur    wkisoopdt     wkdays:*d
+     C                   add       hgadoi        wkdays
+     C                   endif
+      *
+      * Check the "age" against the ration's age.
+      *
+     C                   if        rnmaxday < wkdays
+     C                   move      no            includefl
+     C                   endif
+      *
+     C                   endif                                                  If ration hit
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------------------
+      * Calculate Pig Days for the Group (active groups only)
+      *-------------------------------------------------------------------------------------
+      *
+     C     $days         begsr
+      *
+     C                   z-add     0             wkpd
+      *
+      * If the group is disposed and its dispose date is prior to the
+      * 'to' date, use the dispose date when calculating pig days.
+      *
+     C                   if        hggscd = 'DS' and
+     C                             hgdsdt < wktymd
+     C                   z-add     hgdsdt        xxtymd
+     C                   else
+     C                   z-add     wktymd        xxtymd
+     C                   endif
+      *
+     C                   call      'HPPDAY'                                                   002
+     C                   parm                    hghgsn
+     C                   parm                    wkfymd
+     C                   parm                    xxtymd
+     C                   parm                    wkpd
+      *
+     C                   if        wkpd > 0
+     C                   exsr      $wrt302
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------------------------------
+      * Write a Hog Group record to the Hog Group Workfile
+      *----------------------------------------------------------------------------------------
+      *
+     C     $wrt302       begsr
+      *
+     C                   z-add     wttkno        wgtkno
+     C                   movel     wttrcd        wgtrcd
+     C                   z-add     wtlnno        wglnno
+     C                   z-add     hghgsn        wghgsn
+     C                   movel     hghgcd        wghgcd
+     C                   movel     hgppcd        wgppcd
+     C                   movel     hgblcd        wgblcd
+     C                   movel     hgrmcd        wgrmcd
+      *
+     C                   z-add     0             wginam
+     C                   z-add     0             wgmfam
+     C                   z-add     0             wgdlam
+     C                   z-add     0             wgmdam
+     C                   z-add     0             wgfdlb
+      *
+     C                   z-add     wkpd          wgpd
+      *
+      * Accumulate Total Pig Days for the Feed Ticket Detail Record
+      *
+     C                   add       wkpd          wtpd
+     C                   add       1             wtcnt
+      *
+     C                   write     wgrec
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write a Feed Ticket Detail record to the Workfile
+      *--------------------------------------------------------------------------------------
+      *
+     C     $wrt301       begsr
+      *
+     C                   movel     *date         wtaldt
+      *
+      * Set the Allocation Flag to 'A' when:
+      *     1) There were Groups, AND
+      *     2) Total Pig Days is not zero
+      *
+     C                   if        wtcnt <> 0 and wtpd <> 0
+     C                   movel     'A'           wtalfl
+     C                   endif
+      *
+      * Calculate the Per Unit Values
+      *
+     C                   if        wtpd <> 0
+     C     wtinam        div       wtpd          wtunin
+     C     wtmfam        div       wtpd          wtunmf
+     C     wtdlam        div       wtpd          wtundl
+     C     wtmdam        div       wtpd          wtunmd
+     C     wtfdlb        div       wtpd          wtunlb
+     C                   endif
+      *
+     C                   write     wtrec
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------------------------
+      * Allocate the Feed Pounds and Dollars to each Group
+      *-------------------------------------------------------------------------------------------
+      *
+     C     $alloc        begsr
+      *
+      * Initialize workfields
+      *
+     C                   z-add     0             wkcnt
+     C                   z-add     0             wkinam
+     C                   z-add     0             wkmfam
+     C                   z-add     0             wkdlam
+     C                   z-add     0             wkmdam
+     C                   z-add     0             wkfdlb
+      *
+     C     key04         setll     hsp302
+      *
+     C                   dou       *in93 = *on                                  Do alloc
+     C     key04         reade     hsp302                                 93
+     C                   if        *in93 = *off                                 If not EOF
+      *
+      * Calculate the portion of Feed Dollars and Pounds allocated to this
+      * Group based on the Group's Pig Days (When the allocation is being made
+      * with "created" groups, we will have set each group to have a Pig Day of
+      * 1 day.)
+      *
+     C     wgpd          mult      wtunin        wginam
+     C     wgpd          mult      wtunmf        wgmfam
+     C     wgpd          mult      wtundl        wgdlam
+     C     wgpd          mult      wtunmd        wgmdam
+     C     wgpd          mult      wtunlb        wgfdlb
+      *
+      * Accumulate this Group's portion into total workfields
+      *
+     C                   add       wginam        wkinam
+     C                   add       wgmfam        wkmfam
+     C                   add       wgdlam        wkdlam
+     C                   add       wgmdam        wkmdam
+     C                   add       wgfdlb        wkfdlb
+      *
+      * Increment the Group Counter
+      *
+     C                   add       1             wkcnt
+      *
+      * If this is the last Group to receive allocations, dump any remaining
+      * dollars/pounds into this last Group.
+      *
+     C                   if        wtcnt = wkcnt                                If last grp
+      *
+     C                   if        wtinam <> wkinam
+     C     wtinam        sub       wkinam        wkdiff
+     C     wkdiff        add       wginam        wginam
+     C                   endif
+      *
+     C                   if        wtmfam <> wkmfam
+     C     wtmfam        sub       wkmfam        wkdiff
+     C     wkdiff        add       wgmfam        wgmfam
+     C                   endif
+      *
+     C                   if        wtdlam <> wkdlam
+     C     wtdlam        sub       wkdlam        wkdiff
+     C     wkdlam        add       wgdlam        wgdlam
+     C                   endif
+      *
+     C                   if        wtmdam <> wkmdam
+     C     wtmdam        sub       wkmdam        wkdiff
+     C     wkdiff        add       wgmdam        wgmdam
+     C                   endif
+      *
+     C                   if        wtfdlb <> wkfdlb
+     C     wtfdlb        sub       wkfdlb        wkdiff
+     C     wkdiff        add       wgfdlb        wgfdlb
+     C                   endif
+      *
+     C                   endif                                                  If last grp
+      *
+     C                   update    wgrec
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do alloc
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    fdfmbo
+     C                   kfld                    fdfscd
+     C                   kfld                    fdbncd
+     C                   kfld                    wkfymd
+      *
+     C     key02         klist
+     C                   kfld                    fdfmbo
+     C                   kfld                    fdfscd
+     C                   kfld                    fdbncd
+      *
+     C     key03         klist
+     C                   kfld                    wtfscd
+     C                   kfld                    wtbncd
+      *
+     C     key04         klist
+     C                   kfld                    wttkno
+     C                   kfld                    wttrcd
+     C                   kfld                    wtlnno
+      *
+     C                   endsr
+      /EJECT

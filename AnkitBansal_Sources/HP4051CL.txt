@@ -1,0 +1,327 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  HP4051CL                                      */
+/*  PROGRAM NAME:    BGF PRODUCTION EDIT LISTINGS                  */
+/*  PROGRAMMER:      LEANNE FEDOR                                  */
+/*  CREATE DATE:     02/20/01                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS SUBMITTED WITH QCMDEXC FROM        */
+/*                   HP4051-SPECIFY OPTIONS FOR BGF PRODUCTION     */
+/*                   EDIT LISTINGS.                                */
+/*                                                                 */
+/*                   OPTIONS ARE PASSED THROUGH THE LDA.           */
+/*                                                                 */
+/* THREE SEPARATE LISTINGS ARE GENERATED:                          */
+/*   1) HP6051-WEEKLY BGF DATAMART VARIANCE REPORT                 */
+/*   2) HP6052-WEEKLY BGF DATAMART PRODUCTION LISTING              */
+/*   3) HP6050-LISTING OF FARMS WITH DAILY PRODUCTION ENTRIES BUT  */
+/*      NO WEEKLY ENTRIES                                          */
+/*                                                                 */
+/* TWO  REPORTS ARE REPLICAS OF COGNOS REPORTS. THE USERS ARE      */
+/* REVIEWING THEM PRIOR TO PUBLISHING THE COGNOS DATA TO THE WORLD.*/
+/* SO, WE REPLICATE THE COGNOS FILE GENERATION IN THIS CL SO THAT  */
+/* WE WILL HAVE AN EXACT MATCH FOR THE COGNOS REPORT.  HOWEVER,    */
+/* HERE WE CREATE THE COGNOS FILES IN QTEMP.                       */
+/*                                                                 */
+/* THE THIRD LISTING IS OVER HPS FILES.                            */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFICATIONS                                                   */
+/*                                                                 */
+/* 09/17/03  LEANNE FEDOR                                          */
+/*           TO MAKE THIS FUNCTION RUN FASTER, WE CHANGED THE      */
+/*           LOGIC TO CREATE THE FILES IN QTEMP WITH DATA.         */
+/*           WE ALSO NOW CREATE THE DATA AREA DABGF IN QTEMP.      */
+/*                                                                 */
+/*           THEN WE ADDED MORE OF THE TRUE BGF DATAMART PROGRAMS/ */
+/*           PROCESSING TO TURN THIS INTO A 'CURRENT' TYPE RUN---  */
+/*           WHICH DELETES OUT THE 'CURRENT' DATA THAT WE JUST PUT */
+/*           INTO THE QTEMP FILES AND THEN REBUILDS IT.            */
+/*                                                                 */
+/*           THIS APPROACH DROPPED THE RUN TIME FROM 8-9 MINUTES   */
+/*           DOWN TO A ABOUT 1 MINUTE---SINCE IT WASN'T REBUILDING */
+/*           'HISTORICAL' DATA IN THE QTEMP FILES.                 */
+/*                                                                 */
+/*           ALSO, REMOVED CREATION OF WEAN PIG PREDICTION FILE    */
+/*           AND CALL TO WEAN PIG PREDICTON PROGRAM THAT BUILDS    */
+/*           THE FILE DATA. I DID THIS BECAUSE NONE OF THE LISTING */
+/*           PROGRAMS USED THE FILE---DON'T KNOW WHY IT WAS IN THE */
+/*           CL WHEN NOTHING USED IT. AND, SINCE IT WAS IN QTEMP,  */
+/*           IT COULD NOT BE USED OUTSIDE THE CL.                  */
+/*                                                                 */
+/* 04/13/21  SUSAN BLAKEY H75563 PASS PARMS AND SEND MESSAGE       */
+/* 04/13/21  PERFORM CRTDUPOBJ INSTEAD OF CRTDUPOBJL               */
+/* 04/13/21  TEST FOR MESSAGE CPF2130, DO MOVE Y TO &ERR           */
+/*******************************************************************/
+
+             PGM
+
+             DCL        VAR(&IERR) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&ERR) TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&IMSGNO) TYPE(*CHAR) LEN(7)
+
+             DCL        VAR(&USRID) TYPE(*CHAR) LEN(10)
+
+/* DEFINE THE VARIABLE REQUIRED IN THE COMMAND TO OVERRIDE THE     */
+/* PRINT FILE TO A LASER PRINTER                                   */
+
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(85)
+             DCL        VAR(&CMD) TYPE(*CHAR) LEN(512)
+
+             DCL        VAR(&LDCDYR) TYPE(*DEC) LEN(4)
+             DCL        VAR(&LDCDWK) TYPE(*DEC) LEN(2)
+
+             DCL        VAR(&HSTWKBEGDT) TYPE(*DEC) LEN(8)
+             DCL        VAR(&HSTDYBEGYR) TYPE(*DEC) LEN(4)
+             DCL        VAR(&CURBEGDT) TYPE(*DEC) LEN(8)
+
+             DCL        VAR(&HOLD) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&COPYS) TYPE(*DEC) LEN(2)
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+
+
+             CHGVAR     VAR(&LDCDYR) VALUE(%SST(*LDA 1 4))
+             CHGVAR     VAR(&LDCDWK) VALUE(%SST(*LDA 5 2))
+             CHGVAR     VAR(&QDATA)  VALUE(*BLANK)
+
+/*-------------------------------------------------------------------*/
+/* CALCULATE 'CURRENT' BEGINNING/ENDING DATES AND UPDATE DATA AREA.  */
+/* ALSO, RETRIEVE 'HISTORY' DATES FOR SUBSEQUENT PROCESSING:         */
+/*      1) BEGINNING DATE FOR WEEKLY PRODUCTION                      */
+/*      2) BEGINNING YEAR FOR DAILY PRODUCTION                       */
+/*-------------------------------------------------------------------*/
+
+/*-REPLACE   CRTDUPOBJL / CRTDUPOBJ                                  */
+/*-------    CRTDUPOBJL OBJ(DABGF) FROMLIB(*LIBL) OBJTYPE(*DTAARA) + */
+             CRTDUPOBJ  OBJ(DABGF) FROMLIB(*LIBL) OBJTYPE(*DTAARA) +
+                          TOLIB(QTEMP)
+
+             CALL       PGM(HP208) PARM(&HSTWKBEGDT &HSTDYBEGYR +
+                          &CURBEGDT)
+
+
+/*-----------------------------------------------------------------*/
+/* CREATE DATAMART FILES IN QTEMP                                  */
+/*-----------------------------------------------------------------*/
+
+
+/*------------------------------------*/
+/* FARM MASTER  (CREATE WITHOUT DATA) */
+/*------------------------------------*/
+/*-TEST FOR CPF2130                                                  */
+/*-REPLACE   CRTDUPOBJL / CRTDUPOBJ                                  */
+             CRTDUPOBJ  OBJ(HPPB018) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) DATA(*NO)
+             MONMSG     MSGID(CPF2130) EXEC(DO)
+             CHGVAR     VAR(&ERR) VALUE('Y')
+             GOTO CHKERR
+             ENDDO
+
+/*----------------------------------------- */
+/* DAILY PRODUCTION  (CREATE WITHOUT DATA)  */
+/*----------------------------------------- */
+
+/* (NOTE: WE DON'T REALLY USE THIS DATA FOR OUR REPORTS. BUT, THE     */
+/* STANDARD BGF DATAMART PROGRAMS THAT WE ARE USING, ACCESS THE FILE. */
+/* SO, WE JUST CREATE IT IN QTEMP BUT LEAVE IT EMPTY.               . */
+
+/*-REPLACE   CRTDUPOBJL / CRTDUPOBJ                                  */
+             CRTDUPOBJ  OBJ(HPPB082) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) DATA(*NO)
+             CRTDUPOBJ  OBJ(HPLB082A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) DATA(*NO)
+/*-CHK  FOR CPF2130                                                  */
+             MONMSG     MSGID(CPF2130) EXEC(DO)
+             CHGVAR     VAR(&ERR) VALUE('Y')
+             GOTO CHKERR
+             ENDDO
+
+/*-------------------------------------------*/
+/* WEEKLY PRODUCTION  (CREATE WITH DATA)     */
+/*-------------------------------------------*/
+
+/*-REPLACE   CRTDUPOBJL / CRTDUPOBJ                                  */
+             CRTDUPOBJ OBJ(HPPB092) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) DATA(*YES)
+             CRTDUPOBJ  OBJ(HPLB092A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ OBJ(HPLB092B) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ OBJ(HPLB092D) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+/*-CHK  FOR CPF2130                                                  */
+             MONMSG     MSGID(CPF2130) EXEC(DO)
+             CHGVAR     VAR(&ERR) VALUE('Y')
+             GOTO CHKERR
+             ENDDO
+
+
+
+/*-----------------------------------------------------------------*/
+/* DELETE RECORDS OUT OF SOME DATAMART FILES IN QTEMP (AS IF IT    */
+/* WAS A 'CURRENT' RUN.)                                           */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(HP207)
+
+
+/*-----------------------------------------------------------------*/
+/* POPULATE DATAMART FILES IN QTEMP                                */
+/*-----------------------------------------------------------------*/
+
+/*---------------------*/
+/* BUILD FARM MASTER   */
+/*---------------------*/
+
+             CALL       PGM(HP200)
+
+
+/*---------------------*/
+/* WEEKLY PRODUCTION   */
+/*---------------------*/
+/* BEFORE CALLING THE PROGRAM TO BUILD WEEKLY PRODUCTION:          */
+/* 1) OVERRIDE THE KEY FIELDS ON THE TRANSFER MOVEMENT HEADER FILE */
+/*    MAKING RECEIVED DATE THE KEY FIELD INSTEAD OF SHIPPED DATE   */
+/* 2) SET UP ON OPEN QUERY FOR THE HPS BGF WEEKLY PRODUCTION FILE  */
+/*    AS IF THIS WAS A 'CURRENT' RUN                               */
+
+             OVRDBF     FILE(HSL074H) SHARE(*YES)
+             OPNQRYF    FILE((HSL074H)) KEYFLD((MHORFS) (MHRCDT)) +
+                          SEQONLY(*YES)
+
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BPWEDT *GE')
+             CHGVAR     VAR(%SST(&QDATA 12 8)) VALUE(&CURBEGDT)
+
+             OVRDBF     FILE(HSL092C) SHARE(*YES)
+             OPNQRYF    FILE((HSL092C)) QRYSLT(&QDATA)
+
+             CALL       PGM(HP201)
+
+             CLOF       OPNID(HSL074H)
+             DLTOVR     FILE(HSL074H)
+
+             CLOF       OPNID(HSL092C)
+             DLTOVR     FILE(HSL092C)
+
+
+
+/*------------------------------------------------------------------*/
+/* NOW, BUILD A QUERY OVER THE QTEMP WEEKLY PRODUCTION FILE FOR THE */
+/* SELECTED CALENDAR YEAR/WEEK                                      */
+/*------------------------------------------------------------------*/
+
+/*  ALWAYS SELECT RECORDS FOR THE SPECIFIED CALENDAR YEAR        */
+
+             CHGVAR     VAR(&QDATA)  VALUE(*BLANK)
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BPCDYR *EQ')
+             CHGVAR     VAR(%SST(&QDATA 12 4)) VALUE(&LDCDYR)
+
+/*  ALWAYS SELECT RECORDS FOR THE SPECIFIED CALENDAR WEEK        */
+
+             CHGVAR     VAR(%SST(&QDATA 17 15)) VALUE('*AND BPCDWK +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 33 2)) VALUE(&LDCDWK)
+
+
+/* RUN QUERY OVER THE BGF WEEKLY PRODUCTION FILE IN QTEMP            */
+
+             OVRDBF     FILE(HPLB092B) SHARE(*YES)
+             OPNQRYF    FILE((HPLB092B)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+
+
+/*------------------------------------------------------------------*/
+/* NOW, BUILD A QUERY OVER THE HPS DAILY PRODUCTION FILE IN QTEMP   */
+/* FOR THE SELECTED CALENDAR YEAR/WEEK                              */
+/*------------------------------------------------------------------*/
+
+/*  ALWAYS SELECT RECORDS FOR THE SPECIFIED CALENDAR YEAR        */
+
+             CHGVAR     VAR(&QDATA)  VALUE(*BLANK)
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BDCDYR *EQ')
+             CHGVAR     VAR(%SST(&QDATA 12 4)) VALUE(&LDCDYR)
+
+/*  ALWAYS SELECT RECORDS FOR THE SPECIFIED CALENDAR WEEK        */
+
+             CHGVAR     VAR(%SST(&QDATA 17 15)) VALUE('*AND BDCDWK +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 33 2)) VALUE(&LDCDWK)
+
+/* RUN QUERY OVER THE HPS DAILY PRODUCTION FILE                      */
+
+             OVRDBF     FILE(HSL082A) SHARE(*YES)
+             OPNQRYF    FILE((HSL082A)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+
+/*------------------------------------------------------------------*/
+/*  SET UP PRINT FILE OVERRIDES                                      */
+/*------------------------------------------------------------------*/
+
+/* SET PARAMETERS FROM LDA                                           */
+
+ HOLD:       IF         COND(%SST(*LDA 411 1) = 'Y') THEN(CHGVAR +
+                          VAR(&HOLD) VALUE(*YES))
+             ELSE       CMD(CHGVAR VAR(&HOLD) VALUE(*NO))
+
+ COPYS:      CHGVAR     VAR(&COPYS) VALUE(%SST(*LDA 412 1))
+             IF         COND(&COPYS = 0) THEN(CHGVAR VAR(&COPYS) +
+                          VALUE(1))
+
+ OUTQ:       CHGVAR     VAR(&OUTQ) VALUE(%SST(*LDA 413 10))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(%SST(*LDA 401 10)))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(*JOB))
+
+
+/*------------------------------------------------------------------*/
+/* OVERRIDE PRINT FILE                                              */
+/*------------------------------------------------------------------*/
+
+/* USE THE CUSTOMIZED SEABOARD COMMAND TO OVERRIDE THE PRINT FILE.  */
+/* THIS COMMAND ALLOWS THE REPORT TO BE GENERATED ON A STANDARD LINE*/
+/* PRINTER OR A LASER PRINTER. TO USE THIS OVERRIDE YOU MUST DECLARE*/
+/* A COMMAND VARIABLE AND FOLLOW THE OVERRIDE WITH A CALL TO        */
+/* QCMDEXC.                                                         */
+
+             SBDPRTOVR  CMDVAR(&CMD) FILE(QPRINT) OUTQ(&OUTQ) +
+                          WIDTH(198) LANDSCAPE(*YES) DRAWER(*PRTF) +
+                          COPIES(&COPYS) HOLD(&HOLD) SHARE(*YES)
+
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+
+/*------------------------------------------------------------------*/
+/*  CALL LISTING PROGRAMS                                            */
+/*------------------------------------------------------------------*/
+
+/* BEFORE CALLING THE REPORT PROGRAM, OVERRIDE THE KEY FIELDS ON   */
+/* THE DATAMART FARM MASTER TO SORT THE FILE BY CELL/FARM SITE.    */
+
+             OVRDBF     FILE(HPPB018) SHARE(*YES)
+             OPNQRYF    FILE((HPPB018)) KEYFLD((FSCELLDS) (FSFSDS)) +
+                          SEQONLY(*YES)
+
+             CALL       PGM(HP6051)
+             CALL       PGM(HP6052)
+             CALL       PGM(HP6050)
+
+             CLOF       OPNID(HSL082A)
+             CLOF       OPNID(HPPB018)
+             CLOF       OPNID(HPLB092B)
+             DLTOVR     FILE(*ALL)
+
+             GOTO  OUTEND
+
+ CHKERR:
+             CHGVAR     VAR(&IERR) VALUE(&ERR)
+
+             CHGVAR     VAR(&IMSGNO) VALUE('HS09277')
+
+             RTVJOBA    USER(&USRID)
+ /********   SNDUSRMSG  MSGID(&IMSGNO) MSGF(HSMSGF) TOUSR(&USRID) *****/
+ /********   SNDUSRMSG  IS NOT GOOD DUE TO MESSAGE GOES TO USRID FOR A REPLY */
+             SNDPGMMSG  MSGID(&IMSGNO) MSGF(HSMSGF) TOUSR(&USRID)
+
+ OUTEND:     ENDPGM
+

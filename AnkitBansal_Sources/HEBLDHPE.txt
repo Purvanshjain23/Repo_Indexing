@@ -1,0 +1,141 @@
+/***************************************************************** */
+/*                                                                 */
+/*  ENVIRONMENT:     PORK DIVISION                                 */
+/*  SYSTEM:          HOG PROCUREMENT AND EVALUATION                */
+/*                   DATA MART                                     */
+/*                                                                 */
+/*  PROGRAM NUMBER:  HEBLDHPE                                      */
+/*  PROGRAM NAME:    BUILD DATAMART FILES FOR HPE                  */
+/*                   (ALSO CALLS CL TO SEND TO NIBBLE)             */
+/*                                                                 */
+/*  PROGRAMMER:      LEANNE FEDOR                                  */
+/*  CREATE DATE:     10/30/00                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS SUBMITTED FROM THE JOB SCHEDULER   */
+/*                   ON BIGBYTE.                                   */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFIED:                                                       */
+/*                                                                 */
+/* 08/14/09  ALICE BROWNFIELD                                      */
+/*           E00472 - Data Mart Build changes for DR Test          */
+/*           Change CPYF from PRKFLIB to PRKDMFLIB to build        */
+/*             directly into PRKDMFLIB.  files in PRKFLIB will be  */
+/*           empty  ----- this works better for MIMIX              */
+/*                                                                 */
+/*           Also removed &SENDFL parm.  we don't send data to     */
+/*           NIBBLE any longer.  deleted pgm HESNDHPE. . .         */
+/*                                                                 */
+/*           Also removed selection of only Kill dates after 6/1/00*/
+/*           we don't keep data in the tattoo header that long now */
+/*                                                                 */
+/* 04/29/10  LeAnne Ramsey  (C719)                                 */
+/*           Changed logic to use ESEND instead of MPLUS/MPLUS.    */
+/*           Replaced the hardcoded PRKDMFLIB on the CLRPFM        */
+/*           commands with *LIBL.                                  */
+/*                                                                 */
+/*******************************************************************/
+
+             PGM
+
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(105)
+             DCL        VAR(&ERR)    TYPE(*CHAR) LEN(1) VALUE('N')
+
+             DCL        VAR(&EMAIL)    TYPE(*CHAR) LEN(38)
+             DCL        VAR(&TSTPRDFL) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&SUBJECT)  TYPE(*CHAR) LEN(60) +
+                          VALUE('HEBLDHPE-Datamart HPE: Build +
+                          Files.....DIST LIST: prk cognos')
+
+
+/*------------------------------------------------------------------*/
+/* Set up the Email Recipient (either Test or Production)           */
+/*------------------------------------------------------------------*/
+
+/* Retrieve the Data Area that lets us know whether we are in TEST  */
+/* or PRODUCTION. (Always default to the 'TEST' Distribution List.) */
+
+             CHGVAR     VAR(&EMAIL) VALUE('prk cognos test')
+             RTVDTAARA  DTAARA(DATSTPRD (1 1)) RTNVAR(&TSTPRDFL)
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('prk cognos'))
+
+/*-----------------------------------------------------------------*/
+/* Add PRKDMFLIB so we will process directly into that library.    */
+/* We do not expect PRKDMFLIB to already be in the library list;   */
+/* but, since we want it at the top of the list, we will remove/add*/
+/* it.                                                             */
+/*-----------------------------------------------------------------*/
+             RMVLIBLE   LIB(PRKDMFLIB)
+             MONMSG     MSGID(CPF0000)
+             ADDLIBLE   LIB(PRKDMFLIB)
+
+/*-----------------------------------------------------------------*/
+/* CLEAR DATAMART FILES in PRKDMFLIB                               */
+/*-----------------------------------------------------------------*/
+
+             CLRPFM     FILE(*LIBL/HEP300)    /* Wgt Dist Workfile */
+             CLRPFM     FILE(*LIBL/HEP201)    /* Wgt Dist Header   */
+             CLRPFM     FILE(*LIBL/HEP202)    /* Wgt Dist Detail   */
+
+/*********************************************************************/
+/* WEIGHT DISTRIBUTION                                               */
+/*********************************************************************/
+
+/*-------------------------------------------------------------------*/
+/* SETUP QUERY FOR TATTOO HEADER                                     */
+/*-------------------------------------------------------------------*/
+
+/* ALWAYS SELECT ONLY SOURCE TYPE OF 'INTERNAL'                      */
+
+             CHGVAR     VAR(%SST(&QDATA 1 12)) VALUE('A1KAST *EQ "')
+             CHGVAR     VAR(%SST(&QDATA 13 1)) VALUE('I')
+             CHGVAR     VAR(%SST(&QDATA 14 1)) VALUE('"')
+
+/* ALWAYS SELECT ONLY PAYMENT STATUS OF 'PAID'                        */
+
+             CHGVAR     VAR(%SST(&QDATA 16 17)) VALUE('*AND (A1CWST +
+                          *EQ ')
+             CHGVAR     VAR(%SST(&QDATA 33 4)) VALUE('"NC"')
+             CHGVAR     VAR(%SST(&QDATA 37 16)) VALUE(' *OR A1CWST +
+                          *EQ ')
+             CHGVAR     VAR(%SST(&QDATA 53 4)) VALUE('"NL"')
+             CHGVAR     VAR(%SST(&QDATA 57 1)) VALUE(')')
+
+/* ALWAYS SELECT ONLY COMPANY 360                                    */
+
+             CHGVAR     VAR(%SST(&QDATA 59 15)) VALUE('*AND A1HMNB +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 75 3)) VALUE(360)
+
+
+/* RUN QUERY OVER THE TATTOO HEADER FILE                             */
+
+             OVRDBF     FILE(PKA1CPLQ) SHARE(*YES)
+             OPNQRYF    FILE((PKA1CPLQ)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+
+
+/* CALL PROGRAM TO BUILD WEIGHT DISTRIBUTION WORKFILE              */
+
+             CALL       PGM(HE200)
+             CLOF       OPNID(PKA1CPLQ)
+             DLTOVR     FILE(PKA1CPLQ)
+
+/* CALL PROGRAM TO BUILD WEIGHT DISTRIBUTION HEADER/DETAIL FILES   */
+
+             CALL       PGM(HE201)
+
+/*---------------------------------------------------------------------*/
+/* SEND COMPLETION MESSAGE TO I.S. FOLKS                               */
+/*---------------------------------------------------------------------*/
+
+             IF         COND(&ERR = 'N') THEN(ESNDMAIL +
+                          RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG('All Weight Distribution data was +
+                          successfully written to PRKDMFLIB; the +
+                          build completed normally.') +
+                          IMPORTANCE(*HIGH))
+
+             ENDPGM
+

@@ -1,0 +1,690 @@
+     H*****************************************************************
+     H*
+     H*  Program number:  M3GLSTG2
+     H*  Program name:    Read Workfile for OMS New Inv/CM/DM & Write to M3 for post to GL
+     H*  Programmer:      Rose Centonze
+     H*  Date created:    03/09/2016
+     H*  Program purpose: This program will read the OMP300 workfile created
+     H*                   in OMINVCL co/invoice and write 1 rcd per each rcd read. One
+     H*                   batch header will be written.
+     H*
+     H*    will be automatic TO m3: then The user will need to go into M3 and post
+     H*                         this batch of journal entries using GLS840
+     H*                    batch header -->  write M3 PLB9CPP gl interface head
+     H*                    batch detail -->  write M3 PLCaCPP              line
+     H***    Use GL Template:      GL_MSCUPL template
+     H**************************************************************************************
+     H*  RMC 6/10/16  this run excludes 1410, 5030, DM/CM/DB .theyre sent with AR interface
+     H*  RMC 6/28/16  Runs for IP Inter company entries.  Break on ACT ship date and +1 to grpno
+     H*               so key on OML300E instead of OML300D
+     A*  RMC 1/24/17  Project  E8287  RUNS FOR GL ENTRIES WHEN LIVE WITH GL FROM OMINVCL,
+     A*                         M3GLSTG  RUNS FROM THE AR POST FOR INTER-COMP GL ENTRIES FROM
+     A*                         M3OPNCLP.
+     A*  RMC 5/03/17  Project  E8287  output dsdescr differently
+     A*  RMC 6/05/17  Project  R9083
+     A*               get m3 acct with cgl code if CC/OBJ/Sub is blank
+     A*               output cc obj sub to dim 1-2-3 if invalid so they can see it in m3
+     A*  RMC 8/75/17  S11418   R9083  write offset when break if units<> 0 too, not just co#amt
+     A*               scan: S11418
+     A*  DN  2/26/18  R12636 - Allow the Load ID to be populated on the Freight transactions
+     A*               that go to M3.
+     A*  RMC 2/02/22  SDN440          update desc for CP like CM, and DP like DM - it has
+     A*               scan: CPDP      been going to M3 with Blanks in the desc fld in the parm
+12636 ** W95050 If Sub-Account Type='F' (Freight), set omsbl to blank since now it has the
+     A*  RMC 3/9/22           load id from ominvj1e1. dont want it to print in dim7
+     H**************************************************************************************
+     F*
+     FOML300J   IF   E           K DISK
+     F* OM Workfile            (Key: ASDT, Co#, invoice, order , seq , sec seq; SEL LIVE)
+     F*
+12636FOMFJCPL1  IF   E           K DISK
+12636F* Load Header                 K= Load ID
+     F*
+     Farbdcplk  if a e           k disk
+      *   A/R Header                K= co inv#  cust   format  @BDCPLS
+     Fomhstpob  if a e           k disk
+      *   sales hist                K= order    format  @HSTPIV
+     Fplb8rel3  if a e           k disk
+      *   G/L JDE to M3 Cross Ref   K= b8aht1, b8qncd, b8qocd
+     Fplb8rel5  if a e           k disk
+      *   G/L JDE to M3 Cross Ref   K= B8HONB, B8QMCD  (COMPANY/CGL CODE)
+      *
+     Fplb9cpp   uf a e             disk
+      *   M3 GL Header Staging file
+      *
+     Fplcacpp   uf a e             disk
+      *   M3 GL Detail Staging file 2  for misc GL posts
+      *
+     F*
+      ************************************************************************************
+      * CONSTANTS
+      ************************************************************************************
+      *
+12636D yes             c                   'Y'
+  |  D no              c                   'N'
+12636D hyphen          c                   '-'
+      *
+      * Workfields
+      *
+     d*wkacono         s                   like(glco)
+     d wkuser          s                   like(b9aavn)
+     d wkdescor        s             40    inz('OMS GL Invoice')
+     d wkdescdm        s             40    inz('OMS GL Debit Memo')
+     d wkdescdn        s             40    inz('OMS GL Debit Note')
+     d wkdesccm        s             40    inz('OMS GL Credit Memo')
+     d wkdescoa        s             40    inz('OMS AR On Account  ')
+     d wktempor        s             15    inz('GL_MSCUPL')
+     d wktempdb        s             15    inz('GL_MSCUPL')
+     d wktempcm        s             15    inz('GL_MSCUPL')
+     d wkicbal         s             40    inz('I/C Balance Account  ')
+     d wkamt           s             15s 2
+12636d wkslshistread   s              1
+  |  d wkprodbyco      s              2
+12636d wkprodbycmp     s              2
+     d dsamt           s             17
+     d dsgroup         s              8
+     d dscust          s             10
+     d dspaye          s             10
+     d dsinv#          s             15
+     D*
+     D***  RETRIEVE USER I.D. AND WORKSTATION I.D.
+     D*
+     D                SDS
+     D  PGMSGQ           *PROC
+     D  WRKSTN               244    253
+     D  USRNAM               254    263
+      *
+      * Work fields for date manipulation
+      *
+     D wkyymmdd        s              6  0
+     d wksyssyndt      s              7  0
+     d wkhhmmss        s                   like(caabtm)
+      *
+     d wktime          s             12  0
+     D wkcymdiso       s               d   datfmt(*iso)
+      *
+      * Parm fields
+      *
+     D*
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+      * Workfields
+      *WRITE
+     D*
+     D***  ACTUAL SHIP DATE FROM WORKFILE  YYMMDD
+     D*
+     D                 DS
+     D  GLYMD                  1      7  0
+     D  YYGL                   2      3  0
+     D  MMGL                   4      5  0
+     D  DDGL                   6      7  0
+     D*
+     D***  G/L DATE MMDDYY
+     D*
+     D                 DS
+     D  GLMDY                  1      6  0
+     D  GLMM                   1      2  0
+     D  GLDD                   3      4  0
+     D  GLYY                   5      6  0
+     D*
+     D***  EXPLANATION
+     D*
+     D                 DS
+     D  WKEXA                  1     30
+     D  WK1                    1      7    INZ('INVOICE')
+     D  WK2                    9     15    INZ('POSTING')
+     D*
+     D***  m3 key value
+     D*
+     D                 DS
+     D  m3keyvalue             1     15
+     D  m3keydt                1      8
+     D  m3series               9     12
+      *
+      *---------------------------------------------------------------
+      *
+     C*
+     C*
+     C/EJECT
+     C*----------------------------------------------------------------
+     C* MAIN PROCESSING LOOP
+     C*----------------------------------------------------------------
+     C*   Read Workfile..........
+     C*
+     C     *IN50         DOUEQ     *ON
+     C                   READ      OMp300r                                50
+     C     *IN50         IFEQ      *OFF                                         HAVE RECORD
+     C*
+     C* FIRST TIME THROUGH stuff
+     C*         get first (JDE) M3 batch number
+     C*         save break fields
+     C*
+     C     *IN91         IFEQ      *OFF
+     c                   exsr      $getbatchno
+     c                   exsr      $newbreak
+     C                   move      wkccyymmdd    m3keydt           8
+     C                   exsr      $writebatch
+     C                   movel     ommcu         svommcu          12           save cost center
+     C                   movel     omco#         svco#             3 0         save company
+     C                   movel     omasdt        svasdt            7 0         save act ship
+     C                   MOVE      *ON           *IN91
+     c                   endif
+     C*
+     c*** Company break -- write 1910 rcd if not totaling to -0-
+     C*     And act ship date break
+     C     omco#         ifne      svco#                                          co# break
+     C     omasdt        orne      svasdt                                         actship break
+     C     CO#amt        ifne      0
+     C*??  CO#unit       orne      0                        not sure about this-s11418
+     c                   exsr      $writeoffset
+     c                   endif
+     C                   movel     ommcu         svommcu                       save cost center
+     C                   movel     omco#         svco#                         save company
+     C                   movel     omasdt        svasdt            7 0         save act ship
+     c                   z-add     0             co#amt
+     c                   z-add     0             co#unit                          s11418
+     c**                 add       1             omgrpn
+     C*** new Batch
+     c                   exsr      $getbatchno
+     c                   exsr      $newbreak
+     C                   move      wkccyymmdd    m3keydt           8
+     C                   exsr      $writebatch
+     C                   movel     ommcu         svommcu          12           save cost center
+     C                   movel     omco#         svco#             3 0         save company
+     C                   movel     omasdt        svasdt            7 0         save act ship
+     c***
+     c                   endif
+     C*
+     C* -------   detail record processing
+     C*
+     C                   EXSR      $WRITE
+     C*
+     C                   ENDIF                                                  50 = OFF
+     C*
+     C                   ENDDO                                                  50 DOUEQ ON
+     C*
+     c*** Last record   -- write 1910 rcd if not totaling to -0-
+     C*
+     C     CO#amt        ifne      0
+     C**   CO#unit       orne      0                                   comment 9.1  s11418
+     c                   exsr      $writeoffset
+     c                   endif
+     C*----------------------------------------------------------------
+     C* EOF PROCESSING:
+     C*----------------------------------------------------------------
+     C*
+     C*
+     C* THIS WILL CLOSE ANY FILES THAT ARE LEFT OPEN FROM ANY CALLED
+     C* PROGRAMS WITHIN THIS PROGRAM.
+     C*
+     C                   CALL      'UTRCRSC'
+     C*
+     C                   MOVE      *ON           *INLR
+     C/EJECT
+     C***************************************************************
+     C* SUBROUTINE SECTION
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE SUBROUTINE
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $WRITE        BEGSR
+     C**                 MOVE      SVGLID        WKID              8
+     C                   move      omamt         GLAA             17 2
+     C                   z-add(h)  omunit        GLu              15 0          no decimals
+     C                   add       omamt         co#amt           17 2          company total amt
+     C                   add       omunit        co#unit          15 0          s11418  total amt
+     C*
+     C*  RETRIEVE JULIAN DATE  FOR ACTUAL SHIP DATE
+     C*******************************************************************************
+      * Write the M3 journal entry line to PLCACPP
+     C*******************************************************************************
+     C* Format sample for PARM field:
+     C* I12015072411       62012030    621     970
+     C* 00000000000000000USD                 00000013736271520150723  OMS GL Invoice
+     C* I12015072411       62012030    621     970
+     C* 00000000000000000USD                 -0000013736271520150723  OMS GL Invoice
+     c                   movel     m3cono        cawja1
+     c                   movel     m3divi        caqxcd
+     c                   movel     m3keyvalue    caait1                         key: yyyymmddnnnn
+     C                   ADD       1             CaWKA1                         LINE NUMBER
+     C*
+     C**** Translate JDE cost center/object/sub to M3 dimensions.
+     C                   EXSR      $getdim
+      *
+     C**** get inv and due date
+      *
+     C     key07         chain     @BDCPLS                            59
+      *
+     C*
+     C* Actual ship date for Acctng Date  6/9/16
+     C     omasdt        ifgt      0
+     C                   Z-ADD     omasdt        GLYMD
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    omasDT
+     C                   PARM                    WKacDT            8            yyyymmdd
+     C                   movel     wkacdt        wkacdt                         m3 accounting date
+     c                   else
+     C                   movel     m3keydt       WKacdt                         m3 acctngDt=current
+     c                   end
+      *
+      *  M3  Set values in parameter field
+      *
+     C                   eval      dsamt = %triml(%editc(glaa:'Q'))             leave left justf
+     c                   move      *blanks       wrk19            19
+     C**                 eval      wrk19 = %editc(glaa:'Q')                     right just
+     C**                 move      wrk19         dsamt                         right just
+     C*                  z-add     glu           wkqty            17 0          quantity UNITS
+     C                   move      *blanks       dsqty            17            quantity
+     C                   move      *blanks       vatamt           17            vat amt
+     C                   eval      dsqty = %triml(%editc(glu:'Z'))              quantity UNITS
+     C*    group number alpha
+     C                   eval      omgrpa= %triml(%editc(omgrpn:'Z'))             left justf
+      *
+     C                   eval      dsinv#= %triml(%editc(ominv#:'Z'))
+      *
+     c     omtext        ifne      *blanks                                     use omp300 text
+     c                   movel(p)  omtext        dsdescr
+     c                   else
+     C                   if        bdcest=  'IN'                                regular order
+     C                   movel(p)  wkdescor      dsdescr          40            description
+     c                   endif
+     C                   if        omotyp=  'CM' or omotyp='CB'                 Credit memo order
+     c                             or omotyp='CP'                                  CPDP
+     C                   movel(p)  wkdesccm      dsdescr                        description
+     c                   endif
+     C                   if        omotyp=  'DM' or omotyp = 'DB'               debit memo order
+     c                             or omotyp='DP'                                  CPDP
+     C                   movel(p)  wkdescdm      dsdescr                        description
+     c                   endif
+     c                   endif
+     c*                  movel(p)  omtext        dsdescr       comment this 5.2.17
+      **
+12636C** R12636-Concatenate Produced by Company to Description field.
+  |  C                   if        b8hgss = 'F'
+  |  C                   eval      dsdescr = %trimr(dsdescr) + hyphen +
+  |  C                             wkprodbycmp
+12636C                   endif
+      *
+     C*                  movel(p)  wkuser        caaavn                         UserChanged
+     C**                 move      wkb4dt        caaedx                         M3 Entry Date
+     C                   move      wksyssyndt    caabdt                         date added
+     C                   move      wkhhmmss      caabtm                         time added
+     C                   MOVEL     svUSRNAM      caabvn                         USER ID added
+     C                   movel     sdpgm         caagvn                         program updated
+     C                   if        omsbl <> *blanks                             have subledger
+     C*                  movel     omsbl         dsdim7                         subledger DIM7
+     c                   evalr     dsdim7=%subst(omsbl:%check('0':omsbl))       left adj, remv 00-
+     C                   eval      dsdim7= %triml(dsdim7)
+     c                   endif
+      *
+     c                   movel     'I1'          dsiden
+      *
+     C                   move      *blanks       dsdim           300
+     C                   eval      dsdim = dsiden               +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     omgrpa      +                         group nbr
+     C                                     m3divi      +                         division
+     C                                     '0'         +                         ext/int,ext=0
+     C                                             dsdim1        +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '             ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             wkacdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter 300 long
+      *
+      *
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+     C                   endsr
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE offset 1910 SUBROUTINE
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $WRITEoffset  BEGSR
+      *
+     C                   z-sub     co#amt        GLAA                           -(company total)
+     C                   z-add(h)  0             GLu              15 0          no decimals
+     C*
+     C*******************************************************************************
+      * Write the M3 journal entry line to PLCACPP
+     C*******************************************************************************
+     c                   movel     m3cono        cawja1
+     c                   movel     m3divi        caqxcd
+     c                   movel     m3keyvalue    caait1                         key: yyyymmddnnnn
+     C                   ADD       1             CaWKA1                         LINE NUMBER
+     C*
+     C                   move      ommcu         xxmcu            12
+     C                   move      omobj         xxobj             6
+     C                   move      omsub         xxsub             8
+     C*
+     C                   move      svommcu       ommcu
+     C                   if        ommcu =  '             '                      added 9.1.17
+     c                   move      svco          ommcu
+     c                   endif
+     c
+     C                   move      '1910  '      omobj
+     C                   move      *blanks       omsub
+     C**** Translate JDE cost center/object/sub to M3 dimensions.
+     C                   EXSR      $getdim
+     c*
+     C                   movel     xxmcu         ommcu
+     C                   movel     xxobj         omobj
+     C                   move      xxsub         omsub
+      *
+     C**** use act ship date of the Group
+      *
+     C**                 movel     m3keydt       WKacdt            8            m3 acctngDt=current
+      *
+      *  M3  Set values in parameter field
+      *
+     C                   eval      dsamt = %triml(%editc(glaa:'Q'))             leave left justf
+     c                   move      *blanks       wrk19            19
+     C**                 eval      wrk19 = %editc(glaa:'Q')                     right just
+     C**                 move      wrk19         dsamt                         right just
+     C*                  z-add     glu           wkqty            17 0          quantity UNITS
+     C                   move      *blanks       dsqty            17            quantity
+     C                   move      *blanks       vatamt           17            vat amt
+     C                   eval      dsqty = %triml(%editc(glu:'Z'))              quantity UNITS
+     C*    group number alpha
+     C                   eval      omgrpa= %triml(%editc(omgrpn:'Z'))             left justf
+      *
+     c                   movel(p)  wkicbal       dsdescr
+      **
+12636C** R12636-Don't append Produced by Company to Descr. field for Offset Record.
+      *
+     C*                  movel(p)  wkuser        caaavn                         User changed
+     C**                 move      wkb4dt        caaedx                         M3 Entry Date
+     C                   move      wksyssyndt    caabdt                         date added
+     C                   move      wkhhmmss      caabtm                         time added
+     C                   MOVEL     svUSRNAM      caabvn                         USER ID added
+     C                   movel     sdpgm         caagvn                         program updated
+     C*
+     c                   movel     'I1'          dsiden            2
+     c*
+     C                   move      *blanks       dsdim           300
+     C                   eval      dsdim = dsiden               +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     omgrpa      +                         group nbr
+     C                                     m3divi      +                         division
+     C                                     '0'         +                         ext/int,ext=0
+     C                                             dsdim1        +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '             ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             wkacdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter 300 long
+      *
+      *
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+     C                   endsr
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE Batch Header Record     M3 PLB9CPP
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $writebatch   BEGSR
+     C     m3keyvalue    IFNE      *blanks                                     keyvalue not blank
+     C                   z-add     m3cono        b9wja1                         company
+     C                   movel     m3divi        b9qxcd                         division
+     c                   movel     m3keyvalue    b9ait1                         key: yyyymmddnnnn
+     C***                                                                       Interface
+     C                   if        omotyp=  'OR'                                regular order
+     C                   movel(p)  wktempor      b9ajt1                         interface template
+     c                   endif
+     C                   if        omotyp=  'CM' or                             Credit memo order
+     c                             omotyp=  'CB'
+     c                             or omotyp='CP'                                  CPDP
+     C                   movel(p)  wktempcm      b9ajt1                         interface template
+     c                   endif
+     C                   if        omotyp=  'DM' or                             Debit memo order
+     c                             omotyp=  'DB'
+     c                             or omotyp='DP'                                  CPDP
+     C                   movel(p)  wktempdb      b9ajt1                         interface template
+     c                   endif
+     C********
+     C                   movel(p)  wktempor      b9ajt1                         interface template
+     C********
+     C********           move      '001'         b9wga1                         Status
+     c     omotyp        ifeq      'OR'
+     C                   movel(p)  wkdescor      b9akt1                         Description
+     c                   end
+     C                   if        omotyp = 'CM' or omotyp='CB'                 Credit memo order
+     c                             or omotyp='CP'                                  CPDP
+     C                   movel(p)  wkdesccm      b9akt1                         Description
+     c                   end
+     c                   if        omotyp =  'DM' or omotyp='DB'
+     c                             or omotyp='DP'                                  CPDP
+     C                   movel(p)  wkdescdm      b9akt1                         Description
+     c                   end
+     c     b9akt1        ifeq      *blanks
+     c                   movel(p)  'OMS GL Post' b9akt1
+     c                   end
+     C                   MOVEL     svUSRNAM      b9abvn                         USER ID added
+     C                   move      wkccyymmdd    b9aedx                         M3 Entry Date
+     C                   move      wksyssyndt    b9abdt                         date added
+     C                   move      wkhhmmss      b9abtm                         time added
+     C                   move      '0'           b9g5ss                         erp process sts
+     C                   movel     sdpgm         b9agvn                         program updated
+      *
+     C                   write     @b9cpuj
+     c*
+     C                   ENDIF                                                  BATCH# NOT 0
+     C                   ENDSR
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   Break Logic - setup save fields, re-set accumulators
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $newbreak     BEGSR
+     C*
+     C                   Z-ADD     ominv#        svinv#            7 0
+     C                   Z-ADD     omco#         svco              3 0
+     C                   movel     usrnam        svusrnam         10
+     C*
+      *
+      * RETRIEVE M3 COMPANY AND DIVISION EQUIVS
+      *
+     C                   CALL      'PDHGXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    SVCO                           COMP
+     C                   PARM      'M3COMPANY '  KMV8CD           10            DESC
+     C                   PARM                    KMM8NB           15 5          VALUE
+     c                   z-add     kmm8nb        m3cono            3 0
+     C                   CALL      'POMTXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    SVCO
+     C                   PARM      'M3DIVISION'  KMV8CD           10            DESC
+     C                   PARM                    kmbxtx           40            DIVISION
+     c                   movel     kmbxtx        m3divi            3
+     C*
+     C                   ENDSR
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   get M3 DIM EQUIVALENT FOR JDE COST CENTER/OBJ/SUB
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $getdim       BEGSR
+      *
+     C     key02         klist
+     C                   kfld                    ommcu
+     C                   kfld                    omobj
+     C                   kfld                    omsub
+     C     key03         klist
+     C                   kfld                    f4aic3
+     C                   kfld                    omAID
+      *
+12636C                   eval      wkslshistread = no                           Sls Hist Read Yet
+     C*
+      *  Translate JDE cost center/object/sub to M3 dimensions.
+      *      ....take cc/obj/sub and look up in table for new.....
+      *
+     C     OMMCU         IFNE      *BLANKS                                  WITH COST CENTER
+      *
+      *   DAILYS ONLY
+     c     ommcu         ifeq      '         364'                           inval acct catch
+     c     omobj         andeq     '5030    '
+     c     omsub         andeq     '600     '
+     c                   movel     '010     '    omsub
+     c                   endif
+      *
+     C     key02         chain     plb8rel3                           92
+     C                   ELSE
+      *
+     C     OMAID         IFNE      *BLANKS                                    WITH GL ACCT ID
+12636C                   eval      wkslshistread = yes
+     c     omord#        chain     @hstpiv                            77      omhstpp sales hist
+     c     *in77         ifeq      '0'                                        use orders company
+     C     key03         chain     plb8reL5                           92
+     C                   END
+     C                   END
+     C                   END
+      *
+     C                   if        *in92 = *off
+     C                   move      b8qpcd        dsdim1            8
+     C                   move      b8qqcd        dsdim2            8
+     C                   move      b8qrcd        dsdim3            8
+     C                   move      b8qscd        dsdim4            8
+      **
+12636 ** R12636-If Sub-Account Type='F' (Freight), set dsdim4 with the Load ID.
+  |  C                   if        b8hgss = 'F'
+  |  C                   if        wkslshistread = no                           Sls Hist Read Yet?
+  |  c     omord#        chain     @hstpiv                            77        omhstpp sales hist
+  |  c     *in77         ifeq      '0'                                          use orders company
+     C                   move      *blanks       omsbl                          dont write it to dm7
+  |  C                   endif
+  |  C                   endif
+  |   *
+  |   ** Left justify Load ID, remove leading 0 and convert to text.
+  |  C                   eval      dsdim4 = %triml(%editc(f4rmnb:'Z'))
+  |   *
+  |   ** Get Company Number from Load Header by Load ID.
+  |  C     f4rmnb        chain     omfjcpl1                           78
+  |  C     *in78         ifeq      '0'
+  |   *
+  |   ** Get Freight's Company Abbreviation from Company Defaults Internal.
+  |  C                   call      'PUGCXFR'
+  |  C                   PARM                    RTNCDE            7
+  |  C                   PARM                    fjaic3                         Company
+  |  C                   PARM                    wkprodbyco                     Produced by Co.
+  |   *
+  |  C                   eval      wkprodbycmp = wkprodbyco
+  |   *
+  |  C                   endif
+12636C                   endif                                                  b8hgss = 'F'
+      **
+     C                   move      b8qtcd        dsdim5            8
+     C                   move      b8qucd        dsdim6            8
+     C                   move      b8qvcd        dsdim7            8
+     C                   else
+     c     ommcu         ifne      *blanks
+     c     omobj         orne      *blanks
+     C                   move      ommcu         dsdim1                         output so they can
+     C                   movel     omobj         dsdim2                         see it 6-7-17
+     C                   movel     omsub         dsdim3
+     c                   else
+     c                   movel     omaid         dsdim1
+     c                   end
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     C                   endif
+      *
+     C                   ENDSR
+     C*
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   get JDE Batch #'s
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $getbatchno   BEGSR
+     C*
+      * CALL PGM TO GENERATE NEXT AVAILABLE BATCH # FROM M3
+      *    get next voucher number from M3 voucher number series
+     C                   call      'PLW8XFR'
+     C                   PARM                    RTNCDE            7
+     C                   PARM      'ARS'         P1Q4CD            3            vchr nbr series
+     C                   PARM                    P1WVA1            8 0          NEXT NUMBER
+     C                   Z-ADD     P1WVA1        m3seriez          9 0          BATCH NUM
+     C                   move      m3seriez      m3series          4            BATCH NUM
+     C                   movel     m3series      m3series9         9            for Run Number
+     C*                  move      m3series      m3series9         9            Run Number-right jus
+     C*                  move      *blanks       m3series9         9            Run Number-right jus
+     C*                  eval      m3series9=    %editc(m3seriez:'Z')              right just
+     C*   Format M3 Key Value for this batch:   yyyymmmddnnnn where nnnn is the m3series #
+     C*    example:  201506220001,  then next key for that day would be 201506220002 ,...
+     c*
+     c*                  movel     m3keydt       m3keyvalue                     key value
+     c*                  move      m3series      m3keyvalue       15
+     C                   z-add     0             cawka1                         line number
+     c                   move      *blanks       omgrpa            8
+     C                   z-add     1             omgrpn            8 0          group number
+     C*    group number alpha
+     C                   eval      omgrpa= %triml(%editc(omgrpn:'Z'))             leave left justf
+     C                   ENDSR
+     C*
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   Initial Subroutine - -
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     *inzsr        BEGSR
+     C*
+     c                   movel     'M3GLSTG2'    SDPGM            10
+     C*----------------------------------------------------------------
+     C*
+     C     *ENTRY        PLIST
+     C                   PARM                    RETRN             7
+     C*                  PARM                    pmotyp            2             order  type
+     C*                  PARM                    pmruntyp          1             C=cutover/pilot
+      *                                                                          D=Daily
+      *
+     C     KEY07         KLIST                                                    ar header
+     C                   KFLD                    omco#
+     C                   KFLD                    omcust
+     C                   KFLD                    ominv#
+      *
+      * Put system date into an 8,0 workfield for updating the change date
+      *
+     C     *mdy          move      udate         wkcymdiso
+     C                   move      wkcymdiso     wkccyymmdd        8 0
+      *
+      * Put system date into an 7,0 workfield for updating the synon tables
+      *
+     C                   z-add     wkccyymmdd    wkyymmdd
+     C                   if        wkccyymmdd >= 20000000
+     C     wkyymmdd      add       1000000       wksyssyndt
+     C                   else
+     C                   z-add     wkyymmdd      wksyssyndt
+     C                   endif
+      *
+      * Save the system time for populating fields.
+      *
+     C                   time                    wkhhmmss
+      *
+     C*
+     C                   endsr

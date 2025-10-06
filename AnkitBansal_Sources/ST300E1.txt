@@ -1,0 +1,841 @@
+     Z* CRTBNDRPG
+     Z* DFTACTGRP(*NO) BNDDIR(YBNDDIR) DBGVIEW(*SOURCE)
+     Z* CVTOPT(*DATETIME) ACTGRP(*CALLER) OPTIMIZE(*BASIC)
+     H*****************************************************************
+     H*
+     H*  Program number:  ST300E1 - Copied from ST300
+     H*  Program name:    Read Workfile generated from Power Pro and write to JDE WORLD
+     H*  Programmer:      Barb Gutierrez    / Rose Centonze
+     H*  Date created:    01/11/2010        / 03/27/2020
+     H*  Program purpose: This program will read the workfile created from the transportation
+     H*                   software package called Power Pro.  This workfile will contain
+     H*                   freight billing and cash receipts records.  They are identified by
+     H*                   a souce type.  Journal entries will be created into JDE where the
+     H*                   user must approve and post the batch.
+     H*
+      *  3/27/2020 p16169 Rose Centonze
+      *                   Modified to use E1 programs & files:
+      *                   x0010  --> e1I0010   --> GET0010
+      *                   x0028  --> e1I0028   --> E10028A
+      *                   x0901  --> e1I0901
+      *                   x09031 --> e1I09031  --> GET09031 - GOES TO BSSV
+      *                   F0901  --> e10901
+      *                   F0011  --> e10011L0  --> when wrt, also with e1b9cpp workfile E1LCXFR
+      *                   F0911  --> e10911    -- new fields
+      *         1 set edi trans no to gldoc
+      *         2 GLKCO       - document company - leave blank
+      *         3 GLPKCO  GLOKCO  GLPSFX  - leave blank , not 000
+      *         4 glrcnd - reconciled-leave Blank
+      *         5 glag - should have the amount, not GLAA
+      *         6 icndo, icodcn- increment when get document
+      *     rmc output GLTORG with TRSSI ....
+      *
+     H*****************************************************************
+     F*
+     Fstl201A   IF   E           K DISK
+     F* Power Pro workfile     (Key: srctyp, id number, date, acct id)
+     F*F0901     IF   E             DISK                                       p16169
+     Fe10901    IF   E             DISK
+     F* JDE Account Master
+     F*F0011     UF A E           K DISK                                        p16169
+     Fe10011l0  UF A E           K DISK
+     F*   JDE BATCH HEADER FILE
+     F*
+     F*F0911     O    E             DISK                                        p16169
+     Fe10911    O    E             DISK
+     F* JDE G/L LEDGER FILE
+     F*
+     Fprint198  O    F  198        PRINTER OFLIND(*INOF)
+     D*
+     D***  RETRIEVE USER I.D. AND WORKSTATION I.D.
+     D*
+     D                SDS
+     D  PGMSGQ           *PROC
+     D  WRKSTN               244    253
+     D  USRNAM               254    263
+      *
+      * Parm fields
+      *
+     D*
+      ****************************************************************
+      * Constants
+      ****************************************************************
+      *
+     d yes             C                   'Y'
+     d no              C                   'N'
+     D gldct           C                   const('JE')
+     D gllt            C                   const('AA')
+     D glam            C                   const('2')
+     D*glpkco          C                   const('00000')
+     D*glokco          C                   const('00000')
+     D*glpfsx          C                   const('000')
+     D*glrcnd          C                   const('R')
+     D glpkco          C                   const('     ')
+     D glokco          C                   const('     ')
+     D glpfsx          C                   const('   ')
+     D glrcnd          C                   const(' ')
+     D glpost          C                   const(' ')
+     D glicut          C                   const('G ')
+     D gleder          C                   const('B')
+     D glcrrm          C                   const('D')
+     D gluser          C                   const('TRSSI     ')
+     D glcrcd          C                   const('USD')
+      *
+      ****************************************************************
+      * Standalone Fields
+      ****************************************************************
+      *
+     d first           s              1    inz('Y')
+     d prtflg          s              1    inz('N')
+     d svsrcty         s                   like(stsrcty)
+     d svaid           s                   like(staid)
+     d svmcu           s                   like(stmcu)
+     d svobj           s                   like(stobj)
+     d svsub           s                   like(stsub)
+     d svidno          s                   like(stidno)
+     d svdoc           s                   like(gldoc)
+     d svdate          s                   like(stdate)
+     d svdesc          s                   like(stdesc)
+     d jeamt           s                   like(stdamt)
+     d wkaa            s                   like(glaa)
+     d totdbt          s                   like(stdamt)
+     d totcrd          s                   like(stcamt)
+     D start           s              2  0
+     D wkcono          s              3
+     D wkcono5         s              5
+     d wkisodate       s               D   datfmt(*iso)
+     D xxsyssyndt      s              7  0
+     D xxccyymmdd      s              8  0
+      *
+      * Parm fields
+      *
+     D xxsrctyp        s                   like(svsrcty)
+     D xxbatno         s                   like(glicu)
+     D*
+      * For call to JDE account routine
+      *
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxerrm          s              4
+      *
+     d xxani           s                   like(glani)
+     d wkani           s                   like(glani)
+      *
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+     D*
+     D***  Posting Date from the workfile CCYYMMDD
+     D*
+     D                 DS
+     D  glcymd                 1      8
+     D  ccgl                   1      2
+     D  yygl                   3      4
+     D  mmgl                   5      6
+     D  ddgl                   7      8
+     D*
+     D                 DS
+     D  glmdy                  1      6  0
+     D  glmm                   1      2  0
+     D  gldd                   3      4  0
+     D  glyy                   5      6  0
+     D*
+     D***  EXPLANATION
+     D*
+     D                 DS
+     D  WKEXA                  1     30
+     D  WK1                    1      9    INZ('POWER PRO')
+     D  WK2                   11     12
+     D  WK3                   14     20    INZ('POSTING')
+     D*
+     D***  INVALID ACCOUNT ERROR MESSAGE
+     D*
+     D                 DS
+     D  MSG                    1     15
+     D  ERR1                   1      7    INZ('Invalid')
+     D  ERR2                   9     15    INZ('Account')
+     D*
+     D***  Account nets to zero message
+     D*
+     D                 DS
+     D  MSG1                   1     35
+     D  ERR3                   1     16    INZ('Acct nets zero. ')
+     D  ERR4                  17     35    INZ('Not written to JDE.')
+      *
+     d i0901ds         ds           500
+     d xxco                                like(gmco)
+     d xxaid                               like(gmaid)
+     d xxmcu                               like(gmmcu)
+     d xxobj                               like(gmobj)
+     d xxsub                               like(gmsub)
+     d xxans                               like(gmans)
+     d xxdl01                              like(gmdl01)
+     d xxlda                               like(gmlda)
+     d xxbpc                               like(gmbpc)
+     d xxpec                               like(gmpec)
+     d xxbill                              like(gmbill)
+     d xxcrcd                              like(gmcrcd)
+     d xxum                                like(gmum)
+     d xxr001                              like(gmr001)
+     d xxr002                              like(gmr002)
+     d xxr003                              like(gmr003)
+     d xxr004                              like(gmr004)
+     d xxr005                              like(gmr005)
+     d xxr006                              like(gmr006)
+     d xxr007                              like(gmr007)
+     d xxr008                              like(gmr008)
+     d xxr009                              like(gmr009)
+     d xxr010                              like(gmr010)
+     d xxr011                              like(gmr011)
+     d xxr012                              like(gmr012)
+     d xxr013                              like(gmr013)
+     d xxr014                              like(gmr014)
+     d xxr015                              like(gmr015)
+     d xxr016                              like(gmr016)
+     d xxr017                              like(gmr017)
+     d xxr018                              like(gmr018)
+     d xxr019                              like(gmr019)
+     d xxr020                              like(gmr020)
+     d xxr021                              like(gmr021)
+     d xxr022                              like(gmr022)
+     d xxr023                              like(gmr023)
+     d xxobja                              like(gmobja)
+     d xxsuba                              like(gmsuba)
+     d xxwcmp                              like(gmwcmp)
+     d xxcct                               like(gmcct)
+     d xxerc                               like(gmerc)
+     d xxhtc                               like(gmhtc)
+     d xxqlda                              like(gmqlda)
+     d xxccc                               like(gmccc)
+     d xxfmod                              like(gmfmod)
+     d xxuser                              like(gmuser)
+     d xxpid                               like(gmpid)
+     d xxjobn                              like(gmjobn)
+     d xxupmj                              like(gmupmj)
+     d xxupmt                              like(gmupmt)
+     d xxedln          s                   like(gledln)                          edi line  number
+      *
+     C*
+     C/EJECT
+     C*----------------------------------------------------------------
+     C* MAIN PROCESSING LOOP
+     C*----------------------------------------------------------------
+     C*   Read Workfile..........
+     C*
+     C     *loval        setll     stl201a                                      HAVE RECORD
+     C                   dou       *in50 = *on
+     C                   read      stl201a                                50
+     C                   if        *in50 = *off                                 HAVE RECORD
+     C*
+     C* First time though.....
+     C*         get first JDE batch number
+     C*         save break fields
+     C*
+     C                   if        first = yes
+     C* Seton print flag
+     C*
+     C                   eval      prtflg = yes                                 HAVE RECORD
+     c                   exsr      $getbatchno
+     c                   exsr      $getdoc
+     c                   exsr      $save
+     C                   move      no            first
+     C                   except    hdg1
+     c                   endif
+     C* ------------------------------
+     C*
+     C                   select
+     C*
+     C* Write batch record when source type changes and get new number.
+     C*
+     C                   when      stsrcty <> svsrcty
+     C     totdbt        sub       totcrd        jeamt
+     C                   exsr      $WRITE
+     C*
+     C                   if        *inof = yes
+     C                   except    hdg
+     C                   except    hdg1
+     C                   endif
+     C*
+     C                   z-add     0             totdbt
+     C                   z-add     0             totcrd
+     C                   z-add     0             jeamt
+     c                   exsr      $writebatch
+     c                   exsr      $getbatchno
+     c                   exsr      $getdoc
+     c                   exsr      $save
+     C                   except    hdg
+     C                   except    hdg1
+     C*
+     C* When the id number changes, we need to start a new journal entry within the same batch.
+     C* For freight billing source types (FB), the id number is the load number.
+     C* For cash receipt source types (CR), the id number is the check number.
+     C*
+     C                   when      stidno <> svidno
+     C     totdbt        sub       totcrd        jeamt
+     C                   exsr      $WRITE
+     C*
+     C* If jeamt is 0, it doesn't get written to jde, so print message on report.
+     C*
+     C                   if        jeamt = 0
+     C                   exsr      $netzero
+     C                   endif
+     C*
+     C* Print blank line between each document number.
+     C*
+     C                   if        *inof = yes
+     C                   except    hdg
+     C                   except    hdg1
+     C                   endif
+     C                   except    line
+     C*
+     C                   z-add     0             totdbt
+     C                   z-add     0             totcrd
+     C                   z-add     0             jeamt
+     c                   exsr      $getdoc
+     c                   exsr      $save
+     C*
+     C* When the account id changes, we need to write the line entry to JDE.
+     C*
+     C                   when      staid <> svaid
+     C     totdbt        sub       totcrd        jeamt
+     C                   exsr      $WRITE
+     C*
+     C* If jeamt is 0, it doesn't get written to jde, so print message on report.
+     C*
+     C                   if        jeamt = 0
+     C                   exsr      $netzero
+     C                   endif
+     C*
+     c                   exsr      $save
+     C                   z-add     0             totdbt
+     C                   z-add     0             totcrd
+     C                   z-add     0             jeamt
+     C*
+     C                   endsl
+     C*
+     C* Detail Time.... accumlate the $ amount.
+     C*
+     c                   if        stdamt <> 0
+     C                   add       stdamt        totdbt
+     c                   endif
+     C*
+     C                   if        stcamt <> 0
+     C                   add       stcamt        totcrd
+     C                   endif
+     C*
+     C* Print report
+     C*
+     C                   if        *inof = yes
+     C                   except    hdg
+     C                   except    hdg1
+     C                   endif
+     C                   except    det
+     C*
+     C                   endif                                                  50 = OFF
+     C*
+     C                   enddo                                                  50 DOUEQ ON
+     C*----------------------------------------------------------------
+     C* EOF PROCESSING:
+     C*  WRITE LAST RECORDs TO JDE
+     C*----------------------------------------------------------------
+     C*
+     C     totdbt        sub       totcrd        jeamt
+     C                   exsr      $WRITE
+     C*
+     C* If jeamt is 0, it doesn't get written to jde, so print message on report.
+     C*
+     C                   if        jeamt = 0
+     C                   exsr      $netzero
+     C                   endif
+     C*
+     C* last batch record
+     c                   if        batamt <> 0 or batndo <> 0
+     C                   exsr      $writebatch
+     C                   endif                                                  HAVE A RECORD
+     C*
+     C* If no records to process, print message.
+     C*
+     C                   if        prtflg = no
+     C                   except    hdg
+     C                   except    norec
+     C                   endif
+     C*
+     C* THIS WILL CLOSE ANY FILES THAT ARE LEFT OPEN FROM ANY CALLED
+     C* PROGRAMS WITHIN THIS PROGRAM.
+     C*
+     C                   CALL      'UTRCRSC'
+     C*
+     C                   MOVE      *ON           *INLR
+     C/EJECT
+     C***************************************************************
+     C* SUBROUTINE SECTION
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   DATE PROCESSING SUBROUTINE
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $FMTDT        BEGSR
+     C*
+     C*                  MOVEL     '*JUL    '    #TFMT             7
+     C*                  MOVEL     '*NONE'       #SEP              7
+     C*                  MOVE      *BLANK        $ERTST            1
+     C* p16169           CALL      'X0028   '
+     C*                  CALL      'E1I0028 '
+     C*                  PARM                    #SIDAT
+     C*                  PARM                    #EDAT
+     C*                  PARM                    #FFMT
+     C*                  PARM                    #TFMT
+     C*                  PARM                    #SEP
+     C*                  PARM                    $ERTST
+     C*                  PARM      *BLANKS       $CTRY             2
+     C*
+      *
+     C                   call      'E10028A'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxedat            6 0
+      *
+     c                   move      xxedat        #sidat
+      *
+     C                   ENDSR
+     C*
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE SUBROUTINE
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $WRITE        BEGSR
+      *
+      * Use the first 3 non-blank characters of the cost center field as the
+      * company.
+      *
+     C                   z-add     0             start
+     C                   move      *blank        wkcono
+      *
+     C     ' '           check     svmcu         start
+     C                   if        start > 0
+     C                   if        start <= 10
+     C                   eval      wkcono = %subst(svmcu:start:3)
+     C                   else
+     C                   eval      wkcono = %subst(svmcu:start)
+     C                   endif
+     C                   endif
+     C*
+     C                   eval      glco = *zeros                                CO #
+     C                   move      wkcono        glco                           CO #
+     C                   eval      glkco = *blanks                              DOCUMENT CO#
+     C*
+     C                   eval      glicu = jeicu                                batch number
+      *
+     C                   eval      gldoc = svdoc                                DOCUMENT #
+     C*
+     C*  Retrieve julian date for actual post date
+     C*
+     C                   move      svdate        glcymd                         ccyymmdd
+     C                   move      mmgl          glmm                           month
+     C                   move      ddgl          gldd                           day
+     C                   move      yygl          glyy                           year
+     C                   move      glmdy         #SIDAT
+     C                   MOVE      *BLANKS       #EDAT
+     C                   MOVEL     '*MDY    '    #FFMT
+     C                   move      svdate        xxccyymmdd                     ccyymmdd
+     C                   EXSR      $FMTDT
+     C                   MOVE      #SIDAT        GLDGJ                          G/L DATE
+     C*
+     C*      CALCULATE PERIOD & FISCAL YEAR FROM G/L DATE
+     C*
+     C* p16169           CALL      'X09031'
+     C*                  CALL      'E1I09031'
+     C*                  PARM      '1'           #CALC             1
+     C*                  PARM      glco          #CO               5
+     C*                  PARM      GLdgj         #DG               6 0
+     C*    GLPN          PARM                    #PN               2 0
+     C*    GLFY          PARM                    #FY               2 0
+     C*    GLCTRY        PARM                    #CTRY             2 0
+     C*                  PARM                    #EDT              1
+     C*                  PARM                    #DGSY             1
+JEU56 * Begin of Added code for GET09031                                    p16169
+JEU56 * Retrieve Acct. Period                                     copied from smlgen/qrpgsrc/edenupr
+JEU56C                   MOVE      gldgj         #DG                             julian date
+     C                   move      GLCO          #CO
+MN04 C                   move      0             #CTRY             2 0
+MN04 C                   move      0             #FY               2 0
+      *
+MN04 C******             CALL      'GETFYPNO'
+MN04 C                   CALL      'GET09031'
+MN04 C                   PARM                    #CO               5
+MN04 C                   PARM                    #DG               6 0
+MN04 C                   PARM      0             #PN               2 0
+MD   C                   PARM      0             #FY               2 0
+MD   C                   PARM      0             #CTRY             2 0
+     C                   parm      ' '           BSSV              1
+MN04  *
+MN04  *
+     C                   z-add     #pn           GLPN                           period
+     C                   z-add     #fy           GLFY                           fiscal year
+     C                   z-add     #ctry         GLCTRY                         fiscal century
+      *
+      ******* End of code added for GET09031                                     p16169
+      *
+     C                   z-add     0             gldkc                          check clear date
+     C                   eval      gljobn = wrkstn                              job
+     C*
+     C                   eval      glcn = *blanks                               check #
+     C                   eval      gldkj = *zeros                               check date
+     C*
+     C                   add       1             gljeln                         line number
+     C*
+     C                   movel     wkpsdt        gldicj                               batch date
+     C*
+      * Call JDE pgm to get account id associated with cost center/object/sub in record.
+     C*
+     C*
+      * Call JDE pgm to get structured account number.
+     C*
+     C* p16169           CALL      'X0901'
+     C                   CALL      'E1I0901'
+     C                   PARM                    xxsym
+     C                   PARM      '2'           xxomod
+     C                   PARM      '9'           xximod
+     C     wkani         PARM                    xxani
+     C                   PARM      svmcu         xxmcu
+     C                   PARM      svobj         xxobj
+     C                   PARM      svsub         xxsub
+     C                   PARM                    xxerrm
+     C                   PARM                    i0901ds
+     C*
+     C                   if        xxerrm = *blanks
+     C                   eval      glaid = svaid
+     C                   eval      glani = wkani
+     C                   eval      glmcu = svmcu                                cost center
+     C                   eval      globj = svobj                                object
+     C                   eval      glsub = svsub                                sub code
+     C                   eval      *in95 = *off                                 invalid acct
+     C                   else
+     C                   eval      glaid = *blanks
+     C                   eval      glani = *blanks
+     C                   eval      glmcu = *blanks                              cost center
+     C                   eval      globj = *blanks                              object
+     C                   eval      glsub = *blanks                              sub code
+     C                   eval      *in95 = *on                                  invalid acct
+     C                   endif
+     C*
+     C                   eval      gldsvj = gldgj                               service tax date
+     C*
+     C                   eval      wk2 = svsrcty                                saved source type
+     C                   eval      glexa = svdesc                               explanation
+     C                   eval      glexr = wkexa                                remark
+     C**                 eval      gltorg = usrnam        10-20-20              transaction orig
+     C                   eval      gltorg = gluser                              transaction orig
+     C                   eval      glre = *blanks                               reveese/void
+     C                   eval      glcrr = *zeros                               exchange rate
+     C                   eval      glhcrr = *zeros                              hist exch rate
+     C*
+     C**                 move      jeamt         glaa                          p16169
+     C                   z-add     jeamt         glag
+     C*
+      * P16169 added for new fields in e10911
+     C                   movel     GLUSER        gledus                         edi user id
+     C                   movel     glicu         gledbt                         edi batch no
+     C                   movel     gldoc         gledtn                         edi trans ->uniq/inv
+     C                   add       1             xxedln                         edi line no
+     C                   z-add     xxedln        gledln                         edi line no
+     C                   movel     '0'           gledsp                         edi success procd
+     C                   movel     'A'           gledtc                         edi trans action
+     C                   movel     'J'           gledtr                         edi trans type
+     C                   movel     xxsyssyndt    glabdt                         date updated
+     C                   z-add     rtime         glabtm                         Time Last Updated
+     C                   movel     'ST300E1 '    glakvn                         pgm  Last Updated
+     C                   movel     gluser        glajvn                         user id created
+      *
+      *
+     C****               if        glaa <> 0                                    amount > 0
+     C                   if        glag <> 0                                    amount > 0
+     C                   write     I0911
+     C                   endif                                                  amount > 0
+     C*
+     C*  Only accumulate debit amounts for batch header
+     C*
+     C**                 if        glaa > 0                                     amount > 0
+     C***                add       glaa          batamt           15 0
+     C                   if        glag > 0                                     amount > 0
+     C                   add       glag          batamt           15 2          p16169
+     C***                add       1             batndo            5 0        incr when get doc#
+     C                   endif                                                  amount > 0
+     C*
+     C***                z-add     0             glaa                           amount
+     C                   z-add     0             glag                           amount
+     C                   endsr
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE Batch Record
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $writebatch   BEGSR
+     C*
+     C                   if        jeicu <> *zeros                              batch # <> 0
+     C                   eval      wkicu = jeicu
+     C*
+     C**   key11         chain     I0011                              51         p16169
+     C     key11         chain     I0011l0                            51
+     C                   if        *in51 = *on                                  51 = ON
+     C                   eval      icicu = jeicu                                batch number
+     C                   eval      icicut = wkicut                              batch type
+     C**                 eval      icaicu = batamt                              input total
+     C     100           mult      batamt        icaicu                         input total  15.0
+     C                   eval      icdicj = gldicj                              batch date
+     C                   eval      icndo = batndo                               # doc's expected
+     C                   eval      icame = batamt                               amount entered
+     C                   eval      icdocn = batndo                              docs entered
+     C                   eval      icuser = gluser                              user id
+     C                   eval      iciapp = 'A'                                 batch approved?
+     C                   eval      icbal = 'Y'                                  balanced docs?
+     C                   eval      icbalj = ' '                                 balanced JE?
+     C                   eval      icist = ' '                                  batch status
+     C                   eval      icpob = 'N'                                  post out of balance?
+     C                   eval      iciboi = 'Y'                                 include batch/integr
+     C*
+     C*  p16169          write     I0011
+     C                   write     I0011l0
+     C*
+     C* WRITE RUN LOG HEADER WORKFILE - WILL BE READ IN CL pdwaupr TO PUSH BATCHES TO ZPROCESSOR
+     C*
+     c                   eval      wkcono5 = '00' + wkcono
+     C*
+     C                   call      'E1LCXFR'
+     c                   parm                    RETURN            7
+     C                   parm                    icICUT                         BATCH TYPE
+     C                   parm                    icICU                          BATCH NUMBER
+     C                   parm                    icuser                         USER
+     C                   parm                    wkcono5                        company
+     C*
+     C* reset batch total fields
+     C                   eval      batamt = 0
+     c                   eval      batndo = 0
+     C*
+     C                   endif                                                  51 = ON
+     C                   endif                                                  batch# not 0
+     C*
+     C                   endsr
+     C*----------------------------------------------------------------
+     C*   Setup save fields.
+     C*----------------------------------------------------------------
+     C*
+     C     $save         begsr
+     C*
+     C                   move      stsrcty       svsrcty                        source type
+     C                   move      stsrcty       xxsrctyp                       source type
+     C                   move      stidno        svidno                         id number
+     C                   move      staid         svaid                          account id
+     C                   move      stmcu         svmcu                          cost center
+     C                   move      stobj         svobj                          object
+     C                   move      stsub         svsub                          sub code
+     C                   move      stdate        svdate                         process date
+     C                   move      stdesc        svdesc                         decription
+     C*
+     C                   endsr
+     C/EJECT
+     C*----------------------------------------------------------------
+     C*   get JDE Batch #
+     C*----------------------------------------------------------------
+     C*
+     C     $getbatchno   begsr
+     C*
+      * Call JDE pgm to generate the next available batch number.
+      *
+     C* p16169           call      'X0010'
+     C*                  call      'E1I0010'
+     C*                  PARM      '00  '        PSSY              4
+     C*                  PARM      '01'          PSIDX             2
+     C*                  PARM                    PSNBR             8 0
+     C*                  Z-ADD     PSNBR         jeicu             8 0          BATCH NUM
+      *
+     C                   call      'GET0010 '                                   p16169
+     C                   parm      '00  '        PSSY              4
+     C                   parm      '01'          PSIDX             3
+     C                   parm      0             spsnbr           15 0          chg from xxbatch
+     C                   parm      ' '           bssv              1            added parm
+     c                   z-add     spsnbr        jeicu             8 0          batch no.
+     C*
+     C* Re-set the Document Line Counter
+     C*
+     C                   z-add     0             gljeln                         je line number
+     C                   z-add     0             batndo                         no of documents
+     C*
+      *
+     C                   endsr
+     C*
+     C/EJECT
+     C*----------------------------------------------------------------
+     C*   get jde next document number
+     C*----------------------------------------------------------------
+     C*
+     C     $getdoc       begsr
+     C*
+      * Call JDE pgm to generate the next available document number.
+      *
+     C* p16169           call      'X0010'
+     C*                  call      'E1I0010'
+     C*                  PARM      '09  '        PSSY
+     C*                  PARM      '02'          PSIDX
+     C*                  PARM                    PSNBR
+     C*                  Z-ADD     PSNBR         svdoc                          document number
+     C*
+     C                   call      'GET0010'
+     C                   PARM      '09  '        PSSY
+     C                   PARM      '02'          PSIDX
+     C                   PARM                    spsnbr           15 0
+     C                   PARM      ' '           bssv
+     C                   Z-ADD     spsnbr        svdoc                          document number
+     C                   add       1             batndo            5 0          no of documents
+     C*
+     C* Re-set the Document Line Counter
+     C*
+     C                   z-add     0             gljeln                         je line number
+      *
+      * P16169 6/12/20 Reset EDI line number when document number changes
+     c                   z-add     0             xxedln                        reset line no
+     C*
+     C                   endsr
+     C*
+     C/EJECT
+     C*----------------------------------------------------------------
+     C*   Acct nets to zero error message subroutine
+     C*----------------------------------------------------------------
+     C*
+     C     $netzero      begsr
+     C*
+     C* If jeamt is 0, it doesn't get written to jde, so print message on report.
+     C*
+     C                   eval      *in96 = *on
+     C*
+     C                   if        *inof = yes
+     C                   except    hdg
+     C                   except    hdg1
+     C                   endif
+     C*
+     C                   except    acct0
+     C*
+     C                   eval      *in96 = *off
+     C*
+     C                   endsr
+     C/EJECT
+     C*----------------------------------------------------------------
+     C*   Initial Subroutine - -
+     C*----------------------------------------------------------------
+     C*
+     C     *inzsr        BEGSR
+     C*
+     C* Key used for batch haader in jde
+     C*
+     C     KEY11         KLIST                                                    F0011
+     C                   KFLD                    WKICUT
+     C                   KFLD                    WKICU             8 0
+     C*
+     C                   movel     'G'           wkicut            2
+     C*
+     C*   RETRIEVE YMD FORMAT FOR UDATE BY USING JDE'S ROUTINE...
+     C*
+     C                   TIME                    $TIME            12 0
+     C                   MOVE      $TIME         $DATE             6 0
+     C                   MOVE      $DATE         #SIDAT            6
+     C                   MOVE      *BLANK        #EDAT             8
+     C                   MOVEL     '*SYSVAL '    #FFMT             7
+     C                   MOVEL     '*YMD    '    #TFMT             7
+     C                   MOVEL     '*NONE'       #SEP              7
+     C                   MOVE      *BLANK        $ERTST            1
+     C*
+     C*   RETRIEVE JULIAN DATE FOR UDATE BY USING JDE'S ROUTINE...
+     C*
+     C* p16169           CALL      'X0028   '                     dont need this- done in $fmtdt
+     C*                  CALL      'E1I0028   '
+     C*                  PARM                    #SIDAT
+     C*                  PARM                    #EDAT
+     C*                  PARM                    #FFMT
+     C*                  PARM                    #TFMT
+     C*                  PARM                    #SEP
+     C*                  PARM                    $ERTST
+     C*                  PARM      *BLANKS       $CTRY             2
+     C*                  MOVE      #SIDAT        WKPSDT            6            POST DATE
+      *
+     C     *mdy          movel     udate         wkisodate
+     C                   movel     wkisodate     xxccyymmdd
+      *
+     C*                  call      'E10028A'                  dont need this- done in $fmtdt
+     C*                  parm                    xxccyymmdd
+     C*                  parm      0             xxedat            6 0
+     C*                  MOVE      xxedat        WKPSDT            6            POST DATE
+      *
+     C                   TIME                    $TIME            12 0
+     C                   MOVE      $TIME         $DATE             6 0
+     C                   MOVE      $DATE         #SIDAT            6
+     C                   MOVE      *BLANK        #EDAT             8
+     C                   MOVEL     '*SYSVAL '    #FFMT             7
+      *
+     C                   EXSR      $FMTDT
+      *
+     C*                  movel     #sidat        glupmj                         UPDATE DATE
+     C*                  movel     #sidat        gldsyj
+     C                   MOVEl     #sidat        WKPSDT            6            POST DATE
+     C*
+     C                   TIME                    GLTICU                         TIME
+     C                   TIME                    GLUPMT                         TIME UPDATED
+     C*
+     C                   TIME                    RTIME             6 0
+     C                   EXCEPT    HDG
+      *
+      * Put system date into an 7,0 workfield for updating the f0911
+      *
+     C                   call      'HP8008'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxsyssyndt
+     C                   endsr
+     C/EJECT
+     Oprint198  E            HDG            1 01
+     O                                            7 'ST300E1'
+     O                                           80 'FB/CR Interface from Power'
+     O                                           84 'Pro'
+     O                       UDATE         Y    150
+     O          E            HDG            1
+     O                       RTIME              150 '0 :  :  '
+     O          E            HDG            1
+     O                                          146 'PAGE'
+     O                       PAGE          Z    150
+      *
+     O          E            HDG1           2
+     O                                           25 'E1 Batch Number'
+     O                       jeicu         Z     35
+      *
+     O          E            HDG1           2
+     O                                            3 'Src'
+     O                                           15 'Document #'
+     O                                           26 'Post Date'
+     O                                           40 'Cost Center'
+     O                                           49 'Object'
+     O                                           60 'Sub Code'
+     O                                           69 'ID No.'
+     O                                           90 'Debit Amt'
+     O                                          109 'Credit Amt'
+     O                                          123 'Description'
+     O                                          148 'Err'
+      *
+     O          E            DET            1
+     O                       stsrcty              3
+     O                       svdoc         Z     13
+     O                       stdate              25
+     O                       stmcu               40
+     O                       stobj               49
+     O                       stsub               60
+     O                       stidno              71
+     O                       stdamt        J     90
+     O                       stcamt        J    109
+     O                       stdesc             142
+     O               95      msg                160
+     O          E            acct0          1
+     O               96      msg1               177
+      *
+     O          E            LINE        1  1
+      *
+     O          E            NOREC       1  2
+     O                                           55 'No records to process'

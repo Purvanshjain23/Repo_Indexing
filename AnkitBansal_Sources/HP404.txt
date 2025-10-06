@@ -1,0 +1,779 @@
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP404
+      * TITLE:       Specify Hps Upload to JDE
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     10/02/01
+      *
+      *
+      * FUNCTION: This Specify uses an edit record format to allow the user
+      *           to submit various uploads to JDE.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/10/08  LeAnne Ramsey
+      *           Add new field "Upload Status" to Control file.
+      *           Added new function key (F10=View Status) to screen.
+      *
+      * 04/28/09  LeAnne Ramsey
+      *           New fields (beginning/ending period dates) were added to HSP087.
+      *           Also added the dates as parms on call to HP7404.
+      *           Also added a warning-only message to alert user that uncosted feed
+      *           tickets exist for the period. This is hardcoded in the DSPF and
+      *           conditioned with indicator 87.
+      *
+      * 09/21/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Upload Date' to Feed Ticket Header.
+      *
+      * 09/20/18  Danny Nguyen - S13682
+      *           Added Company for input on screen and valiate Company against HSP0071.
+      *           Save Company selected to the *LDA. Added Company as parm 1 when calling
+      *           HP7404 program, Company is required prior to selecting F10=View Upload
+      *           Status.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhpd404    cf   e             workstn infds(iofeed)
+      *
+      *
+     Fhsp035    if   e           k disk
+      *    HPS to JDE upload codes
+      *
+      *
+     Fhsl037n   if   e           k disk
+      *   Feed ticket header  (selects only EN, RC produced Delivery tickets)
+      *
+      *
+     Fhsl037r   if   e           k disk    rename(fhrec:fhrecr)
+      *   Feed ticket header
+      *   (selects only EN, RC produced Pickup tickets with No To Farm or Different From/To Farms)
+      *
+      *
+     Fhsp087    if   e           k disk
+      *    Control file: HPS upload to JDE
+      *
+13682Fhsp0071   if   e           k disk
+      *    Company Control
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D all             c                   'A'
+     D set1            c                   'SET1  '
+     D edit1           c                   'EDIT1 '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Compile time array for SBMJOB used in QCMDEXC
+      *---------------------------------------------------------------
+     D cmd             s              1    dim(80) ctdata perrcd(80)
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D pgm             s             10
+     D msgfl           s             10
+     D routne          s              6
+     D rtncd           s              2    inz('00')
+     D maxmsg          s              2  0  inz(20)
+      *
+      *
+      * Control fields
+      *
+     D termfl          s              1
+      *
+      *
+      * Workfields
+      *
+     D wktrcd          s                   like(fhtrcd)
+      *
+      *
+      * Work fields for date manipulation
+      *
+     D wkmdydate       s               D   datfmt(*mdy)
+      *
+      *
+      * Parm fields
+      *
+     D xxhucd          s                    like(huhucd)
+     D xxhuds          s                    like(huhuds)
+      *
+     D xxjobq          s             10     inz('*JOBD     ')
+      *
+     D infncd          s             10
+     D inbobo          s              5
+     D indvfl          s              1
+     D inbofl          s              1
+     D oubobo          s              5
+     D oubods          s             30
+     D oudvcd          s              5
+     D secfl           s              1
+     D oubofl          s              1
+     D ourmfl          s              1
+      *
+      *  Parms for use with QCMDEXC.  'LENGTH' is the length of the
+      *  command that will be issued with QCMDEXC.  QCMDEXC requires
+      *  the field containing length to be defined as 15 with 5 decimal
+      *  positions.  The field 'CMDSBM' will hold the values of the
+      *  submit job command when passed as a parm on the call to
+      *  QCMDEXC.
+      *
+     D length          s             15  5 inz(80)
+     D cmdsbm          s             80
+      *
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Data areas
+      *---------------------------------------------------------------
+      *
+      * Local data area.
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldacyr                 1      4  0
+     D  ldacpe                 5      6  0
+     D  ldbpdt                 7     14  0
+     D  ldepdt                15     22  0
+     D  ldhucd                23     24
+13682D  ldcocd                25     27
+      *
+     D  ldhuds               100    129
+      *
+      *---------------------------------------------------------------
+      *  Definition for external data area 'DAJDE'
+      *---------------------------------------------------------------
+     D
+     D dajde           ds                  dtaara(dajde)
+     D  dafl                   1      1
+      *
+      *
+      *---------------------------------------------------------------
+      *  Definition for external data area 'DAAPER'
+      *---------------------------------------------------------------
+     D
+     D daaper          ds                  dtaara(daaper)
+     D  daccyy                 1      4  0
+     D  daper                  5      6  0
+     D  dabpdt                 7     14  0
+     D  daepdt                15     22  0
+     D  dapgfl                23     23
+     D  dappfl                24     24
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+     C
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off                                         Main do loop
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     edit1         $edit1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo                                                  Main do loop
+      /EJECT
+      *----------------------------------------------------------------
+      * Set environment for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $set1         begsr
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Perform operator I/O for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $scrn1        begsr
+      *
+      * If the user failed the initial security checks, set on indicator to
+      * protect input fields and invalidate function keys.
+      *
+     C                   if        termfl = yes
+     C                   seton                                        99
+     C                   endif
+      *
+      * Write the error messages from the error arrays to the error
+      * message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * Write screen 1 to CRT.
+      *
+      *
+     C                   write     hp404k1
+     C                   write     hp404ec
+     C                   exfmt     hp404r1
+      *
+      *
+      * Clear the messages from the message data structures and
+      * program message queue
+      *
+     C                   exsr      $clmsg
+      *
+      * Get user's entry and set next routine
+      *
+     C                   select
+     C                   when      *in03 = *on                                  F3-exit
+     C                   eval      routne = exit
+      *
+     C                   when      *in04 = *on                                  F4-prompt
+     C                   exsr      $f4s1
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in10 = *on                                  F10-veiw
+      *
+      * S13682-Valid Company must be entered to use function F10=View Upload Status.
+13682C                   exsr      $cocd
+13682C                   if        *in41 = *off
+      *
+     C                   call      'HP7404'
+13682C                   parm                    d1cocd
+     C                   parm                    d1acyr
+     C                   parm                    d1acpe
+     C                   parm                    d1bpmdy
+     C                   parm                    d1epmdy
+     C                   eval      routne = scrn1
+      *
+13682C                   endif                                                  *in41 = *off
+      *
+     C                   when      *in20 = *on                                  F20-wrksplf
+     C                   call      'QEZOUTPT'                                       API
+     C                   eval      routne = scrn1
+     C                   other
+      *
+      * Always check security for business office
+      *
+     C                   eval      routne = edit1
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Edit screen 1 input fields
+      *----------------------------------------------------------------
+      *
+     C     $edit1        begsr
+      *
+      * S13682-Validate Company Code.
+      *
+13682C                   exsr      $cocd
+      *
+      * Validate the upload the user wishes to make
+      *
+     C                   exsr      $hucd
+      *
+      * Validate that no interface has already been submitted.
+      *
+     C                   in        dajde
+      *
+     C                   if        dajde <> *blank
+     C                   add       1             error
+     C                   movel     'HS00882'     mgid(e)
+     C                   endif
+      *
+      *
+      * If there are no errors, execute the subroutine to submit.
+      *
+     C                   if        error = 0 and *in08 = *on                    If no error
+     C                   exsr      $proc1
+     C                   endif                                                  If no error
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * S13682 - Validate Company Code
+      *---------------------------------------------------------------
+      *
+      * Validations:
+      *  1) required
+      *  2) must be in Company Control file
+      *
+     C     $cocd         begsr
+      *
+     C                   eval      *in41 = *off
+      *
+     C                   select
+     C                   when      d1cocd = *blank
+     C                   seton                                        41
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09001'     mgid(e)
+     C                   endif
+     C                   other
+      *
+     C     d1cocd        chain     hsp0071
+     C                   if        not %found
+     C                   seton                                        41
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS01241'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     d1cocd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   else
+      *
+     C                   move      cccocd        d1cocd
+      *
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate upload code
+      *---------------------------------------------------------------
+      *
+      * Validations:
+      *  1) required
+      *  2) must be in master file
+      *  3) the upload for the code/year/period must:
+      *      1) not yet exist in the Control file (ie: this is the first time) or
+      *      2) exists with a status of R=Rerun/reupload (ie: the user has deleted
+      *         the JDE batch for this uploaded data and wants to upload again
+      *
+     C     $hucd         begsr
+      *
+     C                   move      *blank        d1huds
+      *
+     C                   select
+     C                   when      d1hucd = *blank
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09001'     mgid(e)
+     C                   endif
+     C                   other
+      *
+     C     d1hucd        chain     hsp035                             92
+     C                   if        *in92 = *on                                  If bad
+     C                   seton                                        31
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00204'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     d1hucd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   else
+      *
+     C                   move      huhuds        d1huds
+      *
+      *
+      * Check that 1) this upload has not already been run OR
+      *            2) the status is Reupload
+      *
+     C     key01         chain     hsp087                             92
+     C                   select
+     C                   when      *in92 = *on
+      *
+     C                   when      hsuplscd = 'R'
+     C                   other
+      *
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00205'     mgid(e)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endsl
+      *
+     C                   endif                                                  If bad
+     C                   endsl
+      *
+      * Issue a Warning-Only Alert on the screen if the user is
+      *  1) uploading Feed Delivery or Feed Pickup Dollars and
+      *  2) there are uncosted Feed Tickets for the Period
+      *
+     C                   setoff                                       87
+     C                   if        *in31 = *off and
+     C                             (d1hucd = 'FD' or d1hucd = 'FP')
+     C                   exsr      $feed
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Are there any uncosted Feed Tickets for this Period
+      *-------------------------------------------------------------------------------
+      *
+      * Do the users have uncosted feed tickets for the current accounting period?
+      * If so, set on the indicator that prints an ALERT on the screen; we let them
+      * continue, but if they do not cost and reupload to JDE later they will
+      * probably have HPE/JDE variances for the Period.
+      *
+     C     $feed         begsr
+      *
+     C                   in        daaper
+     C                   setoff                                       87
+     C                   move      *blank        d1msg1
+      *
+      * Set the key value to be either Delivery or Pickup tickets.
+      *
+     C                   select
+     C                   when      d1hucd = 'FD'
+     C                   move      'D'           wktrcd
+      *
+     C                   when      d1hucd = 'FP'
+     C                   move      'P'           wktrcd
+     C                   endsl
+      *
+     C                   select
+     C                   when      wktrcd = 'D'
+     C     key02         setll     hsl037n
+     C     wktrcd        reade     hsl037n                                92
+      *
+     C                   when      wktrcd = 'P'
+     C     key02         setll     hsl037r
+     C     wktrcd        reade     hsl037r                                92
+     C                   endsl
+      *
+     C                   if        *in92 = *off and fhtkdt <= daepdt            If uncosted
+     C                   seton                                        87
+      *
+     C                   select
+     C                   when      d1hucd = 'FD'
+     C                   eval      d1msg1 = 'There are uncosted Feed Delivery +
+     C                                       Tickets for this Period.'
+      *
+     C                   when      d1hucd = 'FP'
+     C                   eval      d1msg1 = 'There are uncosted Feed Pickup +
+     C                                       Tickets for this Period.'
+     C                   endsl
+     C                   endif                                                  If uncosted
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * F4 prompt on screen 1
+      *----------------------------------------------------------------
+      *
+     C     $f4s1         begsr
+      *
+     C                   select
+     C                   when      fld = 'D1HUCD'
+     C                   call      'HP5014'
+     C                   parm      *blank        xxhucd
+     C                   parm      *blank        xxhuds
+     C                   seton                                        51
+     C                   if        xxhucd <> *blank
+     C                   movel     xxhucd        d1hucd
+     C                   movel     xxhuds        d1huds
+     C                   endif
+     C                   other
+      *
+      * F4 not valid for this field, so issue message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09011'
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Process user's request
+      *---------------------------------------------------------------
+      *
+      * This subroutine is only executed if the user submits the interface.
+      *
+     C     $proc1        begsr
+      *
+      * Bring in the data area that keeps multiple users (or one spacey user) from
+      * making multiple submissions of this interface. Update the area to indicate
+      * that there has been submission and put the data area back out.
+      *
+     C     *lock         in        dajde
+     C                   move      yes           dafl
+     C                   out       dajde
+      *
+      * Bring in the data area that holds the current HPS accounting period..just
+      * to make sure somebody didn't close a period while someone else was posed on
+      * this screen to submit an interface.  I know this would never happen!!!
+      *
+     C                   in        daaper
+     C                   z-add     daccyy        ldacyr
+     C                   z-add     daper         ldacpe
+     C                   z-add     dabpdt        ldbpdt
+     C                   z-add     daepdt        ldepdt
+      *
+      * Set up the 'description' that will be used as a default to populate the JDE field
+      * called 'Expanation Name ALpha' in the JDE Account Ledger File.
+      *
+     C                   move      d1hucd        ldhucd
+     C                   move      d1huds        ldhuds
+      *
+      * S13682-Set Company Code in LDA.
+     C                   move      d1cocd        ldcocd
+      *
+      * Move the 80-character compile time array 'CMD' to an
+      * 80-character field for passing as a parm with QCMDEXC.
+      *
+      *
+     C                   out       lda
+     C                   movea     xxjobq        cmd(51)
+     C                   movea     cmd           cmdsbm
+     C                   call      'QCMDEXC'
+     C                   parm                    cmdsbm
+     C                   parm                    length
+      *
+      * Issue the standard request submission message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09003'
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Seton last record and end job
+      *---------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        LR
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Security Program
+      *---------------------------------------------------------------
+      *
+     C     $sec          begsr
+      *
+      *
+     C                   call      'HPSEC  '
+      **** IN
+     C                   parm                    mgid                           MSGID ARRAY
+     C                   parm                    mgdt                           MSGDTA DATA
+     C                   parm                    error                          # OF errorS
+     C                   parm      sdpgm         infncd                         FUNC CODE
+     C                   parm      *blank        inbobo                         BO CODE
+     C                   parm                    indvfl                         CHECK DIV?
+     C                   parm                    inbofl                         CHECK B.O.?
+      **** OUT
+     C                   parm      *blank        oubobo                         BO CODE
+     C                   parm      *blank        oubods                         BO DESC.
+     C                   parm      *blank        oudvcd                         DIV CODE
+     C                   parm                    secfl                          SEC ERR FLAG
+     C                   parm                    oubofl                         B.O. ERR FLG
+     C                   parm                    ourmfl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *   none
+      *
+      * Key lists
+      *
+     C     key01         klist
+13682C                   kfld                    d1cocd
+     C                   kfld                    d1hucd
+     C                   kfld                    d1acyr
+     C                   kfld                    d1acpe
+      *
+     C     key02         klist
+     C                   kfld                    wktrcd
+     C                   kfld                    dabpdt
+      *
+      * Set up screen values using the data area for the current accounting period.
+      *
+     C                   in        daaper
+     C                   z-add     daccyy        d1acyr
+     C                   z-add     daper         d1acpe
+      *
+      * Flip beginning/ending period dates from CCYYMMDD to MMDDYY.
+      *
+     C     *iso          move      dabpdt        wkmdydate
+     C                   move      wkmdydate     d1bpmdy
+     C     *iso          move      daepdt        wkmdydate
+     C                   move      wkmdydate     d1epmdy
+      *
+      *
+      * Initialize LDA fields
+      *
+     C                   z-add     0             ldacyr
+     C                   z-add     0             ldacpe
+     C                   z-add     0             ldbpdt
+     C                   z-add     0             ldepdt
+13682C                   eval      ldcocd = *blank
+      *
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+      *
+      * Execute the security routine to determine the user's authorizations.
+      *
+     C                   exsr      $sec
+      *
+      * If errors on the initial call, set the terminal flag to yes.
+      *
+     C                   if        secfl = yes
+     C                   movel     yes           termfl
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *****************************************************************
+      * COMPILE TIME ARRAY 'CMD' USED IN QCMDEXC
+      *****************************************************************
+** CMD table 'CMD' submits listing when F8 selected
+SBMJOB CMD(CALL PGM(HP404CL )) JOB(HSPJDEUP) JOBQ(__________)

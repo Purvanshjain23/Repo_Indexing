@@ -1,0 +1,869 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF215 - Margin: Mix Summary
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     12/28/04
+      *
+      * Function:    When the Margin Adjustment Close function is run, this program is called
+      *              to:
+      *                 1) Summarize the Margin Adjustment Detail data into the Mix Summary
+      *                    workfile
+      *                 2) Read the summarized records and make calcs.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 09/13/06  LeAnne Ramsey
+      *           Rewrote. We are now summarizing "mix" and "volume" into
+      *           separate "summary" files.
+      *
+      * 10/11/06  LeAnne Ramsey
+      *           Recompile only. More fields added to TFP014 file.
+      *
+      * 11/14/06  LeAnne Ramsey
+      *           The logic now processes a workfile that has been populated with
+      *           the appropriate "weekly" or "period" data.
+      *
+      * 01/11/06  LeAnne Ramsey
+      *           To prevent abends caused by goofy data,
+      *           we now will allow a Yield Percent up to 999%; prior to this
+      *           we were setting Yield Percent to zero if the calculated value was
+      *           greater than 100%.
+      *
+      * 02/15/07  LeAnne Ramsey
+      *           Added "other cost" logic to populate our new "other cost" fields.
+      *
+      * 03/14/07  LeAnne Ramsey
+      *           The users now want all "MIX" logic based on "produced" values instead
+      *           of "sold" values. Just in case they want to revert back to "sold"
+      *           values in the future, we have left the "sold" logic intact and added
+      *           "produced" fields/logic.
+      *
+      * 04/16/07  LeAnne Ramsey
+      *           Recompile only.
+      *           We renamed the following flag fields:
+      *             1) Exclude from Mix Flag    is now Mix Flag
+      *             2) Exclude from Volume Flag is now Volume Flag
+      *           Before this change Y=Yes meant EXCLUDE the product from processing
+      *           After this change  Y=Yes means INCLUDE the product in processing
+      *
+      * 05/04/07  Alice Brownfield
+      *           Changed logic to NOT select on 'CV', 'VA', or 'NV' to determine
+      *           the logic to run.  They were all running the same logic so we
+      *           removed the entire $adjust subroutine.
+      *
+      * 06/21/07  LeAnne Ramsey
+      *           For the new "CoOwned" functionality, we now extract "Work in Process"
+      *           Items for the Mix report. The WP Items will be printed separately after
+      *           the Finished Good Items on reports. So, we will now need summarized
+      *           data at 3 levels:  Finished Goods
+      *                              Work in Process
+      *                              Combined Total for FG and WP
+      *
+      * 11/07/07  LeAnne Ramsey
+      *           Per Tom Dye, the logic that triggers the calc of the Mix Adjustment
+      *           Amount to be Paid will now be based on Starting Margins.
+      *
+      * 08/28/08  LeAnne Ramsey
+      *           Clean-up.
+      *           Removed the "period" flag (LDPEFL) from the LDA. We no longer have
+      *           "period" processing. (LDPEFL was not being used in this program anyway.)
+      *
+      * 09/05/12  LeAnne Ramsey (E2243)
+      *           Recompile only.
+      *           Per Damon G. we must now write more/special records to TFP014 for the
+      *           Items that receive lbs/dollars from Skirt Meat Items!! So, I had to add
+      *           a new field to TFP014:
+      *                         ADSMSFL-Skirt Meat Split Flag
+      *
+      * 02/08/22  Danny Nguyen   - DO2484 - WI479 STF Variance Reporting
+      *           Recompile only due to TFP014 DBF change. Added the following fields:
+      *             ADXPULB  - STF PRODUCED LBS
+      *             ADXPUSLB - STF PRODUCED START WEIGHT
+      *             ADXYPC   - STF STD YIELD %
+      *             ADXPMPPC - STF PUMP %
+      *             ADXSLLB  - STF SOLD LBS
+      *             ADXSLSLB - STF SOLD START WEIGHT
+      *          ‚The 6 new STF fields will NOT be added to TFP315 file at this time.
+      *
+      * 10/10/22  R Centonze   W105621 - Increase price fields to handle > 999.99
+      *         COPY @@SPU1MG TO  @@SPU1MG10 SIZE 10.6  -> FIELD TFP014.ADSPU1MG
+      *         COPY @@TPU1MG TO  @@TPU1MG10 SIZE 10.6  -> FIELD TFP014.ADTPU1MG
+      *         COPY @@SSL1MG TO  @@SSL1MG10 SIZE 10.6  -> FIELD TFP014.ADSSL1MG
+      *         COPY @@SSL2MG TO  @@SSL2MG10 SIZE 10.6  -> FIELD TFP014.ADSSL2MG
+      *         COPY @@TSL1MG TO  @@TSL1MG10 SIZE 10.6  -> FIELD TFP014.ADTSL1MG
+      *         COPY @@TSL2MG TO  @@TSL2MG10 SIZE 10.6  -> FIELD TFP014.ADTSL2MG
+      *          ‚Not changing tfp315 at this time!
+      * 05/07/24  Santosh Patil P310149 - Field length is increased in below PFs
+      *           & function is recompiled only.
+      *         @@SSLMGAM 11.2 to 13.2  -> TFP014.ADSSLMGAM, TFP315.MSSSLMGAM
+      *         @@ASLMGAM 11.2 to 13.2  -> TFP315.MSASLMGAM
+      *         @@SSL2MGM 9.6 to 11.6   -> TFP315.MSSSL2MG
+      *         @@ASL2MG  9.6 to 11.6   -> TFP315.MSASL2MG
+      *         @@TSLWMGAM 11.2 to 13.2 -> TFP315.MSTSLWMGAM
+      *
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Ftfl014b   if   e           k disk
+      *  Product margin adjustment transaction detail
+      *  (records selected by open query)
+      *
+      *
+     Ftfp315    uf a e           k disk
+      *  Workfile: Mix summary
+     ‚* Project-JM-P310149-START
+     FPPAOREL1  IF   E           K Disk
+     ‚* Project-JM-P310149-END
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     ‚* Project-JM-P310149-START
+     D Triumph         c                   'T'
+     ‚* Project-JM-P310149-END
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+      *
+     D svtfcgcd        s                   like(adtfcgcd)
+     D svtfclcd        s                   like(adtfclcd)
+     D svistycd        s                   like(adistycd)
+     D svisgrcd        s                   like(adisgrcd)
+     D svisclcd        s                   like(adisclcd)
+     D svmixgrp        s                   like(admixgrp)
+      *
+      *
+      * Work fields
+      *
+     D wkpc            s             15  4
+     D wkitycd         s                   like(aditycd)
+     D wkam            s                   like(msslmixam)
+      *
+      *
+      * Parm fields
+      *
+     D xxwkpe          s              1
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      *  Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwbdt                 8     15  0
+     D  ldwedt                29     36  0
+      *
+     D  ldpe                  51     52  0
+     D  ldpbdt                53     60  0
+     D  ldpedt                67     74  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * Summarize the detail records into 3 Mix Summary records
+      *    1) Finished Goods
+      *    2) Work in Process
+      *    3) Sum of FG and WP
+      *
+     C                   move      'FG '         wkitycd
+     C                   move      yes           first
+     C                   exsr      $summarize
+      *
+     C                   move      'WP '         wkitycd
+     C                   move      yes           first
+     C                   exsr      $summarize
+      *
+     C                   move      *blank        wkitycd
+     C                   move      yes           first
+     C                   exsr      $summarize
+      *
+      * Reprocess the summarized records making all calcs for:
+      *    1) Finished Goods
+      *    2) Work in Process
+      *    3) Sum of FG and WP
+      *
+     C                   move      'FG '         wkitycd
+     C                   exsr      $reprocess
+      *
+     C                   move      'WP '         wkitycd
+     C                   exsr      $reprocess
+      *
+     C                   move      '   '         wkitycd
+     C                   exsr      $reprocess
+      *
+     C                   seton                                        lr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Summarize the Detail records into Mix Summary records
+      *-----------------------------------------------------------------------------------------
+      *
+      * An open query selects Margin Adjustment Transaction Detail records where the:
+      *     1) record is in the "week" or "period" being processed
+      *     2) 'Include MIX flag' is YES
+      *     3) TF Class Group Code is not 'OT' and not 'BP'
+      *
+      * You will ultimately write 3 "mix" summary (FG, WP, Both) records for EACH unique
+      * combination of:
+      *   1) TF Classification Code
+      *   2) Item Structure Type Code
+      *   3) Mix Group
+      *
+     C     $summarize    begsr
+      *
+     C     *loval        setll     tfl014b
+      *
+     C                   dou       *in90 = *on                                  Do summary
+     C                   read      tfl014b                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             (wkitycd = *blank or
+     C                              wkitycd = aditycd)
+     ‚* Project-JM-P310149-START
+     ‚* Exclude vol flag = 'N' items from calculations
+     C     Key04         Chain     PPAOREL1
+     C                   If        %Found(PPAOREL1) And
+     C                             AOSXSX = No And AOD3TX = Triumph
+     C                   Iter
+     C                   EndIf
+     ‚* Project-JM-P310149-END
+      * Control break
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   exsr      $save
+      *
+      * Write a Summary record when there is a change in:
+      *   1) TF classification code or
+      *   2) Item structure type code or
+      *   3) Mix group
+     C                   when      adtfclcd <> svtfclcd or
+     C                             adistycd <> svistycd or
+     C                             admixgrp <> svmixgrp
+     C                   exsr      $wrt315
+     C                   exsr      $save
+     C                   endsl
+      *
+      * Detail processing
+     C                   exsr      $detail
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do summary
+      *
+      * EOF processing
+      *
+     C                   if        first = no
+     C                   exsr      $wrt315
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Detail processing
+      *---------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+      * Net product revenue amount
+      *
+     C                   add       adsnpram      mssnpram
+     C                   add       adtnpram      mstnpram
+      *
+      * Sold pounds
+     C                   add       adssllb       msssllb
+     C                   add       adtsllb       mstsllb
+      * Produced pounds
+     C                   add       adspulb       msspulb
+     C                   add       adtpulb       mstpulb
+      *
+      * Produced value amount
+      *
+     C                   add       adspuam       msspuam
+     C                   add       adtpuam       mstpuam
+      *
+      * SBF CoOwned Transfer Product Cost Amount
+      *
+     C                   add       adstrpam      msstrpam
+      *
+      * Sold start weight
+     C                   add       adsslslb      mssslslb
+     C                   add       adtslslb      mstslslb
+      *
+      * Produced start weight
+     C                   add       adspuslb      msspuslb
+     C                   add       adtpuslb      mstpuslb
+      *
+      * Sold meat cost amounts
+      *
+     C                   add       adsslmam      mssslmam
+     C                   add       adtslmam      mstslmam
+      *
+      * Produced meat cost amounts
+      *
+     C                   add       adspumam      msspumam
+     C                   add       adtpumam      mstpumam
+      *
+      * Sold labor cost amounts
+      *
+     C                   add       adssllam      msssllam
+     C                   add       adtsllam      mstsllam
+      *
+      * Produced labor cost amounts
+      *
+     C                   add       adspulam      msspulam
+     C                   add       adtpulam      mstpulam
+      *
+      * Sold packaging cost amounts
+      *
+     C                   add       adsslkam      mssslkam
+     C                   add       adtslkam      mstslkam
+      *
+      * Produced packaging cost amounts
+      *
+     C                   add       adspukam      msspukam
+     C                   add       adtpukam      mstpukam
+      *
+      * Sold ingredient cost amounts
+      *
+     C                   add       adssliam      msssliam
+     C                   add       adtsliam      mstsliam
+      *
+      * Produced ingredient cost amounts
+      *
+     C                   add       adspuiam      msspuiam
+     C                   add       adtpuiam      mstpuiam
+      *
+      * Sold other cost amounts
+      *
+     C                   add       adssloam      msssloam
+     C                   add       adtsloam      mstsloam
+      *
+      * Produced other cost amounts
+      *
+     C                   add       adspuoam      msspuoam
+     C                   add       adtpuoam      mstpuoam
+      *
+      * Sold product cost amounts
+      *
+     C                   add       adsslpam      mssslpam
+     C                   add       adtslpam      mstslpam
+      *
+      * Produced product cost amounts
+      *
+     C                   add       adspupam      msspupam
+     C                   add       adtpupam      mstpupam
+      *
+      * Sold margin amounts
+     C                   add       adsslmgam     mssslmgam
+     C                   add       adtslmgam     mstslmgam
+      *
+      * Produced margin amounts
+     C                   add       adspumgam     msspumgam
+     C                   add       adtpumgam     mstpumgam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a Summary record
+      *---------------------------------------------------------------
+      *
+     C     $wrt315       begsr
+      *
+     C                   move      wkitycd       msitycd
+     C                   move      svtfcgcd      mstfcgcd
+     C                   move      svtfclcd      mstfclcd
+     C                   z-add     svistycd      msistycd
+     C                   z-add     svisgrcd      msisgrcd
+     C                   z-add     svisclcd      msisclcd
+     C                   move      svmixgrp      msmixgrp
+     C                   z-add     ldyr          msyr
+      *
+      * Populate dates with "weekly" or "period" dates.
+      *
+     C                   select
+     C                   when      xxwkpe = 'W'
+     C                   z-add     ldwk          mswkpe
+     C                   z-add     ldwbdt        msbdt
+     C                   z-add     ldwedt        msedt
+      *
+     C                   when      xxwkpe = 'P'
+     C                   z-add     ldpe          mswkpe
+     C                   z-add     ldpbdt        msbdt
+     C                   z-add     ldpedt        msedt
+     C                   endsl
+      *
+      * Aggregate sold fields
+      *
+     C     msssllb       add       mstsllb       msasllb
+     C     mssslslb      add       mstslslb      msaslslb
+     C     mssslmgam     add       mstslmgam     msaslmgam
+      *
+      * Aggregate produced fields
+      *
+     C     msspulb       add       mstpulb       msapulb
+     C     msspuslb      add       mstpuslb      msapuslb
+     C     msspumgam     add       mstpumgam     msapumgam
+      *
+     C                   write     msrec
+     C                   clear                   msrec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Save control fields
+      *---------------------------------------------------------------
+      *
+     C     $save         begsr
+      *
+      * Save fields
+     C                   move      adtfclcd      svtfclcd
+     C                   move      adtfcgcd      svtfcgcd
+     C                   move      adistycd      svistycd
+     C                   z-add     adisgrcd      svisgrcd
+     C                   z-add     adisclcd      svisclcd
+     C                   move      admixgrp      svmixgrp
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Read the summarized records and make calculations
+      *---------------------------------------------------------------
+      *
+      * Reread/process each Mix Summary record in the Workfile.
+      *
+     C     $reprocess    begsr
+      *
+     C     *loval        setll     tfp315
+      *
+     C                   dou       *in90 = *on                                  Do reprocess
+     C                   read      tfp315                                 90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             (wkitycd = *blank or
+     C                              wkitycd = msitycd)
+      *
+     C                   exsr      $soldcalc
+     C                   exsr      $prodcalc
+      *
+     C                   exsr      $soldadj
+     C                   exsr      $prodadj
+      *
+     C                   update    msrec
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do reprocess
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Sold Calculations
+      *--------------------------------------------------------------------------------------
+      *
+     C     $soldcalc     begsr
+      *
+      * Sold Yield Percents:
+      *       (sold pounds / sold start weight) * 100
+      *
+     C                   if        (mssslslb + mstslslb) <> 0
+     C                   eval(h)   wkpc = ((msssllb + mstsllb) /
+     C                                        (mssslslb + mstslslb)) * 100
+     C                   if        wkpc <= 999
+     C                   z-add     wkpc          msaslypc
+     C                   endif
+     C                   endif
+      *
+     C                   if        mssslslb <> 0
+     C                   eval(h)   wkpc  = (msssllb / mssslslb) * 100
+     C                   if        wkpc <= 999
+     C                   z-add     wkpc          mssslypc
+     C                   endif
+     C                   endif
+      *
+     C                   if        mstslslb <> 0
+     C                   eval(h)   wkpc = (mstsllb / mstslslb) * 100
+     C                   if        wkpc <= 999
+     C                   z-add     wkpc          mstslypc
+     C                   endif
+     C                   endif
+      *
+      *
+      * Make "Per Pound" calculations based on SOLD pounds:
+      *
+      *       Aggregate:
+     C                   if        (msssllb + mstsllb) <> 0
+      *
+     C                   eval(h)   msaslmco = (mssslmam  + mstslmam) /           Meat
+     C                                        (msssllb + mstsllb)
+      *
+     C                   eval(h)   msasllco = (msssllam  + mstsllam) /           Labor
+     C                                        (msssllb + mstsllb)
+      *
+     C                   eval(h)   msaslkco = (mssslkam  + mstslkam) /           Packaging
+     C                                        (msssllb + mstsllb)
+      *
+     C                   eval(h)   msaslico = (msssliam  + mstsliam) /           Ingredient
+     C                                        (msssllb + mstsllb)
+      *
+     C                   eval(h)   msasloco = (msssloam  + mstsloam) /           Other
+     C                                        (msssllb + mstsllb)
+      *
+     C                   eval(h)   msaslpco = msaslmco + msasllco +              Product
+     C                                        msaslkco + msaslico +
+     C                                        msasloco
+      *
+     C                   eval(h)   msaslpr  = (mssnpram + mstnpram)/            Price
+     C                                        (msssllb + mstsllb)
+     C                   endif
+      *
+      *       Seaboard:
+     C                   if        msssllb <> 0
+     C                   eval(h)   mssslmco = mssslmam / msssllb                Meat
+     C                   eval(h)   msssllco = msssllam / msssllb                Labor
+     C                   eval(h)   mssslkco = mssslkam / msssllb                Packaging
+     C                   eval(h)   mssslico = msssliam / msssllb                Ingredient
+     C                   eval(h)   msssloco = msssloam / msssllb                Other
+      *
+     C                   eval      mssslpco = mssslmco + msssllco +             Product
+     C                                        mssslkco + mssslico +
+     C                                        msssloco
+      *
+     C                   eval(h)   mssslpr  = mssnpram / msssllb                Price
+     C                   eval(h)   msssl1mg = mssslpr - mssslpco                Margin
+     C                   endif
+      *       Triumph:
+     C                   if        mstsllb <> 0
+     C                   eval(h)   mstslmco = mstslmam / mstsllb                Meat
+     C                   eval(h)   mstsllco = mstsllam / mstsllb                Labor
+     C                   eval(h)   mstslkco = mstslkam / mstsllb                Packaging
+     C                   eval(h)   mstslico = mstsliam / mstsllb                Ingredient
+     C                   eval(h)   mstsloco = mstsloam / mstsllb                Other
+      *
+     C                   eval      mstslpco = mstslmco + mstsllco +             Product
+     C                                        mstslkco + mstslico +
+     C                                        mstsloco
+      *
+     C                   eval(h)   mstslpr  = mstnpram / mstsllb                Price
+     C                   eval(h)   mstsl1mg = mstslpr - mstslpco                Margin
+     C                   endif
+      *
+      *
+      * Sold margin per Sold Start Weight:
+      *    sold margin amount / sold start weight
+      *
+     C                   if        mssslslb <> 0
+     C                   eval(h)   msssl2mg = mssslmgam / mssslslb
+     C                   endif
+      *
+     C                   if        mstslslb <> 0
+     C                   eval(h)   mstsl2mg = mstslmgam / mstslslb
+     C                   endif
+      *
+      * Aggregate Sold Margin per Sold Pounds:
+      *    Aggregate Sold Price per Pound - Aggregate Sold Product Cost per Pound
+      *
+     C                   eval(h)   msasl1mg = msaslpr - msaslpco                Margin
+      *
+      * Aggregate sold margin per sold start weight:
+      *    Aggregate sold margin amount / Aggregate sold start weight
+      *
+     C                   if        msaslslb <> 0
+     C                   eval(h)   msasl2mg = msaslmgam / msaslslb
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Produced Calculations
+      *--------------------------------------------------------------------------------------
+      *
+     C     $prodcalc     begsr
+      *
+      * Produced Yield Percents:
+      *       (produced pounds / produced start weight) * 100
+      *
+     C                   if        (msspuslb + mstpuslb) <> 0
+     C                   eval(h)   wkpc = ((msspulb + mstpulb) /
+     C                                        (msspuslb + mstpuslb)) * 100
+     C                   if        wkpc <= 999
+     C                   z-add     wkpc          msapuypc
+     C                   endif
+     C                   endif
+      *
+     C                   if        msspuslb <> 0
+     C                   eval(h)   wkpc  = (msspulb / msspuslb) * 100
+     C                   if        wkpc <= 999
+     C                   z-add     wkpc          msspuypc
+     C                   endif
+     C                   endif
+      *
+     C                   if        mstpuslb <> 0
+     C                   eval(h)   wkpc = (mstpulb / mstpuslb) * 100
+     C                   if        wkpc <= 999
+     C                   z-add     wkpc          mstpuypc
+     C                   endif
+     C                   endif
+      *
+      *
+      * Make "Per Pound" calculations based on PRODUCED pounds:
+      *
+      *       Aggregate:
+     C                   if        (msspulb + mstpulb) <> 0
+      *
+     C                   eval(h)   msapumco = (msspumam  + mstpumam) /           Meat
+     C                                        (msspulb + mstpulb)
+      *
+     C                   eval(h)   msapulco = (msspulam  + mstpulam) /           Labor
+     C                                        (msspulb + mstpulb)
+      *
+     C                   eval(h)   msapukco = (msspukam  + mstpukam) /           Packaging
+     C                                        (msspulb + mstpulb)
+      *
+     C                   eval(h)   msapuico = (msspuiam  + mstpuiam) /           Ingredient
+     C                                        (msspulb + mstpulb)
+      *
+     C                   eval(h)   msapuoco = (msspuoam  + mstpuoam) /           Other
+     C                                        (msspulb + mstpulb)
+      *
+     C                   eval(h)   msapupco = msapumco + msapulco +              Product
+     C                                        msapukco + msapuico +
+     C                                        msapuoco
+      *
+     C                   eval(h)   msapupr  = (msspuam + mstpuam) /             Price
+     C                                        (msspulb + mstpulb)
+     C                   endif
+      *
+      *       Seaboard:
+     C                   if        msspulb <> 0
+     C                   eval(h)   msspumco = msspumam / msspulb                Meat
+     C                   eval(h)   msspulco = msspulam / msspulb                Labor
+     C                   eval(h)   msspukco = msspukam / msspulb                Packaging
+     C                   eval(h)   msspuico = msspuiam / msspulb                Ingredient
+     C                   eval(h)   msspuoco = msspuoam / msspulb                Other
+      *
+     C                   eval      msspupco = msspumco + msspulco +             Product
+     C                                        msspukco + msspuico +
+     C                                        msspuoco
+      *
+     C                   eval(h)   msspupr  = msspuam / msspulb                 Price
+     C                   eval(h)   msspu1mg = msspupr - msspupco                Margin
+     C                   endif
+      *       Triumph:
+     C                   if        mstpulb <> 0
+     C                   eval(h)   mstpumco = mstpumam / mstpulb                Meat
+     C                   eval(h)   mstpulco = mstpulam / mstpulb                Labor
+     C                   eval(h)   mstpukco = mstpukam / mstpulb                Packaging
+     C                   eval(h)   mstpuico = mstpuiam / mstpulb                Ingredient
+     C                   eval(h)   mstpuoco = mstpuoam / mstpulb                Other
+      *
+     C                   eval      mstpupco = mstpumco + mstpulco +             Product
+     C                                        mstpukco + mstpuico +
+     C                                        mstpuoco
+      *
+     C                   eval(h)   mstpupr  = mstpuam / mstpulb                 Price
+     C                   eval(h)   mstpu1mg = mstpupr - mstpupco                Margin
+     C                   endif
+      *
+      *
+      * Produced margin per Produced Start Weight:
+      *    produced margin amount / produced start weight
+      *
+     C                   if        msspuslb <> 0
+     C                   eval(h)   msspu2mg = msspumgam / msspuslb
+     C                   endif
+      *
+     C                   if        mstpuslb <> 0
+     C                   eval(h)   mstpu2mg = mstpumgam / mstpuslb
+     C                   endif
+      *
+      * Aggregate Produced Margin per Produced Pounds:
+      *    Aggregate Produced Margin Per LB - Aggregate Produced Cost Per LB
+      *
+     C                   eval(h)   msapu1mg = msapupr - msapupco
+      *
+      * Aggregate produced margin per produced start weight:
+      *    Aggregate produced margin amount / Aggregate produced start weight
+      *
+     C                   if        msapuslb <> 0
+     C                   eval(h)   msapu2mg = msapumgam / msapuslb
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Mix Adjustment calcs based on "SOLD" values
+      *--------------------------------------------------------------------------------------
+      *
+     C     $soldadj      begsr
+      *
+      *------------------------------------------------------------------------------
+      * Calculate the Sold Start Weight Margin amounts to handle rounding issues.
+      *     TF will be the difference between the Aggregate and SBF
+      *------------------------------------------------------------------------------
+      *
+      * SBF Sold Start Weight Margin Amount:
+      *     aggregate sold margin per sold start weight * SBF sold start weight
+      *
+     C                   eval(h)   mssslwmgam = msasl2mg * mssslslb
+      *
+      * TF Sold Start Weight Margin Amount:
+      *     Aggregate Sold margin amount - SBF Sold Start Weight Margin Amount
+      *
+     C                   eval(h)   mstslwmgam = msaslmgam - mssslwmgam
+      *
+      *--------------------------------------------------
+      * Mix adjustment amount
+      *--------------------------------------------------
+      *
+      * Seaboard will ultimately pay Triumph a Mix Adjustment Amount when:
+      *   TF Sold Margin per Sold Start Weight < Aggregate Sold Margin per Sold Start Weight
+      *   Calc:  TF sold start weight margin amount - TF Sold Margin Amount
+      *   Note: We will multiply by negative '1'. (The users want this value
+      *         to print with a 'negative' sign.)
+      *
+      * Triumph will ultimately pay Seaboard a Mix Adjustment Amount when:
+      *   SBF Sold Margin per Sold Start Weight < Aggregate Sold Margin per Sold Start Weight
+      *   Calc: SBF sold start weight margin amount - SBF Sold Margin Amount
+      *   Note: We do not mess with the sign on this one. A "positive" value
+      *         means Triumph is paying Seaboard.
+      *
+     C     mstslwmgam    sub       mstslmgam     wkam
+     C                   if        mstsl2mg < msasl2mg and                      If SBF pays
+     C                             wkam <> 0
+     C     -1            mult(h)   wkam          msslmixam
+     C                   else
+      *
+     C     mssslwmgam    sub       mssslmgam     wkam
+     C                   if        msssl2mg < msasl2mg and                      If TF pays
+     C                             wkam <> 0
+     C                   z-add     wkam          msslmixam
+     C                   endif                                                  If TF pays
+     C                   endif                                                  If SBF pays
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Mix Adjustment calcs based on "PRODUCED" values
+      *--------------------------------------------------------------------------------------
+      *
+     C     $prodadj      begsr
+      *
+      *------------------------------------------------------------------------------
+      * Calculate the Produced Start Weight Margin amounts to handle rounding issues.
+      *     TF will be the difference between the Aggregate and SBF
+      *------------------------------------------------------------------------------
+      *
+      * SBF Produced Start Weight Margin Amount:
+      *     aggregate produced margin per produced start weight *
+      *                   SBF produced start weight
+      *
+     C                   eval(h)   msspuwmgam = msapu2mg * msspuslb
+      *
+      * TF Produced Start Weight Margin Amount:
+      *     Aggregate Produced margin amount - SBF Produced Start Weight Margin Amount
+      *
+     C                   eval(h)   mstpuwmgam = msapumgam - msspuwmgam
+      *
+      *------------------------
+      * Mix adjustment amount
+      *------------------------
+      *
+      * Seaboard will ulitmately pay Triumph a Mix Adjustment Amount when:
+      *   TF Produced Margin per Produced Start Weight < Aggregate Produced Margin per
+      *                                                        Produced Start Weight
+      *   Calc:  TF produced start weight margin amount - TF Produced Margin Amount
+      *   Note: We will multiply by negative '1'. (The users want this value
+      *         to print with a 'negative' sign.)
+      *
+      * Triumph will ultimately pay Seaboard a Mix Adjustment Amount when:
+      *   SBF Produced Margin per Produced Start Weight < Aggregate Produced Margin per
+      *                                                        Produced Start Weight
+      *   Calc: SBF produced start weight margin amount - SBF Produced Margin Amount
+      *   Note: We do not mess with the sign on this one. A "positive" value
+      *         means Triumph is paying Seaboard.
+      *
+     C     mstpuwmgam    sub       mstpumgam     wkam
+     C                   if        mstpu2mg < msapu2mg and                      If SBF pays
+     C                             wkam <> 0
+     C     -1            mult(h)   wkam          mspumixam
+     C                   else
+      *
+     C     msspuwmgam    sub       msspumgam     wkam
+     C                   if        msspu2mg < msapu2mg                          If TF pays
+     C                   z-add     wkam          mspumixam
+     C                   endif                                                  If TF pays
+     C                   endif                                                  If SBF pays
+      *
+      *
+      *------------------------
+      * Total Payment Amount
+      *------------------------
+      * In July 2007 we added CoOwned functionality to everything. So,
+      * we will now show a "Total Payment" on reports, etc. that is the
+      * sum of: Mix Adjustment Amount and
+      *         SBF CoOwned Transfer Product Cost Amount
+      * (Note: We don't have this on "sold" since we stopped doing "sold" prior to
+      * July 2007.)
+      *
+     C     mspumixam     add       msstrpam      msputotam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm list
+      *
+     C     *entry        plist
+     C                   parm                    xxwkpe
+     ‚* Project-JM-P310149-START
+     C     Key04         KList
+     C                   KFld                    ADTFCLCD                       TF CLASSIFICATION
+     C                   KFld                    ADISTYCD                       ITEM STRUC TYPE CODE
+     C                   KFld                    ADISGRCD                       ITEM STRUC GROUP COD
+     C                   KFld                    ADISCLCD                       ITEM STRUC CLASS COD
+     ‚* Project-JM-P310149-END
+      *
+     C                   endsr
+      /eject

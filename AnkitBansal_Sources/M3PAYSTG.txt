@@ -1,0 +1,518 @@
+     H*****************************************************************
+     H*
+     H*  Program number:  M3PAYSTG
+     H*  Program name:    Read Workfile for OM OPEN Invoices & Write the AR Detail payments
+     H*                    to M3 Stage Tables
+     H*  Programmer:      Rose Centonze
+     H*  Date created:    10/14/2015
+     H*  Program purpose: This program will read the workfile created
+     H*                   in M3OPNINV by co/invoice and write any payments for those
+     H*                   invoices from the ar detail file as the I1 records
+     H*
+     H*    will be automatic:   The user will need to go into M3 and post
+     H*                         this batch of journal entries.
+     H*                    batch header -->  write M3 PLB9CPP gl interface head
+     H*                    batch detail -->  write M3 PLCGCPP              line
+     H*****************************************************************
+     A*  RMC 1/20/17  Project  E8287
+     A*               Recompile for omp300 change
+     H***
+     H*****************************************************************
+     F*
+     FOML300D   IF   E           K DISK
+     F* OM Workfile            (Key: Co#, invoice, order , seq , sec seq)
+     F*
+     Farbdcplk  if a e           k disk
+      *   A/R Header                K= co inv#  cust  format  @BDCPLS
+     Farbecpl0  if a e           k disk
+      *   A/R detail                K= co inv# suffix
+     Fpdnhcpl0  if a e           k disk
+      *   A/R OA/CM trans           K= co inv# suffix
+     F**plb8rel3  if a e           k disk
+      *   G/L JDE to M3 Cross Ref   K= b8aht1, b8qncd, b8qocd
+      *
+     Fplb9cpp   uf a e             disk
+      *   M3 GL Header Staging file
+      *
+     Fplcgcpp   uf a e             disk
+      *   M3 GL Detail Staging file
+      *
+     F*
+      * Workfields
+      *
+     d*wkacono         s                   like(glco)
+     d wkuser          s                   like(b9aavn)
+     d wkdescor        s             40    inz('OMS AR Invoice Payment')
+     d wkdescdb        s             40    inz('OMS Debit Note')
+     d wkdesccm        s             40    inz('OMS Credit Note')
+     d wktempor        s             15    inz('AR_PAYMENT')
+     d wkamt           s             15s 2
+     d dsamt           s             17
+     d dscdamt         s             17
+     d dsgroup         s              8
+     d dscust          s             10
+     d dspaye          s             10
+     d dsinv#          s             15
+     D*
+     D***  RETRIEVE USER I.D. AND WORKSTATION I.D.
+     D*
+     D                SDS
+     D  PGMSGQ           *PROC
+     D  WRKSTN               244    253
+     D  USRNAM               254    263
+      *
+      * Work fields for date manipulation
+      *
+     D wkyymmdd        s              6  0
+     d wksyssyndt      s              7  0
+     d wkhhmmss        s                   like(cgabtm)
+      *
+     d wktime          s             12  0
+     D wkcymdiso       s               d   datfmt(*iso)
+      *
+      * Parm fields
+      *
+     D*
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+      * Workfields
+      *WRITE
+     D*
+     D***  ACTUAL SHIP DATE FROM WORKFILE  YYMMDD
+     D*
+     D                 DS
+     D  GLYMD                  1      7  0
+     D  YYGL                   2      3  0
+     D  MMGL                   4      5  0
+     D  DDGL                   6      7  0
+     D*
+     D***  G/L DATE MMDDYY
+     D*
+     D                 DS
+     D  GLMDY                  1      6  0
+     D  GLMM                   1      2  0
+     D  GLDD                   3      4  0
+     D  GLYY                   5      6  0
+     D*
+     D***  EXPLANATION
+     D*
+     D                 DS
+     D  WKEXA                  1     30
+     D  WK1                    1      7    INZ('INVOICE')
+     D  WK2                    9     15    INZ('POSTING')
+     D*
+     D***  m3 key value
+     D*
+     D                 DS
+     D  m3keyvalue             1     15
+     D  m3keydt                1      8
+     D  m3series               9     12
+      *
+      *---------------------------------------------------------------
+      *
+     C*
+     C*
+     C/EJECT
+     C*----------------------------------------------------------------
+     C* MAIN PROCESSING LOOP
+     C*----------------------------------------------------------------
+     C*   Read Workfile..........
+     C*
+     C     *IN50         DOUEQ     *ON
+     C                   READ      OMp300r                                50
+     C     *IN50         IFEQ      *OFF                                         HAVE RECORD
+     c**   omasdt        andge     1150101                                      skip old invs
+     c     omotyp        ifeq      'OR'                                         sel OR
+     c     omotyp        oreq      'CM'                                         sel CM
+     c     omotyp        oreq      'DM'                                         sel DM
+     c     omotyp        oreq      'DB'                                         sel DB
+     C*
+     C* Company number break
+     C*         get first M3 batch number
+     C*         save break fields
+     C*
+     C     *IN91         IFEQ      *OFF
+     C**   omco#         ifne      svco
+     c                   exsr      $getbatchno
+     c                   exsr      $newbreak
+     C                   move      wkccyymmdd    m3keydt           8
+     C                   exsr      $writebatch
+     C                   MOVE      *ON           *IN91
+     c                   endif
+     C*_________________________________________________________
+     C* ------- payment detail record processing at invoice # Break
+     C*_________________________________________________________
+     C*
+     c     ominv#        ifne      svinv#
+     C                   EXSR      $WRITE
+     c                   movel     ominv#        svinv#            7 0
+     C                   ENDIF
+     C*
+     C                   ENDIF                                                  sel omotype
+     C                   ENDIF                                                  50 = OFF
+     C*
+     C                   ENDDO                                                  50 DOUEQ ON
+     C*----------------------------------------------------------------
+     C* EOF PROCESSING:
+     C*----------------------------------------------------------------
+     C*
+     C*
+     C* THIS WILL CLOSE ANY FILES THAT ARE LEFT OPEN FROM ANY CALLED
+     C* PROGRAMS WITHIN THIS PROGRAM.
+     C*
+     C                   CALL      'UTRCRSC'
+     C*
+     c                   move      m3keyvalue    pmkeyvalue
+     C                   MOVE      *ON           *INLR
+     C/EJECT
+     C***************************************************************
+     C* SUBROUTINE SECTION
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE SUBROUTINE
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $WRITE        BEGSR
+     C*
+     C*******************************************************************************
+     C**** Set up M3 GL Interface Line record -- PLCGCPP
+     C*******************************************************************************
+     C* Format sample for PARM field:
+     C* I12015072411       62012030    621     970
+     C* 00000000000000000USD                 00000013736271520150723  OMS AR Invoice Payment
+     C* I12015072411       62012030    621     970
+     C* 00000000000000000USD                 00000000506271520150723  OMS AR Invoice Payment
+     C                   move      *blanks       dsdim           300
+     c                   movel     m3cono        cgwja1
+     c                   movel     m3divi        cgqxcd
+     c                   movel     m3keyvalue    cgait1                         key: yyyymmddnnnn
+     C*
+     C**** A/R Header :   get custs, inv date and due date
+     C*
+     C     key07         chain     @bdcpls                            59
+      *
+      * Format fields that are from Invoice Header
+      *
+      *
+     c                   move      omcust        WORK7             7
+     c                   eval      dspaye =  %triml(WORK7)                      move cust to paye
+     c                   move      BDBKC7        WORK7             7
+     c                   eval      dscust =  %triml(WORK7)                      move shp to cust
+      *
+     c*                  move      ominv#        WORK7
+     c*                  eval      dsinv# =  %triml(WORK7)                      move inv
+     C                   eval      dsinv#= %triml(%editc(ominv#:'Z'))           left zero suppress
+      *
+      *
+     C                   movel(p)  wkdescor      dsdescr          40            description
+      *
+     C                   movel(p)  wkuser        cgaavn                         User
+     C*                  move      wkasdt        cgaedx                         M3 Entry Date
+     C                   move      wksyssyndt    cgabdt                         date added
+     C                   move      wkhhmmss      cgabtm                         time added
+     C                   MOVEL     svUSRNAM      cgabvn                         USER ID
+     C                   movel     sdpgm         cgagvn                         program updated
+     c                   movel     'I1'          dsiden            2
+     c                   movel     'Y'           firstdtl          1
+     C*******************************************************************************
+     C* Read AR Detail for payments for the Invoice. Write them as the I1 records
+     C*******************************************************************************
+     C*
+     c                   setoff                                       60
+     C     key08         setll     arbecpl0
+     c     *in60         doweq     '0'
+     C     key08         reade     arbecpl0                               60
+     c     *in60         ifeq      '0'
+     c     bfuhcd        ifeq      'PAY'
+     c**   BFuhcd        oreq      'SPR'                                  Not spread 5.20.16
+     c     bfuhcd        oreq      'WO '
+     c     bfuhcd        oreq      'WO1'
+     c     bfuhcd        oreq      'ITC'
+     c     bfuhcd        oreq      'CB '
+     C*
+     C* increment group for Header if there is a Payment detail for it.
+     C*
+     c     firstdtl      ifeq      'Y'
+     C*                  add       1             omgrpn            8 0          increment group nbr
+     C**                 eval      dsgroup= %triml(%editc(omgrpn:'Z'))          group nmb
+     C*                  eval      dsgroup= %editc(omgrpn:'Z')                  group nmb-right just
+     c                   movel     'N'           firstdtl
+     c                   end
+     c*  Unique for each payment line
+     C                   add       1             omgrpn            8 0          increment group nbr
+     C*                  eval      dsgroup= %triml(%editc(omgrpn:'Z'))          group nmb
+     C                   eval      dsgroup= %editc(omgrpn:'Z')                  group nmb-right just
+     C*
+     C*  CONVERT payment DATE FROM YYMMDD TO MMDDYY
+     C*
+     C                   ADD       1             CgWKA1                         LINE NUMBER
+     C*
+     C**                 Z-ADD     bfdvdt        GLYMD           use trans date
+     C                   Z-ADD     bfb4dt        GLYMD
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    bfdvdt
+     C                   PARM                    WKdvdt            8            yyyymmdd
+     C*
+     C*  CONVERT acctng DATE FROM YYMMDD TO MMDDYY
+     C*
+     c     bfhydt        ifgt      0
+     C                   Z-ADD     bfhydt        GLYMD                           gl post dt?
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    bfhydt
+     C                   PARM                    WKhydt            8            yyyymmdd
+     c                   else
+     C                   movel     wkdvdt        WKhydt                         yyyymmdd
+     c                   endif
+      *
+     C                   movel     bfcptx        dscheck          15            check number
+     C                   move      bfbsva        GLAA             17 2          paym amt
+      *
+      *  M3  Set values in parameter field
+      *
+     C*                  eval      dsamt = %triml(%editc(glaa:'Q'))
+     C*                  eval      dsamt = %editc(glaa:'Q')                      right just
+     c                   move      *blanks       wrk19            19
+     C                   eval      wrk19 = %editc(glaa:'Q')                      right just
+     c                   move      wrk19         dsamt
+     C                   eval      dsdim = dsiden               +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     dsgroup     +                         group nbr
+     C                                     m3divi      +                         division
+     c                                     dspaye     +                          payer
+     c                                     dscust     +                          customer
+     c                                     dsinv#     +                          invoice
+     C                                     dsamt        +                        paym amt (17)
+     C                                     dscdamt      +                        cash disc(17)
+     C                                             'USD'        +               currency
+     C                                             '01'        +                exch rt type
+     C                                             '         1.00' +            exch rate (13)
+     C                                             wkhydt       +               actng date (8)
+     c                                     wkdvdt     +                          paym  date
+     C                                     dscheck                               check number (15)
+     C                   movel     dsdim         cgbht1                         parameter
+      *
+      *
+     C                   write     @CGCPVH                                      M3 plcgcpp dtl
+     c*
+     c                   end                                                    adj type compare
+     c                   end
+     c                   enddo
+     c*
+     C*******************************************************************************
+     C* Read AR OA/CM Trans Payments for the Invoice. Write them as the I1 records
+     C*******************************************************************************
+     C*
+     c                   setoff                                       60
+     C     key08         setll     pdnhcpl0
+     c     *in60         doweq     '0'
+     C     key08         reade     pdnhcpl0                               60
+     c     *in60         ifeq      '0'
+     C*
+     C* increment group for Header if there is a Payment detail for it.
+     C*
+     c     firstdtl      ifeq      'Y'
+     C*                  add       1             omgrpn            8 0          increment group nbr
+     C**                 eval      dsgroup= %triml(%editc(omgrpn:'Z'))          group nmb
+     C*                  eval      dsgroup= %editc(omgrpn:'Z')                  group nmb-right just
+     c                   movel     'N'           firstdtl
+     c                   end
+     c*  Unique for each payment line
+     C                   add       1             omgrpn            8 0          increment group nbr
+     C*                  eval      dsgroup= %triml(%editc(omgrpn:'Z'))          group nmb
+     C                   eval      dsgroup= %editc(omgrpn:'Z')                  group nmb-right just
+     C*
+     C*  CONVERT payment DATE FROM YYMMDD TO MMDDYY
+     C*
+     C                   ADD       1             CgWKA1                         LINE NUMBER
+     C*
+     C                   Z-ADD     nhmjdt        GLYMD                          create date
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    nhmjdt
+     C                   PARM                    WKdvdt            8            yyyymmdd
+     C*
+     C*  CONVERT acctng DATE FROM YYMMDD TO MMDDYY
+     C*
+     c     nhmjdt        ifgt      0
+     C                   Z-ADD     nhmjdt        GLYMD                           gl post dt?
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    nhmjdt
+     C                   PARM                    WKhydt            8            yyyymmdd
+     c                   else
+     C                   movel     wkdvdt        WKhydt                         yyyymmdd
+     c                   endif
+      *
+     C                   movel     nhjznx        dscheck          15            ref number ???
+     C                   move      nhbsva        GLAA             17 2          paym amt
+      *
+      *  M3  Set values in parameter field
+      *
+     C*                  eval      dsamt = %triml(%editc(glaa:'Q'))
+     C*                  eval      dsamt = %editc(glaa:'Q')                      right just
+     c                   move      *blanks       wrk19            19
+     C                   eval      wrk19 = %editc(glaa:'Q')                      right just
+     c                   move      wrk19         dsamt
+     C                   eval      dsdim = dsiden               +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     dsgroup     +                         group nbr
+     C                                     m3divi      +                         division
+     c                                     dspaye     +                          payer
+     c                                     dscust     +                          customer
+     c                                     dsinv#     +                          invoice
+     C                                     dsamt        +                        paym amt (17)
+     C                                     dscdamt      +                        cash disc(17)
+     C                                             'USD'        +               currency
+     C                                             '01'        +                exch rt type
+     C                                             '         1.00' +            exch rate (13)
+     C                                             wkhydt       +               actng date (8)
+     c                                     wkdvdt     +                          paym  date
+     C                                     dscheck                               check number (15)
+     C                   movel     dsdim         cgbht1                         parameter
+      *
+      *
+     C                   write     @CGCPVH                                      M3 plcgcpp dtl
+     c*
+     c                   end
+     c                   enddo
+     C                   endsr
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE Batch Header Record     M3 PLB9CPP
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $writebatch   BEGSR
+     C     m3keyvalue    IFNE      *blanks                                     keyvalue not blank
+     C                   z-add     m3cono        b9wja1                         company
+     C                   movel     m3divi        b9qxcd                         division
+     c                   movel     m3keyvalue    b9ait1                         key: yyyymmddnnnn
+     C                   movel(p)  wktempor      b9ajt1                         interface template
+     C********           move      '001'         b9wga1                         Status
+     C                   movel(p)  wkdescor      b9akt1                         Description
+     C                   movel(p)  wkuser        b9abvn                         User
+     C                   move      wkccyymmdd    b9aedx                         M3 Entry Date
+     C                   move      wksyssyndt    b9abdt                         date added
+     C                   move      wkhhmmss      b9abtm                         time added
+     C                   move      '0'           b9g5ss                         erp process sts
+     C                   movel     sdpgm         b9agvn                         program updated
+      *
+     C                   write     @b9cpuj
+     C                   ENDIF                                                  BATCH# NOT 0
+     C                   ENDSR
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   Break Logic - setup save fields, re-set accumulators
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $newbreak     BEGSR
+     C*
+     C                   Z-ADD     omco#         svco              3 0
+     C                   movel     usrnam        svusrnam         10
+     c                   z-add     0             svinv#            7 0
+     C*
+      *
+      * RETRIEVE M3 COMPANY AND DIVISION EQUIVS
+      *
+     C                   CALL      'PDHGXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    SVCO                           COMP
+     C                   PARM      'M3COMPANY '  KMV8CD           10            DESC
+     C                   PARM                    KMM8NB           15 5          VALUE
+     c                   z-add     kmm8nb        m3cono            3 0
+     C                   CALL      'POMTXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    SVCO
+     C                   PARM      'M3DIVISION'  KMV8CD           10            DESC
+     C                   PARM                    kmbxtx           40            DIVISION
+     c                   movel     kmbxtx        m3divi            3
+     C*
+     C                   ENDSR
+     C/EJECT
+     C*
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   get JDE Batch #'s
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $getbatchno   BEGSR
+     C*
+      * CALL PGM TO GENERATE NEXT AVAILABLE BATCH # FROM M3
+      *    get next voucher number from M3 voucher number series
+     C                   call      'PLW8XFR'
+     C                   PARM                    RTNCDE            7
+     C                   PARM      'ARS'         P1Q4CD            3            vchr nbr series
+     C                   PARM                    P1WVA1            8 0          NEXT NUMBER
+     C                   Z-ADD     P1WVA1        m3seriez          9 0          BATCH NUM
+     C                   move      m3seriez      m3series          4            BATCH NUM
+     C*                  movel     m3series      m3series9         9            for Run Number
+     C*                  move      m3series      m3series9         9            run Number-right jus
+     C                   move      *blanks       m3series9         9            run Number-right jus
+     C                   eval      m3series9=    %editc(m3seriez:'Z')              right just
+     C*   Format M3 Key Value for this batch:   yyyymmmddnnnn where nnnn is the m3series #
+     C*    example:  201506220001,  then next key for that day would be 201506220002 ,...
+     c*
+     c*                  movel     m3keydt       m3keyvalue                     key value
+     c*                  move      m3series      m3keyvalue       15
+     C                   z-add     0             cgwka1                         line number
+     C                   z-add     0             dsgroupn          8 0          group number
+     C                   ENDSR
+     C*
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   Initial Subroutine - -
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     *inzsr        BEGSR
+     C*
+     c                   movel     'M3PAYSTG'    SDPGM            10
+     C*----------------------------------------------------------------
+     C*
+     C     *ENTRY        PLIST
+     C                   PARM                    RETRN             7
+     C                   PARM                    pmkeyvalue       15
+     C*
+     C**                 MOVE      *ZEROS        WKCO              5
+     C**                 MOVE      ACO           WKCO
+     C**                 MOVE      ACO           CO                3 0
+     C**                 MOVE      CO            ParmCo            3 0
+      *
+     C     KEY07         KLIST                                                    ar header
+     C                   KFLD                    omco#
+     C                   KFLD                    omcust
+     C                   KFLD                    ominv#
+     C     KEY08         KLIST                                                    ar detl
+     C                   KFLD                    omco#
+     C                   KFLD                    ominv#
+     C                   KFLD                    bdcest                           suffix
+      *
+      * Put system date into an 8,0 workfield for updating the change date
+      *
+     C     *mdy          move      udate         wkcymdiso
+     C                   move      wkcymdiso     wkccyymmdd        8 0
+      *
+      * Put system date into an 7,0 workfield for updating the synon tables
+      *
+     C                   z-add     wkccyymmdd    wkyymmdd
+     C                   if        wkccyymmdd >= 20000000
+     C     wkyymmdd      add       1000000       wksyssyndt
+     C                   else
+     C                   z-add     wkyymmdd      wksyssyndt
+     C                   endif
+      *
+      * Save the system time for populating fields.
+      *
+     C                   time                    wkhhmmss
+      *
+     C*
+     C                   endsr

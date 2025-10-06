@@ -1,0 +1,461 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF205 - Extract Claims from Sales System
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     08/16/05
+      *
+      * Function:    This program extracts records from the Sales History file for
+      *              claims and writes corresponding Claim Adjustment records.
+      *
+      *              We wrote this function to handle a specific situation: the renting
+      *              of storage space at the Guyman facility to outside businesses. The
+      *              only reason we include this data in our TFS system is to "match up"
+      *              with the ARS system in the Cash Distribution function.
+      *
+      *              Seaboard does not "invoice" for this rental. They handle it by entering
+      *              Debit Memos for 3 "items" into the OMS system. The Items are:
+      *                 99100 Storage Fees
+      *                 99200 Loading Fees
+      *                 99300 Handling Fees
+      *
+      *              The items are setup as Exempt, Finished Goods Items.
+      *
+      *              We have tried to write the program to handle other such "claims" that
+      *              might arise in the future. So, we do process 960 records, etc. But,
+      *              no "claims" written in this program will ever be "shared".
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 03/13/06  LeAnne Fedor
+      *           Recompile only. "Floor" produced pounds and amount were added
+      *           to file TFP010.
+      *
+      * 08/29/06  LeAnne Fedor
+      *           Added 3 new fields to the Claim Adjustments file:
+      *             1) net claim price/pound
+      *             2) affect sales flag
+      *             3) aggregate net product revenue price per pound
+      *           These fields aren't used in logic in this program since this program is just
+      *           for Claim Adjustments. But, we populated them anyway. The fields are used in
+      *           TF211-Extract Claims from Claims System.
+      *
+      * 02/14/07  LeAnne Ramsey
+      *           Recompile only. New field "STD Other Cost/LB" was added to
+      *           Weekly Product Revenue Detail file.
+      *
+      * 04/16/07  LeAnne Ramsey
+      *           Recompile only. New fields added to Weekly Product Revenue Detail
+      *           file.
+      *
+      * 05/18/07  LeAnne Ramsey
+      *           The following fields were added to the Weekly Product Revenue Detail
+      *           file:
+      *              TF Percent Owned
+      *              Co-owned Flag
+      *              Producing Company
+      *
+      * 08/13/07  LeAnne Ramsey
+      *           We are now putting Work-in-Process items in file TFP010.
+      *           Prior to this, we only had Finished Goods items in TFP010.
+      *           So, we changed our logic here to process a logical file that
+      *           selects Finished Goods only.
+      *
+      * 05/07/08  LeAnne Ramsey
+      *           Added "function" documentation above.
+      *
+      * 09/11/08  LeAnne Ramsey
+      *           Recompile only. Export/Domestic Flag was added to TFP010-
+      *           Weekly Product Revenue Detail file.
+      *
+      * 12/10/09  LeAnne Ramsey
+      *           As a result of the Choice White Grease problem, I have changed our
+      *           logic to set the Exempt/Not Exempt status based on the Item in the
+      *           TFP010 file...if there is one.  Otherwise, revert back to the original
+      *           logic of using the value from the Sales History recod.
+      *
+      * 01/05/11  LeAnne Ramsey (E1245)
+      *           Recompile only. A new field was added to TFP022-Claim Adjustments:
+      *              1) customer type
+      *           This field only applies to claims for Affiliated Sales customers.
+      *           So, in this program, we will leave them blank.
+      *
+      * 11/14/17  Danny Nguyen  (R12011A-Weekly Product Revenue)
+      *           Added 25 STF fields to TFP010 file.
+      *           Added 2 fields to TFP022 file:
+      *             CLXRPPC  - STF RESPONSIBILITY %
+      *             CLXNCLAM - STF NET CLAIM AMT
+      *           Populate the 2 STF fields.
+      *           TF410CL was changed to select Company 440 in Open Query Logic.
+      *           STF (Company 440) data will now be populated into it's own STF fields in
+      *           TFP010 file in order to create new STF reports like the ones used in Fees
+      *           & Payments system.
+      *
+      * 01/21/21  ISE            TSN593
+      *           Replaced *loval with *start
+      *
+      * 05/17/22  Danny Nguyen  (DO2484 - WI 479 STF Variance Reporting)
+      *           Recompile only. Added 2 STF fields to TFP010 file.
+      *           PRXYPC   - STF STD YIELD %
+      *           PRXPMPPC - STF PUMP %
+      *
+      * 10/10/22  R Centonze   W105621 - Increase price fields to handle > 999.99
+      *                        CHANGE @@ANPRPR TO SIZE 10.6  --> pranprpr tfp010
+      *                        CHANGE @@nclpr  TO SIZE 10.6  --> clnclpr  tfp022
+      *
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fomhstpl4  if   e           k disk
+      *    Sales history (records selected by Open Query)
+      *
+      *
+     Ftfp007    if   e           k disk
+      *    Exempt codes
+      *
+      *
+     Ftfl010c   if   e           k disk
+      *    Weekly product revenue detail
+      *    (LF selects only Finished Goods)
+      *
+      *
+     Ftfl010i   if   e           k disk    rename(prrec:prreci) prefix(p2)
+      *    Weekly product revenue detail
+      *
+      *
+     Ftfp022    o    e           k disk
+      *  Claim adjustments
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Workfields
+      *
+     d wkwedt          s                   like(closwedt)
+     D wkrate          s              9  6
+      *
+     D wkrcexfl        s                   like(prrcexfl)
+     D wkprexfl        s                   like(prprexfl)
+     D wkexemptfl      s                   like(prprexfl)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldyr                   1      4  0
+     D  ldwk                   5      6  0
+     D  ldwbdt                 7     14  0
+     D  ldsynwbdt             15     21  0
+     D  ldwedt                22     29  0
+     D  ldsynwedt             30     36  0
+     D  ldpfcd                37     37
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * Process all records in the Sales History file where:
+      *   1) Actual Ship Date in week
+      *   2) Order type <> OR and <> TR
+      *   3) Claim Number = zero
+      *   4) Company = 360 or 960 (No selections are made; we assume we will
+      *                            only have data in the file for these 2 companies.)
+12011 *   5) Company 440 added to open query logic.
+      *
+      *
+593  C*    *loval        setll     omhstpl4
+593  C     *start        setll     omhstpl4
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      omhstpl4                               90
+     C                   if        *in90 = *off                                 If not EOF
+     C                   exsr      $wrt022
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * EOF processing
+     C                   seton                                        lr
+      *
+      /eject
+      *---------------------------------------------------------------
+      * Write a Claim Adjustment record
+      *---------------------------------------------------------------
+      *
+     C     $wrt022       begsr
+      *
+      * Populate some dates with LDA values.
+      *  Week beginning date
+      *  Week ending date
+      *  Original sale week ending date
+      *
+     C                   z-add     ldwbdt        clwbdt
+     C                   z-add     ldwedt        clwedt
+     C                   z-add     ldwedt        closwedt
+      *
+      * Set Hardcoded values:
+      *   Claim number
+      *   Claim line number
+      *   Claim order number
+      *   Data source code
+      *   Responsible department
+      *   Responsibility flag
+      *   Product reason type
+      *
+     C                   z-add     0             clclno
+     C                   z-add     0             clcllnno
+     C                   z-add     0             clclorno
+     C                   move      'S'           cldscd
+     C                   move      'MSC'         clrpdept
+     C                   move      'C'           clrpfl
+     C                   move      'RS '         clrscd
+     C                   move      'P'           clprrsty
+      *
+      * Populate:
+      *  Company number
+      *  Memo type
+      *  Credit/debit memo number
+      *  Credit/debit memo line number
+      *  Product code
+      *  Aggregate gross claim amount
+      *
+     C                   z-add     f4aic3        clcono
+     C                   move      f4jncd        clmmty
+     C                   z-add     f4c4nb        clmmno
+     C                   z-add     f4dpnb        clmmlnno
+     C                   z-add     f4s5nb        clprcd
+     C                   z-add     f4kdva        clagclam
+      *
+      * If Affect Sales LBS Flag is Yes, populate
+      *   Set Aggregate Claim LBS equal to Weight Billed
+      *
+     C                   if        f4vast = yes
+     C                   move      yes           clafslfl
+     C                   z-add     f4bywg        clacllb
+     C                   else
+     C                   move      no            clafslfl
+     C                   endif
+      *
+      * Claim absorbed freight amount:
+      *
+     C                   z-add     f4ulva        clclafam
+      *
+      * Claim broker commission amount:
+      *
+     C                   z-add     f4uova        clclbcam
+      *
+      * Claim other sales expense amount:
+      *     SUM of: trade fund accrual amount
+      *             financials amount spec
+      *             financials amount freight
+      *
+     C                   eval      clcloxam = f4unva + f4upva + f4uqva
+      *
+      * Claim Total Sales Expense Amount:
+      *   absorbed freight + broker commission + other sales expenses
+      *
+     C                   eval      clclsxam = clclafam + clclbcam + clcloxam
+      *
+      *  Aggregate net claim amount:
+      *    Aggregate gross claim amount - claim total sales expense amount
+      *
+     C     clagclam      sub       clclsxam      clanclam
+      *
+      *
+      * Set "Exempt" flags
+     C                   exsr      $exempt
+      *
+      * Set "Sale Flag" value and come up with a "Rate" for the "Net Claim" calc.
+      *
+     C                   exsr      $saleflag
+      *
+      * We are hardcoding the Responsibility Flag to Company; so, we will never have
+      * "shared" responsiblity in this program.)
+      *
+      * TF Net Claim Amount & Responsibility %
+      *
+     C                   select
+     C                   when      clcono = 960
+     C                   z-add     clanclam      cltnclam
+     C                   z-add     100           cltrppc
+      *
+      * SBF Net Claim Amount & Responsibility %
+      *
+     C                   when      clcono = 360
+     C                   z-add     clanclam      clsnclam
+     C                   z-add     100           clsrppc
+      *
+12011 * STF Net Claim Amount & Responsibility %
+  |   *
+  |  C                   when      clcono = 440
+  |  C                   z-add     clanclam      clxnclam
+12011C                   z-add     100           clxrppc
+      *
+     C                   endsl
+      *
+     C                   write     clrec
+     C                   clear                   clrec
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Value "Sale Flag" and come up with a "Rate" for the Net Claim Amount calc
+      *----------------------------------------------------------------------------------
+      *
+     C     $saleflag     begsr
+      *
+      * Sales flag
+      *   Y=Yes, record found in TFP010 for:
+      *              product
+      *              week-ending date associated with Actual Ship date of the Original Order
+      *                   on this claim
+      *              exempt record flag
+      *              exempt product flag
+      *          Calc TF Net Product Revenue rate from week-ending record
+      *   N=No, no record found in TFP010
+      *          Retrieve any TFP010 record prior to the week-ending date for this product
+      *                Calc TF Net Product Revenue rate from week-ending record
+      *          If there are no TFP010 records for this product prior to the week-ending date,
+      *                Set the rate equivalent to 50%
+      *
+     C                   move      no            clsalefl
+      *
+     C                   if        closwedt <> 0                                If orig sale
+     C                   eval      wkwedt = closwedt
+      *
+     C     key01         chain     tfl010c                            92
+     C                   if        *in92 = *off                                 If current
+     C                   move      yes           clsalefl
+     C                   eval      wkrate = prtnprpc / 100
+     C                   endif                                                  If current
+     C                   endif                                                  If orig sale
+      *
+      *
+     C                   if        clsalefl = no                                If NO
+     C                   eval      wkwedt = ldwedt
+     C     key01         setll     tfl010c
+     C     clprcd        readpe    tfl010c                                92
+     C                   if        *in92 = *off                                 If anything
+     C                   eval      wkrate = prtnprpc / 100
+     C                   else
+      *
+     C                   z-add     .5            wkrate
+     C                   endif                                                  If anything
+     C                   endif                                                  If NO
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Determine the Exempt Status of the Product
+      *----------------------------------------------------------------------------------
+      *
+     C     $exempt       begsr
+      *
+      * Initialize Exempt Flags.
+      *
+     C                   move      *blank        wkrcexfl
+     C                   move      *blank        wkprexfl
+      *
+      * We will make 3 attempts to determine the Exempt/Non-Exempt status of the Item:
+      *   Attempt 1: Is there an Exempt Product record for this Week/Item in TFP010?
+      *   Attempt 2: Is there a Non-Exempt Product record for this Week/Item in TFP010?
+      *   Attempt 3: Use the value from the Sales History record that you are processing
+      *
+      *
+      * Attempt 1: Is there an Exempt Product record for this Week/Item in TFP010?
+      *
+     C                   move      yes           wkexemptfl
+     C     key02         chain     tfl010i                            92
+     C                   if        *in92 = *off
+     C                   move      yes           wkprexfl
+     C                   move      yes           wkrcexfl
+     C                   endif
+      *
+      * Attempt 2: Is there a Non-Exempt Product record for this Week/Item in TFP010?
+      *
+     C                   if        wkprexfl = *blank                            If attempt 2
+     C                   move      no            wkexemptfl
+     C     key02         chain     tfl010i                            92
+     C                   if        *in92 = *off
+     C                   move      no            wkprexfl
+     C                   move      no            wkrcexfl
+     C                   endif
+     C                   endif                                                  If attempt 2
+      *
+      * Attempt 3: Use the Sales History record value
+      *
+     C                   if        wkprexfl = *blank                            If attempt 3
+     C     f4iusx        chain     tfp007                             92
+     C                   if        *in92 = *off
+     C                   move      exrcexfl      wkrcexfl
+     C                   move      exprexfl      wkprexfl
+     C                   else
+     C                   move      no            wkrcexfl
+     C                   move      no            wkprexfl
+     C                   endif
+     C                   endif                                                  If attempt 3
+      *
+     C                   move      wkrcexfl      clrcexfl
+     C                   move      wkprexfl      clprexfl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists:
+      *
+     C     key01         klist
+     C                   kfld                    clprcd
+     C                   kfld                    wkwedt
+     C                   kfld                    clrcexfl
+     C                   kfld                    clprexfl
+      *
+     C     key02         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    wkexemptfl
+     C                   kfld                    f4s5nb
+      *
+     C                   endsr
+      /eject

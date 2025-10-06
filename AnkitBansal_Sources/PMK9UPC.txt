@@ -1,0 +1,119 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  PMK9UPC                                       */
+/*  PROGRAM NAME:    COPY PURGED FILE MEMBERS TO TAPE              */
+/*  PROGRAMMER:      LARA BUSER                                    */
+/*  CREATE DATE:     08/07/2007                                    */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS CALLED FROM THE JOB SCHEDULER      */
+/*                   JOB WEEKLY, MONTHLY, YEARLY. IT WILL TAKE     */
+/*                   THE Z* MEMBERS THAT WERE CREATED DURING THE   */
+/*                   PURGE PROCESS AND SAVE THEM TO TAPE.          */
+/*                                                                 */
+/*                   THIS PROCESS WILL LOOP TWICE FOR EACH         */
+/*                   PURGE CONTROL GROUP CODE.                     */
+/*                                                                 */
+/* 1.  DETERMINE WHICH VOLUME IS BEING SAVED                       */
+/* 2.  MAKE SURE THE CORRECT TAPE IS IN THE DRIVE                  */
+/* 3.  FIRST TIME THROUGH THE PROGRAM, SAVE TO VOLUME 1            */
+/* 4.  SECOND TIME THROUGH THE PROGRAM, SAVE TO VOLUME 2           */
+/* 5.  SECOND TIME THROUGH THE PROGRAM, REMOVE Z* MEMBERS FROM     */
+/*     THE PURGE FILES                                             */
+/*                                                                 */
+/*-----------------------------------------------------------------*/
+/* MAINTENANCE LOG:                                                */
+/* DATE      NAME  DESCRIPTION OF MODIFICATION                     */
+/* 01/29/08  LJB   ADD BOTH THE FROM LIBRARY AND TO LIBRARY AND    */
+/*                 PASS THESE TO THE COPY PROGRAM.                 */
+/* 01/21/08  LJB   TEMPORARILY COMMENT OUT THE REMOVAL OF THE Z*   */
+/*                 MEMBERS.                                        */
+/* 04/21/08  LJB   UNCOMMENT REMOVAL OF "Z" MBRS. REMOVE "Z"       */
+/*                 MEMBERS, THEN CLEAR THE 1ST MEMBER OF THE       */
+/*                 PURGE TAPE FILE IN THE PURGE LIBRARY.           */
+/* 04/21/09  LJB   NEW TAPE DEVICE REQUIRES CHANGES. PASS TAPE     */
+/* E00391          CATEGORY INSTEAD OF VOLUME. REMOVE SNDUSRMSG    */
+/*                 TO LOAD TAPES, THIS IS NOW IN THE CALLING       */
+/*                 PROGRAM.          CHKTAP NO LONGER NEEDED.      */
+/*                 CHANGE 2ND AND 3RD SNDUSRMSG TO *INFO SO        */
+/*                 OPERATOR DOES NOT HAVE TO RESPOND TO IT.        */
+/*******************************************************************/
+             PGM        PARM(&RTNCDE &PCGCODE &LIB &FREQUENCY &TOLIB)
+
+             DCL        VAR(&PCGCODE) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&FREQUENCY) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&TOLIB) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&LIB) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PCACODE) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&FILENAME) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&RTNCDE) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&TAPE) TYPE(*CHAR) LEN(10) VALUE(TAPMLB03)
+             DCL        VAR(&VOL) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&CYCLE) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&CYCLEN) TYPE(*DEC) LEN(1 0) VALUE(0)
+             DCL        VAR(&REPLY) TYPE(*CHAR) LEN(1)
+
+/*-----------------------------------------------------------------*/
+/* INITIALIZE: E00391                                              */
+/* MAKE SURE THE PURGE TAPES ARE LOADED INTO THE DRIVE (TAPMLB03)  */
+/* BUILD THE VOLUME - CONCAT PURGE CODE AND CYCLE NUMBER           */
+/*-----------------------------------------------------------------*/
+ /********   SNDUSRMSG  MSGID(CPF9898) MSGF(QCPFMSG) +
+                          MSGDTA('Please place the Purge tapes +
+                          into the tape drive (C,G)') VALUES(C +
+                          G) MSGTYPE(*INQ) MSGRPY(&REPLY)         +
+             IF         COND(&REPLY *EQ 'C') THEN(DO)             +
+             CHGVAR     VAR(&RTNCDE) VALUE(USR3811)               +
+             GOTO       CMDLBL(CANCELED)                          +
+             ENDDO                               *******************/
+
+ TOP:        IF         COND(&CYCLE *EQ '2') THEN(GOTO CMDLBL(REMOVE))
+             CHGVAR     VAR(&CYCLEN) VALUE(&CYCLEN + 1)
+             CHGVAR     VAR(&CYCLE) VALUE(&CYCLEN)
+
+             CHGVAR     VAR(&VOL) VALUE(&PCGCODE *TCAT &CYCLE)
+             SETTAPCGY  DEV(&TAPE) OPTION(*MOUNTED) CGY(&VOL)
+
+/*-----------------------------------------------------------------*/
+/* CALL PROGRAM TO SAVE Z* MEMBERS OF THE FILE TO TAPE             */
+/*-----------------------------------------------------------------*/
+/* RTV COPY FILES TO TAPE XF - PURGE CONTROL APPLICATION *         */
+             CALL       PGM(PMNUXFR) PARM(' ' &PCGCODE &LIB +
+                          &FREQUENCY &TAPE &VOL &TOLIB)
+
+/*-----------------------------------------------------------------*/
+/* UNLOAD 1ST TAPE AND LOAD 2ND                                    */
+/*-----------------------------------------------------------------*/
+/* ULOAD TAPE */
+             SETTAPCGY  DEV(&TAPE) OPTION(*DEMOUNTED) CGY(&VOL)
+
+/* RETURN TO TOP FOR SAVING TO 2ND TAPE                          */
+             GOTO       CMDLBL(TOP)
+
+/*-----------------------------------------------------------------*/
+/* CALL PROGRAM TO REMOVE Z* MEMBERS OF THE PURGE TAPE FILES       */
+/* AND CLEAR THE FIRST MEMBER.                                     */
+/*-----------------------------------------------------------------*/
+/* RTV RMV 'Z' MBRS       XF - PURGE CONTROL APPLICATION *         */
+ REMOVE:     CALL       PGM(PMQOXFR) PARM(' ' &PCGCODE &LIB +
+                          &FREQUENCY &TOLIB)
+
+/*-----------------------------------------------------------------*/
+/* END PROGRAM:  TELL THE OPERATOR THAT THE JOB HAS COMPLETED      */
+/*               CHANGED TO *INFO SO NO RESPONSE IS REQUIRED       */
+/*-----------------------------------------------------------------*/
+             SNDUSRMSG  MSGID(CPF9898) MSGF(QCPFMSG) MSGDTA('Copy to +
+                          tape is Complete for ' *CAT &PCGCODE) +
+                          MSGTYPE(*INFO) TOMSGQ(*EXT)
+             GOTO       CMDLBL(END)
+
+/*-----------------------------------------------------------------*/
+/* THE FOLLOWING WAS MOVED TO THE CALLING PROGRAM                  */
+/* CANCELED: REMIND THE OPERATOR THAT THE JOB WAS CANCELED         */
+/*           CHANGED TO *INFO SO NO RESPONSE IS REQUIRED           */
+/*-----------------------------------------------------------------*/
+ CANCELED: /*  SNDUSRMSG  MSGID(CPF9898) MSGF(QCPFMSG) MSGDTA('Copy +
+                          purged records to tape was cancelled for +
+                          ' *CAT &PCGCODE *BCAT &TOLIB) +
+                          MSGTYPE(*INFO) TOMSGQ(*EXT)  **************/
+
+ END:        ENDPGM

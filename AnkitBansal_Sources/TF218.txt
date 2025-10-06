@@ -1,0 +1,833 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF218 - Margin: Volume Summary
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     09/18/06
+      *
+      * Function:    When the Margin Adjustment Close function is run, this program is called
+      *              to:
+      *                 1) Summarize the Margin Adjustment Detail data into the Volume Summary
+      *                 2) Read the summarized records and make calcs.
+      *
+      *              Only records with a TF Class Group Code = 'CV' are written to the
+      *              summary file.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/11/06  LeAnne Ramsey
+      *           Recompile only. More fields added to TFP014 file.
+      *
+      * 11/09/06  LeAnne Ramsey
+      *           To allow us to do both 'weekly' and 'period' processing, we now
+      *           write to a workfile which is subsequently copied to the appropriate
+      *           database file.
+      *
+      * 12/05/06  LeAnne Ramsey
+      *           When Produced Pounds are zero, set Produced Start Weight to zero when
+      *           writing the summarized record.
+      *
+      * 02/15/06  LeAnne Ramsey
+      *           Added logic for new "other cost" fields.
+      *
+      * 04/16/07  LeAnne Ramsey
+      *           We renamed the following flag field:
+      *             1) Exclude from Volume Flag is now Volume Flag
+      *           Before this change Y=Yes meant EXCLUDE the product from processing
+      *           After this change  Y=Yes means INCLUDE the product in processing
+      *
+      * 05/04/07  Alice Brownfield
+      *           Changed TEXT only to note exceptions for the new ByProducts
+      *           TF Class Group Code (BP)
+      *
+      * 06/20/07  LeAnne Ramsey
+      *           Recompile only. New field "Item Type" (will hold FG or WP) was added
+      *           to the Margin Adjustment file.
+      *
+      * 09/03/08  LeAnne Ramsey
+      *           We are no longer using the Mimimum Converted Product Percents; file
+      *           TFP002-Minimum Converted Product Percent is obsolete and is being
+      *           deleted.
+      *
+      * 09/05/12  LeAnne Ramsey (E2243)
+      *           Recompile only.
+      *           Per Damon G. we must now write more/special records to TFP014 for the
+      *           Items that receive lbs/dollars from Skirt Meat Items!! So, I had to add
+      *           a new field to TFP014:
+      *                         ADSMSFL-Skirt Meat Split Flag
+      *           I also added ADSMSFL to the key fields on TFL014C.
+      *
+      * 02/08/22  Danny Nguyen   - DO2484 - WI479 STF Variance Reporting
+      *           Recompile only due to TFP014 DBF change. Added the following fields:
+      *             ADXPULB  - STF PRODUCED LBS
+      *             ADXPUSLB - STF PRODUCED START WEIGHT
+      *             ADXYPC   - STF STD YIELD %
+      *             ADXPMPPC - STF PUMP %
+      *             ADXSLLB  - STF SOLD LBS
+      *             ADXSLSLB - STF SOLD START WEIGHT
+      *          ‚The 6 new STF fields will NOT be added to TFP318 file at this time.
+      *
+      * 10/10/22  R Centonze   W105621 - Increase price fields to handle > 999.99
+      *         COPY @@SPU1MG TO  @@SPU1MG10 SIZE 10.6  -> FIELD TFP014.ADSPU1MG
+      *         COPY @@TPU1MG TO  @@TPU1MG10 SIZE 10.6  -> FIELD TFP014.ADTPU1MG
+      *         COPY @@SSL1MG TO  @@SSL1MG10 SIZE 10.6  -> FIELD TFP014.ADSSL1MG
+      *         COPY @@SSL2MG TO  @@SSL2MG10 SIZE 10.6  -> FIELD TFP014.ADSSL2MG
+      *         COPY @@TSL1MG TO  @@TSL1MG10 SIZE 10.6  -> FIELD TFP014.ADTSL1MG
+      *         COPY @@TSL2MG TO  @@TSL2MG10 SIZE 10.6  -> FIELD TFP014.ADTSL2MG
+      *          ‚Not changing tfp318 at this time!
+      * 05/07/24  Santosh Patil P310149 - Field length is increased
+      *           in TFP014. Function is recompiled only.
+     ‚* 05/31/24  Jagdish Mistry (JM-P310149),Service request number-3014062
+     ‚*           Requirement 1-Exclude items volume flag = N for Triumph
+     ‚*                         from volume calculations.
+     ‚*           Requirement 2-Add work in process items to match
+     ‚*                          volume adjustment detail & summary report.
+      *
+      *
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Ftfl014c   if   e           k disk
+      *  Product margin adjustment transaction detail  (open query selects records)
+      *
+      *
+     Ftfp318    uf a e           k disk
+      *  Workfile: Volume summary
+     ‚* Project-JM-P310149-START
+     FTFL318A   UF   E           K Disk    Rename(VSREC:REC318A)
+     F                                     Prefix(A1:2)
+     FPPAOREL1  IF   E           K Disk
+     ‚* Project-JM-P310149-END
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+     ‚* Project-JM-P310149-START
+     D wk_ITYCD        S                   Like(ADITYCD)  Inz('FG')
+     D wk_318Found     s              1    inz(*Blanks)
+     D wk_ADYR         s                   like(ADYR)
+     D wk_ADWK         s                   like(ADWK)
+     ‚* Project-JM-P310149-END
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     ‚* Project-JM-P310149-START
+     D Triumph         c                   'T'
+     ‚* Project-JM-P310149-END
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+      *
+     D svtfcgcd        s                   like(adtfcgcd)
+     D svtfclcd        s                   like(adtfclcd)
+     D svistycd        s                   like(adistycd)
+     D svisgrcd        s                   like(adisgrcd)
+     D svisclcd        s                   like(adisclcd)
+      *
+      *
+      * Work fields
+      *
+     D wksvpulb        s                   like(vsspulb)
+     D wktvpulb        s                   like(vstpulb)
+     D wkspurslb       s                   like(vsspulb)
+     D wktpurslb       s                   like(vstpulb)
+     D wksvpuslb       s                   like(vsspulb)
+     D wktvpuslb       s                   like(vstpulb)
+      *
+      *
+     D wkvolfl         s                   like(advolfl)
+      *
+      *
+      * Parm fields
+      *
+     D xxwkpe          s              1
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      *  Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwbdt                 8     15  0
+     D  ldwedt                29     36  0
+      *
+     D  ldpe                  51     52  0
+     D  ldpbdt                53     60  0
+     D  ldpedt                67     74  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * Step 1: Summarize the Margin Detail records into Volume Summary
+      *         workfile records.
+      *
+     C                   exsr      $summarize
+     ‚* Project-JM-P310149-START
+     C                   Eval      wk_ITYCD = 'WP'
+     C                   Eval      first = yes
+     C                   ExSr      $summarizeWIP
+     ‚* Project-JM-P310149-END
+      *
+      * Step 2: Reprocess the summarized records making all calcs
+      *
+     C                   exsr      $reprocess
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------------------------------
+      * Summarize the Detail records into Volume Summary records
+      *---------------------------------------------------------------------------------------
+      *
+     C     $summarize    begsr
+      *
+      * Read each record in the Margin Adjustment Detail file selected by the open query:
+      *     1) all records with TF Class Group Code = OT and BP are excluded
+      *     2) only records for the week/period being processed are included
+      *     3) only Finished Good items are included
+      *
+      * Only summarize records where:
+      *       1) Volume Flag is YES
+      *       2) TF Class Group Code is "CV"
+      * Ultimately, you will write a "volume" summary record for each:
+      *       1) TF Classification Code
+      *       2) Item Structure Type Code
+      *
+     C     *loval        setll     tfl014c
+      *
+     C                   dou       *in90 = *on                                  Do summary
+     C                   read      tfl014c                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             advolfl = yes and
+     ‚* Project-JM-P310149-START
+     C***                             adtfcgcd = 'CV'
+     C                             adtfcgcd = 'CV' And
+     C                             ADITYCD  = wk_ITYCD
+     ‚* Project-JM-P310149-END
+     ‚* Project-JM-P310149-START
+     ‚* Exclude vol flag = 'N' for triumph Items from calculations
+     C     Key04         Chain     PPAOREL1
+     C                   If        %Found(PPAOREL1) And
+     C                             AOSXSX = No And AOD3TX = Triumph
+     C                   Iter
+     C                   EndIf
+     ‚* Project-JM-P310149-END
+      * Control break
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   exsr      $save
+      *
+      * Write a Summary record when there is a change in:
+      *   1) TF classification code or
+      *   2) Item structure type code
+      *
+     C                   when      adtfclcd <> svtfclcd or
+     C                             adistycd <> svistycd
+     C                   exsr      $wrt318
+     C                   exsr      $save
+     C                   endsl
+      *
+      * Detail processing
+     C                   exsr      $detail
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do summary
+      *
+      * EOF processing
+     C                   if        first = no
+     C                   exsr      $wrt318
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Detail processing for each Detail record
+      *---------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+      * Produced pounds
+     C                   add       adspulb       vsspulb
+     C                   add       adtpulb       vstpulb
+      *
+      * Produced value amount
+      *
+     C                   add       adspuam       vsspuam
+     C                   add       adtpuam       vstpuam
+      *
+      * Produced Start Weight
+      *
+     C                   add       adspuslb      vsspuslb
+     C                   add       adtpuslb      vstpuslb
+      *
+      * Meat cost amounts
+     C                   add       adspumam      vsspumam
+     C                   add       adtpumam      vstpumam
+      *
+      * Labor cost amounts
+      *
+     C                   add       adspulam      vsspulam
+     C                   add       adtpulam      vstpulam
+      *
+      * Packaging cost amounts
+      *
+     C                   add       adspukam      vsspukam
+     C                   add       adtpukam      vstpukam
+      *
+      * Ingredient cost amounts
+      *
+     C                   add       adspuiam      vsspuiam
+     C                   add       adtpuiam      vstpuiam
+      *
+      * Other cost amounts
+      *
+     C                   add       adspuoam      vsspuoam
+     C                   add       adtpuoam      vstpuoam
+      *
+      * Product cost amounts
+      *
+     C                   add       adspupam      vsspupam
+     C                   add       adtpupam      vstpupam
+      *
+      * Margin amounts
+     C                   add       adspumgam     vsspumgam
+     C                   add       adtpumgam     vstpumgam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Save control fields
+      *---------------------------------------------------------------
+      *
+     C     $save         begsr
+      *
+     C                   move      adtfclcd      svtfclcd
+     C                   move      adtfcgcd      svtfcgcd
+     C                   move      adistycd      svistycd
+     C                   z-add     adisgrcd      svisgrcd
+     C                   z-add     adisclcd      svisclcd
+     ‚* Project-JM-P310149-START
+     C                   Eval      wk_ADYR = ADYR
+     C                   Eval      wk_ADWK = ADWK
+     ‚* Project-JM-P310149-END
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a Summary record
+      *---------------------------------------------------------------
+      *
+     C     $wrt318       begsr
+      *
+     C                   move      svtfcgcd      vstfcgcd
+     C                   move      svtfclcd      vstfclcd
+     C                   z-add     svistycd      vsistycd
+     C                   z-add     svisgrcd      vsisgrcd
+     C                   z-add     svisclcd      vsisclcd
+      *
+     C                   z-add     ldyr          vsyr
+      *
+     C                   select
+     C                   when      xxwkpe = 'W'
+     C                   z-add     ldwk          vswkpe
+     C                   z-add     ldwbdt        vsbdt
+     C                   z-add     ldwedt        vsedt
+      *
+     C                   when      xxwkpe = 'P'
+     C                   z-add     ldpe          vswkpe
+     C                   z-add     ldpbdt        vsbdt
+     C                   z-add     ldpedt        vsedt
+     C                   endsl
+      *
+      * When Produced Pounds are zero, override Produced Start Weight values to zero.
+      *
+     C                   if        vsspulb = 0
+     C                   z-add     0             vsspuslb
+     C                   endif
+      *
+     C                   if        vstpulb = 0
+     C                   z-add     0             vstpuslb
+     C                   endif
+      *
+      * Aggregate fields
+      *
+     C     vsspulb       add       vstpulb       vsapulb
+     C     vsspuslb      add       vstpuslb      vsapuslb
+     C     vsspumgam     add       vstpumgam     vsapumgam
+      *
+     C                   write     vsrec
+     C                   clear                   vsrec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Read the summarized records and make calculations
+      *---------------------------------------------------------------
+      *
+     C     $reprocess    begsr
+      *
+     C     *loval        setll     tfp318
+      *
+     C                   dou       *in90 = *on                                  Do reprocess
+     C                   read      tfp318                                 90
+     C                   if        *in90 = *off                                 If not EOF
+     C                   exsr      $startwt
+     C                   exsr      $calc
+     C                   update    vsrec
+     ‚* add clear to reset existing values
+     c                   Clear                   vsrec
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do reprocess
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Retrieve/Calculate Start Weights
+      *--------------------------------------------------------------------------------------
+      *
+     C     $startwt      begsr
+      *
+      * Initialize work fields:
+      *
+     C                   z-add     0             wksvpulb
+     C                   z-add     0             wktvpulb
+     C                   z-add     0             wksvpuslb
+     C                   z-add     0             wktvpuslb
+     C                   z-add     0             wkspurslb
+     C                   z-add     0             wktpurslb
+     C                   move      no            wkvolfl
+      *
+     C                   exsr      $rtv014
+      *
+      * Reset the VA Produced Pounds:
+      *
+     C                   z-add     wksvpulb      vssvpulb
+     C                   z-add     wktvpulb      vstvpulb
+     C     wksvpulb      add       wktvpulb      vsavpulb
+      *
+      *
+      * Reset VA Produced Start Weight:
+      *
+     C                   z-add     wksvpuslb     vssvpuslb
+     C                   z-add     wktvpuslb     vstvpuslb
+     C     wksvpuslb     add       wktvpuslb     vsavpuslb
+      *
+      *
+      * Reset the Produced Raw Start Weight:
+      *
+     C                   z-add     wkspurslb     vsspurslb
+     C                   z-add     wktpurslb     vstpurslb
+      *
+      *
+      * Combined Produced Start Weight:
+      *    Produced start weight + VA produced start weight
+      *
+     C     vsspuslb      add       vssvpuslb     vsscpuslb
+     C     vstpuslb      add       vstvpuslb     vstcpuslb
+     C     vsapuslb      add       vsavpuslb     vsacpuslb
+      *
+      *
+      * Total Start Weight:
+      *      Produced: produced start weight + VA produced start weight
+      *                                      + produced raw start weight
+      *
+     C                   eval      vssputslb = vsspuslb + vsspurslb + vssvpuslb
+     C                   eval      vstputslb = vstpuslb + vstpurslb + vstvpuslb
+     C                   eval      vsaputslb = vssputslb + vstputslb
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Calculations
+      *--------------------------------------------------------------------------------------
+      *
+     C     $calc         begsr
+      *
+      * Yield Percents:
+      *       Produced: (produced pounds / produced start weight) * 100
+      *
+     C                   if        (vsspuslb + vstpuslb) <> 0
+     C                   eval(h)   vsapuypc = ((vsspulb + vstpulb) /
+     C                                        (vsspuslb + vstpuslb)) * 100
+     C                   endif
+      *
+     C                   if        vsspuslb <> 0
+     C                   eval(h)   vsspuypc = (vsspulb / vsspuslb) * 100
+     C                   endif
+      *
+     C                   if        vstpuslb <> 0
+     C                   eval(h)   vstpuypc = (vstpulb / vstpuslb) * 100
+     C                   endif
+      *
+      * Conversion Percent:
+      *        Produced: (produced start weight + VA produced start weight)
+      *                                         / total produced start weight
+      *
+     C                   if        vssputslb <> 0
+     C                   eval(h)   vsspucpc = ((vsspuslb + vssvpuslb)
+     c                                                   / vssputslb) * 100
+     C                   endif
+      *
+     C                   if        vstputslb <> 0
+     C                   eval(h)   vstpucpc = ((vstpuslb + vstvpuslb)
+     c                                                   / vstputslb) * 100
+     C                   endif
+      *
+      *
+      * Aggregate Produced Conversion %:
+      *   (Aggregate Produced Start Weight + Aggregate VA Produced Start Weight)
+      *                                    / Aggregate Total Produced Start Weight) * 100
+      *
+     c                   if        vsaputslb <> 0
+     C                   eval(h)   vsapucpc = ((vsapuslb + vsavpuslb)
+     c                                                   / vsaputslb) * 100
+     C                   endif
+      *
+      * TF Volume Adjustment Percent Excess:
+      *     Aggregate Produced Conversion % less TF Produced Conversion %
+      *
+     C                   if        vstpucpc > vsapucpc
+     C                   else
+     C     vsapucpc      sub       vstpucpc      vstevolpc
+     C                   endif
+      *
+      * SBF Volume Adjustment Percent Excess:
+      *     Aggregate Produced Conversion % less SBF Produced Conversion %
+      *
+     C                   if        vsspucpc > vsapucpc
+     C                   else
+     C     vsapucpc      sub       vsspucpc      vssevolpc
+     C                   endif
+      *
+      *
+      * Make "Per Pound" calculations based on Produced Pounds.
+      *
+      *       Aggregate:
+     C                   if        (vsspulb + vstpulb) <> 0
+      *
+     C                   eval(h)   vsapumco = (vsspumam  + vstpumam) /           Meat
+     C                                        (vsspulb + vstpulb)
+      *
+     C                   eval(h)   vsapulco = (vsspulam  + vstpulam) /           Labor
+     C                                        (vsspulb + vstpulb)
+      *
+     C                   eval(h)   vsapukco = (vsspukam  + vstpukam) /           Packaging
+     C                                        (vsspulb + vstpulb)
+      *
+     C                   eval(h)   vsapuico = (vsspuiam  + vstpuiam) /           Ingredient
+     C                                        (vsspulb + vstpulb)
+      *
+     C                   eval(h)   vsapuoco = (vsspuoam  + vstpuoam) /           Other
+     C                                        (vsspulb + vstpulb)
+      *
+     C                   eval(h)   vsapupco = vsapumco + vsapulco +              Product
+     C                                        vsapukco + vsapuico +
+     C                                        vsapuoco
+      *
+     C                   eval(h)   vsapupr  = (vsspuam + vstpuam) /              Price
+     C                                        (vsspulb + vstpulb)
+      *
+     C                   eval(h)   vsapu1mg = vsapupr - vsapupco
+     C                   endif
+      *
+      *       Seaboard:
+     C                   if        vsspulb <> 0
+     C                   eval(h)   vsspumco = vsspumam / vsspulb                Meat
+     C                   eval(h)   vsspulco = vsspulam / vsspulb                Labor
+     C                   eval(h)   vsspukco = vsspukam / vsspulb                Packaging
+     C                   eval(h)   vsspuico = vsspuiam / vsspulb                Ingredient
+     C                   eval(h)   vsspuoco = vsspuoam / vsspulb                Other
+      *
+     C                   eval      vsspupco = vsspumco + vsspulco +             Product
+     C                                        vsspukco + vsspuico +
+     C                                        vsspuoco
+      *
+     C                   eval(h)   vsspupr  = vsspuam / vsspulb                 Price
+     C                   eval(h)   vsspu1mg = vsspupr - vsspupco                Margin
+     C                   endif
+      *       Triumph:
+     C                   if        vstpulb <> 0
+     C                   eval(h)   vstpumco = vstpumam / vstpulb                Meat
+     C                   eval(h)   vstpulco = vstpulam / vstpulb                Labor
+     C                   eval(h)   vstpukco = vstpukam / vstpulb                Packaging
+     C                   eval(h)   vstpuico = vstpuiam / vstpulb                Ingredient
+     C                   eval(h)   vstpuoco = vstpuoam / vstpulb                Other
+      *
+     C                   eval      vstpupco = vstpumco + vstpulco +             Product
+     C                                        vstpukco + vstpuico +
+     C                                        vstpuoco
+      *
+     C                   eval(h)   vstpupr  = vstpuam / vstpulb                 Price
+     C                   eval(h)   vstpu1mg = vstpupr - vstpupco                Margin
+     C                   endif
+      *
+      * Produced margin per produced start weight:
+      *    Produced margin amount / combined produced start weight
+      *
+     C                   if        vsscpuslb <> 0
+     C     vsspumgam     div(h)    vsscpuslb     vsspu2mg
+     C                   endif
+      *
+     C                   if        vstcpuslb <> 0
+     C     vstpumgam     div(h)    vstcpuslb     vstpu2mg
+     C                   endif
+      *
+     C                   if        vsacpuslb <> 0
+     C     vsapumgam     div(h)    vsacpuslb     vsapu2mg
+     C                   endif
+      *
+      *
+      * Combined produced margin amount:
+      *    Produced margin per produced start weight *
+      *        combined produced start weight
+      *
+     C                   eval(h)   vsscpumgam = vsspu2mg * vsscpuslb
+     C                   eval(h)   vstcpumgam = vstpu2mg * vstcpuslb
+     C                   eval(h)   vsacpumgam = vsapu2mg * vsacpuslb
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve Margin Adustment records
+      *---------------------------------------------------------------
+      *
+      * NOTE: The open query:
+      *           1) omits all records where TF Class Group Code = 'OT' and 'BP'
+      *           2) selects records appropriately for "week" or "period" processing.
+      *           3) selects only records for Finished Goods items
+      *
+      * Retrieve all Adjustment Detail records using a key of:
+      *    vsistycd   Item Structure Type Code from Volume Summary file
+      *    wkvolfl    Volume Flag hardcoded to No
+      *
+     C     $rtv014       begsr
+      *
+     C     key01         setll     tfl014c
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     key01         reade     tfl014c                                91
+     C                   if        *in91 = *off                                 If not eof
+     ‚* Project-JM-P310149-START
+     ‚* Exclude vol flag = 'N' items from calculations
+     C     Key04         Chain     PPAOREL1
+     C                   If        %Found(PPAOREL1) And
+     C                             AOSXSX = No And AOD3TX = Triumph
+     C                   Iter
+     C                   EndIf
+     ‚* Project-JM-P310149-END
+      *
+      * Use the Converted Raw material flag to determine whether we add the
+      * Produced Start Weight to:
+      *    1) Produced Raw Start Weight  OR
+      *    2) VA Produced Start Weight
+      *
+     C                   if        adrmfl = 'N'                                 If not converted
+     C                   add       adspuslb      wkspurslb
+     C                   add       adtpuslb      wktpurslb
+     C                   else
+     C                   add       adspuslb      wksvpuslb
+     C                   add       adtpuslb      wktvpuslb
+     C                   add       adspulb       wksvpulb
+     C                   add       adtpulb       wktvpulb
+     C                   endif                                                  If not converted
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do loop
+      *
+     C                   endsr
+      /eject
+     ‚* Project-JM-P310149-START
+      *---------------------------------------------------------------------------------------
+     ‚* Summarize the Detail records into Volume Summary records for WIP
+     ‚* Modified selection criteria of summary same as in
+     ‚* Work in process items volume adjustment backup report detail.
+      *---------------------------------------------------------------------------------------
+      *
+     C     $summarizeWIP begsr
+      *
+     C     *loval        setll     tfl014c
+      *
+     C                   dou       *in90 = *on                                  Do summary
+     C                   read      tfl014c                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             (advolfl = yes Or advolfl = No) And
+     C                             (adtfcgcd = 'CV' Or adtfcgcd = 'NV') And
+     C                             (ADMIXFL = Yes And ADITYCD  = wk_ITYCD) And
+     C                             (ADWEDT = LDWEDT)
+     ‚*
+      * Control break
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   exsr      $save
+      *
+      * Write a Summary record when there is a change in:
+      *   1) TF classification code or
+      *   2) Item structure type code
+      *
+     C                   when      adtfclcd <> svtfclcd or
+     C                             adistycd <> svistycd
+     C                   exsr      $valWrtOrUpd
+     C                   If        wk_318Found ='Y'
+     C                   ExSr      $Upd318
+     C                   Else
+     C                   ExSr      $wrt318
+     C                   EndIf
+     C                   exsr      $save
+     C                   endsl
+      *
+      * Detail processing
+     C                   exsr      $detail
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do summary
+      *
+      * EOF processing
+     C                   If        first = no
+     C                   exsr      $valWrtOrUpd
+     C                   If        wk_318Found ='Y'
+     C                   ExSr      $Upd318
+     C                   Else
+     C                   ExSr      $wrt318
+     C                   EndIf
+     C                   EndIf
+      *
+     C                   endsr
+      *---------------------------------------------------------------------------------------
+     ‚* decide write or change
+      *---------------------------------------------------------------------------------------
+     C     $valWrtOrUpd  BegSr
+     C                   Eval      wk_318Found = 'N'
+     C     Key318        Setll     TFL318A
+     C                   If        %Equal(TFL318A)
+     C                   Eval      wk_318Found = 'Y'
+     C                   EndIf
+     C                   EndSr
+      *---------------------------------------------------------------------------------------
+     ‚* Update existing TFP318
+     ‚* Update calculations are copied from FG
+      *---------------------------------------------------------------------------------------
+     C     $Upd318       BegSr
+     C     Key318        Chain     TFL318A
+     C                   If        %Found(TFL318A)
+     ‚*
+     ‚* Produced value amount
+     C                   Eval      a1spuam   += vsspuam
+     C                   Eval      a1tpuam   += vstpuam
+     ‚*
+     ‚* Produced pounds
+     C                   Eval      a1spulb   += vsspulb
+     C                   Eval      a1tpulb   += vstpulb
+     ‚*
+     ‚* Produced Start Weight
+     C                   Eval      a1spuslb  += vsspuslb
+     C                   Eval      a1tpuslb  += vstpuslb
+     ‚*
+     ‚* Meat cost amounts
+     C                   Eval      a1spumam  += vsspumam
+     C                   Eval      a1tpumam  += vstpumam
+     ‚*
+     ‚* Labor cost amounts
+     C                   Eval      a1spulam  += vsspulam
+     C                   Eval      a1tpulam  += vstpulam
+     ‚*
+     ‚* Packaging cost amounts
+     C                   Eval      a1spukam  += vsspukam
+     C                   Eval      a1tpukam  += vstpukam
+     ‚*
+     ‚* Ingredient cost amounts
+     C                   Eval      a1spuiam  += vsspuiam
+     C                   Eval      a1tpuiam  += vstpuiam
+     ‚*
+     ‚* Other cost amounts
+     C                   Eval      a1spuoam  += vsspuoam
+     C                   Eval      a1tpuoam  += vstpuoam
+     ‚*
+     ‚* Product cost amounts
+     C                   Eval      a1spupam  += vsspupam
+     C                   Eval      a1tpupam  += vstpupam
+     ‚*
+     ‚* Margin amounts
+     C                   Eval      a1spumgam += vsspumgam
+     C                   Eval      a1tpumgam += vstpumgam
+     ‚*
+     ‚* Aggregate fields
+     C     a1spulb       add       a1tpulb       a1apulb
+     C     a1spuslb      add       a1tpuslb      a1apuslb
+     C     a1spumgam     add       a1tpumgam     a1apumgam
+     C                   Update    REC318A
+     C                   Clear                   REC318A
+     C                   Clear                   VSREC
+     C                   EndIf
+     C                   EndSr
+     ‚* Project-JM-P310149-END
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm list
+      *
+     C     *entry        plist
+     C                   parm                    xxwkpe
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    vsistycd
+     C                   kfld                    wkvolfl
+     ‚* Project-JM-P310149-START
+     C     Key318        klist
+     C                   kfld                    svtfcgcd
+     C                   kfld                    svtfclcd
+     C                   kfld                    svistycd
+     C                   kfld                    wk_ADYR
+     C                   kfld                    wk_ADWK
+     C     Key04         KList
+     C                   KFld                    ADTFCLCD                       TF CLASSIFICATION
+     C                   KFld                    ADISTYCD                       ITEM STRUC TYPE CODE
+     C                   KFld                    ADISGRCD                       ITEM STRUC GROUP COD
+     C                   KFld                    ADISCLCD                       ITEM STRUC CLASS COD
+     ‚* Project-JM-P310149-END
+      *
+     C                   endsr
+      /eject

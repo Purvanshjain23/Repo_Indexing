@@ -1,0 +1,153 @@
+/***************************************************************** */
+/*                                                                 */
+/*  ENVIRONMENT:     PORK DIVISION - MOVED INTO E1IDEVMDL        */
+/*  SYSTEM:          INTERFACE MP2 TO JDE                          */
+/*  PROGRAM NUMBER:  MP301CL                                       */
+/*  PROGRAM NAME:    MP2: DRIVER CL FOR UPLOADING RECEIPTS         */
+/*  PROGRAMMER:      LEANNE FEDOR / ROSE CENTONZE                */
+/*  CREATE DATE:     03/18/02     / 8/18/2020                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL TAKES DATA FROM A PURCHASE ORDER      */
+/*                   RECEIVING FILE ON THE AS400. THIS RECEIVING   */
+/*                   FILE IS BUILT BY THE CORP P.C. STAFF.         */
+/*                                                                 */
+/*  THE FUNCTION:                                                  */
+/*  1) WRITES THE RECEIVING FILE TO A P.O. HEADER/DETAIL FILE      */
+/*  2) PRINTS AN EDIT LISTING OVER THE RECEIVING FILE              */
+/*  3) POSTS RECORDS WITH NO ERRORS INTO JDE                       */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFIED:   01/03/05  BARB GUTIERREZ                            */
+/*                       ADDED THE RETRIEVAL OF THE MEMBER         */
+/*                       DESCRIPTION ON FILE MPP101.  THIS IS THE  */
+/*                       FILE THE SEQUEL SERVER DUMPS INTO EVERY   */
+/*                       NIGHT.  IF THERE ARE NO RECORDS, WE DON'T */
+/*                       WANT TO RUN ANY OF OUR PROCESSES ON THE   */
+/*                       AS/400.                                   */
+/*                                                                 */
+/* 03/12/14  LeAnne Ramsey (E2992)                                 */
+/*           Rewrote to handle multiple companies in a single      */
+/*           environment.                                          */
+/*  8/18/2020 ROSE CENTONZE  P16169                       */
+/*                     FOR E1 -  CREATE RUNLOG WORKFILE E1B9CPP IN QTEMP.    */
+/*                     WILL BE USED TO PUSH THE BATCHES TO E1 AND SEND */
+/*                     THE EMAILS IN PGM E1LRXFR.                             */
+/*******************************************************************/
+
+             PGM
+
+             DCL        VAR(&RCDCNT) TYPE(*DEC) LEN(10 0)
+             DCL        VAR(&ACONO) TYPE(*DEC) LEN(3) VALUE(0)
+
+E1:          DCL        VAR(&RECIP)  TYPE(*CHAR) LEN(30)
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(40) VALUE('MP2 +
+                          Inventory Receipts to JDE')
+             DCL        VAR(&USER)   TYPE(*CHAR) LEN(10)
+             DCL        VAR(&GRPPRF) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&RETRN) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&SOURCE)  TYPE(*CHAR) LEN(25) +
+                          VALUE('Inventory Receipts')
+             DCL        VAR(&BCHDSC) TYPE(*CHAR) LEN(25) VALUE('G/L +
+                          Journal Entry')
+
+/*-------------------------------------------------------------------*/
+/*  Buried in subsequent programs is an error listing that is looking*/
+/*  in the LDA for user print submissions. So, hardcode some values  */
+/*  here in the LDA since this runs off the Job Scheduler.           */
+/*-------------------------------------------------------------------*/
+
+             CHGDTAARA  DTAARA(*LDA (411 1)) VALUE('Y') /* Hold */
+             CHGDTAARA  DTAARA(*LDA (412 1)) VALUE('1') /* Copies */
+             CHGDTAARA  DTAARA(*LDA (413 10)) VALUE(' ') /* Outq */
+             CHGDTAARA  DTAARA(*LDA (86 3)) VALUE('000') /* Company */
+
+             RTVJOBA    USER(&USER)
+             RTVUSRPRF  USRPRF(&USER) GRPPRF(&GRPPRF)
+/*-------------------------------------------------------------------*/
+/*  Retrieve the number of records in the Receiving file. If there   */
+/*  are no records to process, we want to exit the program.          */
+/*-------------------------------------------------------------------*/
+
+             RTVMBRD    FILE(MPP101) NBRCURRCD(&RCDCNT)
+
+             IF         COND(&RCDCNT > 0) THEN(DO)
+
+/*-------------------------------------------------------------------*/
+/* Write the MP2 Receiving file to the PO Header and Detail files    */
+/*-------------------------------------------------------------------*/
+
+             CALL       PGM(MP301)
+
+/*-------------------------------------------------------------------*/
+/* Edit the purchase orders records just received from MP2.          */
+/* Since we have set the Accounting Company value in the LDA to zero,*/
+/* the call here will process all Accounting Companies in this       */
+/* Environment. When MP302CL is called from our on-demand functions, */
+/* we will have set the LDA to a single Accounting Company.          */
+/*-------------------------------------------------------------------*/
+
+             CALL       PGM(MP302CL)
+
+/*-------------------------------------------------------------------*/
+/*  Build a workfile for the posting. I need a workfile since some of*/
+/*  the key fields needed for the posting sequence are in the P.O.   */
+/*  Header file and some are in the P.O. Detail file. In this CL,    */
+/*  I will build the workfile for all companies..the &acono parm is  */
+/*  set to zero.                                                     */
+/*-------------------------------------------------------------------*/
+
+             CRTDUPOBJL OBJ(MPP303) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CALL       PGM(MP303) PARM(&ACONO) /* Company is 0 here */
+
+/*-------------------------------------------------------------------*/
+/* Post Error-free records to JDE for each Accounting Company that   */
+/* is set up in the I.S.-controlled file MPP108...you read the file  */
+/* in program MP3033. Program MPJDE303 is called from MP3033 for     */
+/* each Accounting Company.                                          */
+/*-------------------------------------------------------------------*/
+
+/*-------------------------------------------------------------------*/
+/*  CREATE E1 RUN LOG WORKFILE - TO USER LATER TO PUSH BATCHES TO E1   */
+/*                                                                   */
+             CRTDUPOBJ  OBJ(E1B9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CALL       PGM(MP3033)
+
+/**********************************************************************/
+/*  EXECUTE THE PROGRAM TO READ THE QTEMP RUN LOG HEADER         */
+/*      E1B9CPP AND PUSH THE BATCHES TO E1                      */
+/**********************************************************************/
+ LIVEE1:
+/*                                                                   */
+             CALL       PGM(E1LDXFR) PARM(&RETRN)
+
+/**********************************************************************/
+/*                                                                   */
+/*  Send message to user that the batch is ready in JDE              */
+             IF         COND(&GRPPRF *EQ 'SBDPGMR') THEN(DO)
+             CHGVAR     VAR(&RECIP) VALUE('MP2 E1 TEST')
+                ENDDO
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+             CHGVAR     VAR(&RECIP) VALUE('MP2 E1')
+                ENDDO
+
+             CALL       PGM(E1LRXFR) PARM(&RETRN &SOURCE &BCHDSC +
+                          &RECIP &SUBJECT)
+             DLTF       FILE(QTEMP/E1B9CP*)
+             MONMSG     MSGID(CPF2105 CPF2125)
+/*-------------------------------------------------------------------*/
+/* Reorg the Receiving File                                          */
+/*-------------------------------------------------------------------*/
+
+             RGZPFM     *LIBL/MPP101
+             MONMSG     MSGID(CPF0000)
+
+             ENDDO
+             ENDPGM
+

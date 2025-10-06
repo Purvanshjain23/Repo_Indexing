@@ -1,0 +1,482 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      ****************************************************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF251 - Sales Timing Allocation
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     03/26/07
+      *
+      * Function:    This program runs in the Weekly Inventory Close.
+      *
+      *              This function:
+      *              1) sums cold carcass pounds for the last 4 weeks
+      *                 calculates an average for SBF, TF and Aggregate for the 4 weeks
+      *                 calculates an SBF and TF 'percent' of the Aggregate
+      *              2) sums inventory values from the Weekly Product Revenue Detail
+      *                 file for the week and tweaks with Product Exception data
+      *              3) calculates Inventory Change Actual amounts for SBF, TF, Aggregate
+      *              4) calculates Inventory Change Allocated Amounts using the Percents
+      *                 from Step 1 and the Inventory Change Amounts from Step 3 above
+      *              5) calculates the "difference" between the Actual and Allocated Amounts
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 04/16/07  LeAnne Ramsey
+      *           Fields were added/changed in the Weekly Product Revenue file.
+      *           Added:   Byproduct Mix Flag
+      *                    Meat Cost Group Code
+      *           Changed: Exclude from Mix Flag     to  Mix Flag
+      *                    Exclude from Volume Flag  to  Volume Flag
+      *                    Capability Flag           to  Inventory Flag
+      *
+      * 05/21/07  LeAnne Ramsey
+      *           We must now break the Inventory Change fields:
+      *              Inventory Change Actual Amount
+      *              Inventory Change Allocated Amount
+      *              Inventory Change Difference Amount
+      *           into Company-Owned and Not-Company Owned.
+      *
+      * 07/05/07  LeAnne Ramsey
+      *           We will no longer being using fields that have already been
+      *           "CoOwned Split". So, we have to "split" first.
+      *
+      * 08/07/07  LeAnne Ramsey
+      *           The users now want to exclude all CoOwned Products from this
+      *           function. So, removed CoOwned fields/logic.
+      *
+      * 08/14/07  LeAnne Ramsey
+      *           Added "Item Type Code" to TFP010.
+      *           For this report, we will include only FG Items.)
+      *
+      * 10/03/07  LeAnne Ramsey
+      *           We will now adjust the Net Product Revenue Amounts and Produced
+      *           Value Amounts with user-entered values for the Week/Item in the
+      *           Product Exception file.
+      *
+      * 01/24/08  LeAnne Ramsey
+      *           Added new file/logic for "Sales Timing Allocation Detail".
+      *           This new file is basically just a snapshot of the data we
+      *           read/used to produce the existing Sales Timing Allocation file.
+      *           We added this new "detail" file because we were unable to "prove"
+      *           the Sales Timing Allocation numbers historically (because the
+      *           source records could be changed after-the-fact).
+      *
+      * 07/07/08  LeAnne Ramsey
+      *           To correspond to the changes that we are making to the TFP019 file,
+      *           we increased the 4 "exception" fields in TFP151 to 15,6:
+      *               TDSEXNPRAM - SBF Excpt Net Prod Rev Amt
+      *               TDSEXPUAM  - SBF Except Prod Value Amt
+      *               TDTEXNPRAM - TF  Excpt Net Prod Rev Amt
+      *               TDTEXPUAM  - TF  Except Prod Value Amt
+      *           So, in this program we added logic to accumulate these amounts into
+      *           15,6 workfield. We then half-adjust them into the regular 11,2
+      *           sized fields that are used in all the other TFS files.
+      *
+      * 09/11/08  LeAnne Ramsey
+      *           Recompile only. Export/Domestic Flag was added to TFP010-
+      *           Weekly Product Revenue Detail file.
+      *
+      * 11/20/08  LeAnne Ramsey
+      *           As a prep for synchronizing the TFS and Meat Cost LDAs, we
+      *           removed the unused LDA fields.
+      *
+      * 12/01/08  LeAnne Ramsey
+      *           File TFP050 was renamed from Cold Carcass Pounds to Kill/Cut Data.
+      *           Fields were added to the file and the 2-letter prefix was changed
+      *           from "CP" to "KC".
+      *
+      * 11/04/10  LeAnne Ramsey (C1138)
+      *           When we have multiple Product Exception records for an Item/Week,
+      *           our z-add logic in the update of the TFP151-Detail records was
+      *           overlaying our record with the value from the last Product Exception
+      *           record.  We will now "add" instead of 'z-add' so that we are
+      *           accumulating instead of overlaying.
+      *
+      * 11/09/17  Danny Nguyen    - R12011-Kill Cut Data for STF
+      *           File TFP050 was changed. Recompile only. No logic change.
+      *
+      * 11/25/17  Danny Nguyen    - R12011A-Weekly Product Revenue
+      *           Recompile only. Added 25 STF fields to TFP010 file.
+      *
+      * 05/17/22  Danny Nguyen  (DO2484 - WI 479 STF Variance Reporting)
+      *           Recompile only. Added 2 STF fields to TFP010 file.
+      *           PRXYPC   - STF STD YIELD %
+      *           PRXPMPPC - STF PUMP %
+      *
+      * 10/10/22  R Centonze   W105621 - Increase price fields to handle > 999.99
+      *                        CHANGE @@ANPRPR TO SIZE 10.6  --> pranprpr tfp010
+      *
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Ftfl050a   if   e           k disk
+      *  Kill/cut data
+      *
+      *
+     Ftfl010a   if   e           k disk
+      *  Weekly product revenue detail (records selected with open query)
+      *
+      *
+     Ftfl019b   if   e           k disk
+      *   Product exceptions
+      *
+      *
+     Ftfp051    o    e           k disk
+      *  Sales Timing Allocation
+      *
+      *
+     Ftfp151    uf a e           k disk
+      *  Sales Timing Allocation Detail
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               d   datfmt(*iso)
+     D wkwedt          s              8  0
+      *
+      *
+      * Workfields
+      *
+     D wkpc            s             15  4
+     D wksexam         s                   like(pesexpuam)
+     D wktexam         s                   like(pesexpuam)
+      *
+      *
+      * Index
+      *
+     D x               s              1  0
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwbdt                 8     15  0
+      *
+     D  ldwedt                29     36  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *************************************************************************************
+      * Mainline
+      *************************************************************************************
+      *
+      * Step 1: Retrieve Cold Carcass Pounds for last 4 weeks
+      *
+     C                   exsr      $carcass
+      *
+      * Step 2: Retrieve for the week:
+      *           a) actual inventory values
+      *           b) product excpetion values
+      *
+     C                   exsr      $actual
+     C                   exsr      $except
+      *
+      * Step 3: Calculate SBF and TF "Allocated" Inventory Values for the week
+      *         Calc: SBD: Aggregate Actual Amount * (SBD Carcass % / 100)
+      *               TF:  Aggregate Actual Amount less SBF Allocated Amount
+      *
+     C                   eval      tasicallam = taaicactam * (tasccpc / 100)
+     C                   eval      taticallam = taaicactam - tasicallam
+      *
+      * Step 4: Calculate SBF and TF "Differences" as:
+      *         Allocated - Actual
+      *
+     C                   eval      tasicdifam = tasicallam - tasicactam
+     C                   eval      taticdifam = taticallam - taticactam
+      *
+     C                   write     tarec
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------------------------------
+      * Retrieve Cold Carcass Pounds for Last 4 Weeks
+      *---------------------------------------------------------------------------------------
+      *
+     C     $carcass      begsr
+      *
+     C     wkwedt        setll     tfl050a
+      *
+     C                   do        4             x                              Do carcass
+     C                   read      tfl050a                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C                   select
+     C                   when      x = 1
+     C                   z-add     kcwedt        tawk1wedt
+     C                   add       kcscclb       taswk1cclb
+     C                   add       kctcclb       tatwk1cclb
+      *
+     C                   when      x = 2
+     C                   z-add     kcwedt        tawk2wedt
+     C                   add       kcscclb       taswk2cclb
+     C                   add       kctcclb       tatwk2cclb
+      *
+     C                   when      x = 3
+     C                   z-add     kcwedt        tawk3wedt
+     C                   add       kcscclb       taswk3cclb
+     C                   add       kctcclb       tatwk3cclb
+      *
+     C                   when      x = 4
+     C                   add       kcscclb       taswk4cclb
+     C                   add       kctcclb       tatwk4cclb
+     C                   endsl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do carcass
+      *
+      * Calculate the 4-week "average" fields:
+      *
+     C                   eval      tas4avcclb = (taswk1cclb + taswk2cclb +
+     C                                       taswk3cclb + taswk4cclb) / 4
+      *
+     C                   eval      tat4avcclb = (tatwk1cclb + tatwk2cclb +
+     C                                       tatwk3cclb + tatwk4cclb) / 4
+      *
+      * Aggregate 4-week average
+      *
+     C     tas4avcclb    add       tat4avcclb    taa4avcclb
+      *
+      * Calculate the Rate that these averages represent and then get them
+      * into percent format.
+      *
+     C                   if        taa4avcclb <> 0                              If agg lbs
+      * Seaboard percent
+      *  Calc: SBF 4-week avg cold carcass lbs / AGG 4-week avg cold carc lbs
+      *
+     C                   eval(h)   wkpc = (tas4avcclb / taa4avcclb) * 100
+     C                   if        wkpc <= 999
+     C                   z-add     wkpc          tasccpc
+     C                   endif
+      *
+      * Triumph percent
+      *  Calc: 100% less SBF percent
+      *
+     C     100           sub       tasccpc       tatccpc
+      *
+     C                   endif                                                  If agg lbs
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------
+      * Retrieve Actual Inventory Values for the Week
+      *-------------------------------------------------------------------------------------
+      *
+      * Process Weekly Product Revenue Detail records for the week where:
+      * (records selected with Open Query)
+      *  1) Item is a Finished Good
+      *  2) Inventory Flag is Yes
+      *  3) Record Exempt Flag is No
+      *  4) CoOwned Flag is No
+      *
+     C     $actual       begsr
+      *
+     C     ldwedt        setll     tfl010a
+      *
+     C                   dou       *in91 = *on                                  Do inventory
+     C     ldwedt        reade     tfl010a                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * Calc:   Ending Inventory Amount
+      *       + Net Product Revenue Amount
+      *       - Produced Value Amount
+      *       - Beginning Inventory Amount
+      *
+      *         Seaboard
+     C                   add       prseiam       tasicactam
+     C                   add       prsnpram      tasicactam
+     C                   sub       prspuam       tasicactam
+     C                   sub       prsbiam       tasicactam
+      *        Triumph
+     C                   add       prteiam       taticactam
+     C                   add       prtnpram      taticactam
+     C                   sub       prtpuam       taticactam
+     C                   sub       prtbiam       taticactam
+      *
+      * Write a Sales Timing Allocation Detail record
+      *
+     C                   exsr      $wrt151
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do inventory
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------
+      * Retrieve Product Exceptions for the Week
+      *-------------------------------------------------------------------------------------
+      *
+      * Read the Product Exception records for the week. Process a record when
+      * the Exception Item is in the Weekly Product Revenue Detail file as:
+      *  1) A Finished Good
+      *  2) Inventory Flag is Yes
+      *  3) Record Exempt Flag is No
+      *  4) CoOwned Flag is No
+      *
+     C     $except       begsr
+      *
+     C                   z-add     0             wksexam
+     C                   z-add     0             wktexam
+      *
+     C     ldwedt        setll     tfl019b
+      *
+     C                   dou       *in91 = *on                                  Do except
+     C     ldwedt        reade     tfl019b                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C     key01         chain     tfl010a                            92
+     C                   if        *in92 = *off
+      *         Seaboard
+     C                   add       pesexnpram    wksexam
+     C                   sub       pesexpuam     wksexam
+      *        Triumph
+     C                   add       petexnpram    wktexam
+     C                   sub       petexpuam     wktexam
+      *
+      * Update the Sales Timing Allocation Detail record
+      *
+     C                   exsr      $upd151
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do except
+      *
+      * Calc amounts
+     C                   add(h)    wksexam       tasicactam
+     C                   add(h)    wktexam       taticactam
+     C                   eval      taaicactam = tasicactam + taticactam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a Sales Timing Allocation Detail record
+      *---------------------------------------------------------------
+      *
+     C     $wrt151       begsr
+      *
+     C                   z-add     prwbdt        tdwbdt
+     C                   z-add     prwedt        tdwedt
+     C                   z-add     pryr          tdyr
+     C                   z-add     prwk          tdwk
+      *
+     C                   z-add     prprcd        tdprcd
+     C                   move      pritycd       tditycd
+     C                   move      prrcexfl      tdrcexfl
+     C                   move      prinvfl       tdinvfl
+     C                   move      prcoownfl     tdcoownfl
+      *
+     C                   move      prtfcgcd      tdtfcgcd
+     C                   move      prtfclcd      tdtfclcd
+     C                   z-add     pristycd      tdistycd
+     C                   z-add     prisclcd      tdisclcd
+     C                   z-add     prisgrcd      tdisgrcd
+      *         Seaboard
+     C                   z-add     prseiam       tdseiam
+     C                   z-add     prsnpram      tdsnpram
+     C                   z-add     prspuam       tdspuam
+     C                   z-add     prsbiam       tdsbiam
+      *        Triumph
+     C                   z-add     prteiam       tdteiam
+     C                   z-add     prtnpram      tdtnpram
+     C                   z-add     prtpuam       tdtpuam
+     C                   z-add     prtbiam       tdtbiam
+      *
+     C                   write     tdrec
+     C                   clear                   tdrec
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Update the Sales Timing Allocation Detail record with the Exception Values
+      *--------------------------------------------------------------------------------------
+      *
+     C     $upd151       begsr
+      *
+     C     key01         chain     tfp151                             92
+     C                   if        *in92 = *off                                 If hit
+      *        Seaboard
+     C                   add       pesexnpram    tdsexnpram
+     C                   add       pesexpuam     tdsexpuam
+      *        Triumph
+     C                   add       petexnpram    tdtexnpram
+     C                   add       petexpuam     tdtexpuam
+      *
+     C                   update    tdrec
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *  none
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    peprcd
+      *
+      *
+      * Set up record fields from the LDA.
+      *
+     C                   z-add     ldwbdt        tawbdt
+     C                   z-add     ldwedt        tawedt
+     C                   z-add     ldyr          tayr
+     C                   z-add     ldwk          tawk
+      *
+      * For extracting the "last" four weeks of Cold Carcass Pounds, find the
+      * Week-Ending Date of the first week that you need to extract.
+      *
+     C                   move      ldwedt        wkisodate
+     C                   subdur    21:*days      wkisodate
+     C                   move      wkisodate     wkwedt
+      *
+     C                   endsr
+      /eject

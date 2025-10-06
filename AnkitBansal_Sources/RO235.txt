@@ -1,0 +1,866 @@
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Resource Optimization
+      * PROGRAM:     RO235
+      * TITLE:       Byproduct-Cap & Blade: 61210 61410 62320 89990+
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     11/03/08
+      *
+      * FUNCTION:    We get some portion of Cap Meat, Blade Meat and Regular Trim when we
+      *              cut up a loin. If we don't do anything, all of the FG byproducts that
+      *              are coded as Regular Trim produced from this process will go into the
+      *              the Regular Trim group (TRGA).
+      *
+      *              The users want the Cap Meat, Blade Meat and Regular Trim for Cap&Blade
+      *              plopped into Special Trim (T72A).
+      *
+      *              We will write 2 exception records in this program:
+      *                 1) Decrease values for Item 61210
+      *                 2) Increase values for Item 61410
+      *
+      ***************************************************************************************
+      * MODIFICATIONS:
+      ***************************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/12/08  LeAnne Ramsey
+      *           The splits were not printing correctly on TF622-Byproduct Mix Adjustment
+      *           Report. Changed logic to populate the Mix Subgroup logic with the Meat
+      *           Cost Group.  Also, changed logic to call RO220 only once.
+      *
+      * 11/21/08  LeAnne Ramsey
+      *           As part of synchronizing the LDAs between the TFS Margin Adjustment Close
+      *           and the Meat Costing, we changed the LDA positions.
+      *
+      * 02/18/10  LeAnne Ramsey
+      *           Damon Ginther had us add new/separate Cap&Blade TRGA/T72A logic; it is in
+      *           new program RO234 which has to be called prior to this program. This program
+      *           will then retrieve the 4 exception records written in RO234 and add the values
+      *           to those that we retrieve from the TFP010 file.
+      *
+      * 02/19/10  LeAnne Ramsey
+      *           Damon Ginther is adding a new product (89998) to the logic. This is causing us
+      *           to change the Yield logic. We must now calc a "weighted" yield that takes both
+      *           89998 and 89999 items into consideration.
+      *           And, Damon G. is adding entire new/addtional T72A/TRGA logic for Cap&Blade. This
+      *           new logic is in new program (RO234). We call RO234 from the Initialization
+      *           subroutine here so that it will pass back values that we need for our modified
+      *           calcs in this program.
+      *
+      * 03/03/10  LeAnne Ramsey
+      *           Added checks for divide-by-zero errors.
+      *
+      * 08/15/11  LeAnne Ramsey (E1699)
+      *           Damon Ginther has added a new Cap Item: 89997. It will have the same
+      *           percentages as existing Item 89999.
+      *
+      * 03/08/12  LeAnne Ramsey (E1984)
+      *           Recompile only.
+      *           Added 6 new Skirt Meat Allocation Flag fields to ROP100.
+      *
+      * 03/29/12  LeAnne Ramsey (E1983)
+      *           Damon Ginther wants to replace the weekly logic for Item 61210 with
+      *           logic for 720/713/713 (see $weekly). AND, he says the Amount calc in
+      *           $increase has been wrong since the beginning. It should be using the
+      *           packaging/labor values from 61210 (now 720/713/713) instead of the
+      *           packaging/labor values from Item 61410.  AND, he says the LBS calc in
+      *           $increase has been wrong since the the beginning, it should be using
+      *           wktlb and wkslb instead of svtlb and svslb.
+      *
+      * 05/01/12  LeAnne Ramsey (E2078)
+      *           There is a new Item 89990 (for Japan). Damon G. wants it treated just
+      *           like 89997/89999.
+      *
+      * 01/20/14  LeAnne Ramsey (E2985)
+      *           Damon Ginther has added 8 new Cap&Blade Items; so, I have added hardcoding
+      *           for them. The next time he has more, I need to come up with some other way!
+      *
+      * 11/14/17  Danny Nguyen  (R12011A-Weekly Product Revenue)
+      *           Recompile only. Added 25 STF fields to TFP010 file.
+      *
+      * 05/17/22  Danny Nguyen  (DO2484 - WI 479 STF Variance Reporting)
+      *           Recompile only. Added 2 STF fields to TFP010 file.
+      *           PRXYPC   - STF STD YIELD %
+      *           PRXPMPPC - STF PUMP %
+      *
+      * W105621 RMC 10/10/2022 INCREASE FIELD SIZES TO HANDLE PRICES > 999.99
+      *         CHANGE @@ANPRPR TO SIZE 10.6
+      *           CHANGES PRANPRPR IN TFP010
+      *
+      *
+      /EJECT
+      ***************************************************************************************
+      * FILE SPECIFICATION
+      ***************************************************************************************
+      *
+     fomfarel1  if   e           k disk
+      *  Product class
+      *
+      *
+     Frop100    if   e           k disk
+      *  Resource optimization header
+      *
+      *
+     ftfp010    if   e           k disk
+      *  Weekly product revenue detail
+      *
+      *
+     ftfl010h   if   e           k disk    rename(prrec:prrech) prefix(p1)
+      *  Weekly product revenue detail
+      *
+      *
+     ftfp019    o    e           k disk
+      *  TF Product exceptions
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Save fields
+      *
+     D svslb           s                   like(pesexpulb)
+     D svtlb           s                   like(petexpulb)
+      *
+      *
+      * Workfields
+      *
+     D wkprcd          s                   like(prprcd)
+     D wkistycd        s                   like(pristycd)
+     D wkisgrcd        s                   like(prisgrcd)
+     D wkisclcd        s                   like(prisclcd)
+      *
+     D wk210pulb       s                   like(prspulb)
+     D wk210puam       s                   like(prspuam)
+     D wk210kam        s             15  6
+     D wk210lam        s             15  6
+     D wk210pr         s             15 12
+     D wk210kco        s             15 12
+     D wk210lco        s             15 12
+      *
+     D wkbldspulb      s                   like(pesexpulb)
+     D wkbldtpulb      s                   like(pesexpulb)
+     D wkcapspulb      s                   like(pesexpulb)
+     D wkcaptpulb      s                   like(pesexpulb)
+      *
+     D wksrate         s                   like(prypc)
+     D wktrate         s                   like(prypc)
+      *
+     D wkslb           s                   like(pesexpulb)
+     D wktlb           s                   like(petexpulb)
+      *
+     D wkapulb         s                   like(prapulb)
+     D wklb            s                   like(prapulb)
+      *
+     D wksam           s                   like(pesexpuam)
+     D wktam           s                   like(petexpuam)
+      *
+     D wk951lb         s                   like(prapulb)
+     D wk953lb         s                   like(prapulb)
+     D wk955lb         s                   like(prapulb)
+      *
+     D wk83354lb       s                   like(prapulb)
+     D wk83356lb       s                   like(prapulb)
+     D wk83357lb       s                   like(prapulb)
+      *
+     D wk89990lb       s                   like(prapulb)
+      *
+     D wk89995lb       s                   like(prapulb)
+     D wk89996lb       s                   like(prapulb)
+     D wk89997lb       s                   like(prapulb)
+     D wk89998lb       s                   like(prapulb)
+     D wk89999lb       s                   like(prapulb)
+      *
+     D wkcbcm1rt       s                   like(prypc)
+     D wkcbcm2rt       s                   like(prypc)
+     D wkcbcl1rt       s                   like(prypc)
+     D wkcbbm1rt       s                   like(prypc)
+     D wkcaprt         s                   like(prypc)
+     D wkregrt         s                   like(prypc)
+      *
+      *
+      * Parms
+      *
+     D xxsn            s              7  0
+     D xxpfcd          s              1
+      *
+     D xxcapspulb      s                   like(pesexpulb)
+     D xxcaptpulb      s                   like(pesexpulb)
+     D xxbldspulb      s                   like(pesexpulb)
+     D xxbldtpulb      s                   like(pesexpulb)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwedt                29     36  0
+      *
+     D  ldcono                82     84  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      **********************************************************************************
+      * Mainline
+      **********************************************************************************
+      *
+      * Retrieve Weekly Product Revenue Data for specific Items and Item Structures.
+      *
+     C                   exsr      $weekly
+      *
+      * Calculate the Weighted Average Percents to use in calculating the Yield%.
+      * Then, calculate a Seaboard and Triumph Yield %.
+      *
+     C                   exsr      $wgtavg
+     C                   exsr      $yield
+      *
+      * Calculate/Write the "decreasing" record:
+      * (Note: We perform the Decrease logic prior to the Increase logic because the
+      *        Pounds calc'd in the Decrease logic are saved/used in the Increase logic.)
+      *
+     C                   exsr      $decrease
+      *
+      * Calculate/Write the "increasing" record
+      *
+     C                   exsr      $increase
+      *
+      * Call the program to write the Product Exception records to the ByProduct
+      * Detail file.
+     C                   call      'RO220'
+     C                   parm                    xxsn
+      *
+      * EOF processing
+     C                   seton                                        lr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Retrieve Weekly Product Revenue Data
+      *-------------------------------------------------------------------------------
+      *
+      * We perform this "weekly" logic for 1 Item Structure and 13 Items.
+      *
+      * Item Structure:
+      *   720/713/713 (Until March 2012, this was for Item 61210 - Pork Trim Regular Combo)
+      * Items: 951, 953, 955, 83354, 83356, 83357, 89990, 89995, 89996, 89997, 89998, 89999
+      *
+     C     $weekly       begsr
+      *
+      *---------------------------
+      * ITEM structure 720/713/713
+      *---------------------------
+      * Accumulate for the week and then calculate:
+      *    1) Standard Packaging Cost/Lb
+      *    2) Standard Labor Cost/Lb
+      *    3) Produced Value Price/Lb
+      *
+     C                   z-add     720           wkistycd
+     C                   z-add     713           wkisgrcd
+     C                   z-add     713           wkisclcd
+      *
+     C     key04         setll     tfl010h
+     C                   dou       *in91 = *on                                  Do loop
+     C     key04         reade     tfl010h                                91
+     C                   if        *in91 = *off                                 If not EOF
+     C                   add       p1prspulb     wk210pulb
+     C                   add       p1prtpulb     wk210pulb
+     C                   add       p1prspuam     wk210puam
+     C                   add       p1prtpuam     wk210puam
+     C                   eval      wk210kam = wk210kam +
+     C                                        (p1prspulb * p1prkco) +
+     C                                        (p1prtpulb * p1prkco)
+     C                   eval      wk210lam = wk210lam +
+     C                                        (p1prspulb * p1prlco) +
+     C                                        (p1prtpulb * p1prlco)
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+     C                   if        wk210pulb <> 0
+     C                   eval(h)   wk210pr  = wk210puam / wk210pulb
+     C                   eval(h)   wk210kco = wk210kam  / wk210pulb
+     C                   eval(h)   wk210lco = wk210lam  / wk210pulb
+     C                   endif
+      *
+      *
+      *---------------------------------------
+      * ITEM: 62320-Pork Loin Blade Meat Combo
+      *---------------------------------------
+      *    Retrieve SBD/TF Produced Pounds
+      *
+     C                   z-add     62320         wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   z-add     prspulb       wkbldspulb
+     C                   z-add     prtpulb       wkbldtpulb
+     C                   endif
+      *
+      *
+      *---------------------------------------
+      * Item 89999-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     89999         wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   z-add     prspulb       wkcapspulb
+     C                   z-add     prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk89999lb
+     C                   endif
+      *
+      *
+      *---------------------------------------
+      * Item 89998-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     89998         wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk89998lb
+     C                   endif
+      *
+      *---------------------------------------
+      * Item 89997-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     89997         wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk89997lb
+     C                   endif
+      *
+      *---------------------------------------
+      * Item 89996-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     89996         wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk89996lb
+     C                   endif
+      *
+      *
+      *---------------------------------------
+      * Item 89995-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     89995         wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk89995lb
+     C                   endif
+      *
+      *---------------------------------------
+      * Item 89990-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     89990         wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk89990lb
+     C                   endif
+      *
+      *---------------------------------------
+      * Item 83357-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     83357         wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk83357lb
+     C                   endif
+      *
+      *---------------------------------------
+      * Item 83356-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     83356         wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk83356lb
+     C                   endif
+      *
+      *---------------------------------------
+      * Item 83354-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     83354         wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk83354lb
+     C                   endif
+      *
+      *---------------------------------------
+      * Item 955-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     955           wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk955lb
+     C                   endif
+      *
+      *
+      *---------------------------------------
+      * Item 953-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     953           wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk953lb
+     C                   endif
+      *
+      *---------------------------------------
+      * Item 951-Pork Boneless Loin Cap Meat
+      *---------------------------------------
+      *    Retrieve the SBD/TF Produced Pounds
+      *    Save the Produced Pounds for the weighted average calc
+      *
+     C                   z-add     951           wkprcd
+     C     key01         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   add       prspulb       wkcapspulb
+     C                   add       prtpulb       wkcaptpulb
+     C     prspulb       add       prtpulb       wk951lb
+     C                   endif
+      *
+      * NOW, for our decrease/increase calcs, we need to add the cap and blade pounds retrieved
+      * here to the values returned from program RO234...which we called in the Initialization
+      * subroutine. (Here, Damon G. is reducing the Produced Pounds by the Exception Pounds.)
+      *
+     C                   add       wkcapspulb    xxcapspulb
+     C                   add       wkcaptpulb    xxcaptpulb
+     C                   add       wkbldspulb    xxbldspulb
+     C                   add       wkbldtpulb    xxbldtpulb
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------
+      * Calc the weighted average percents to use in calculating the Yield %
+      *--------------------------------------------------------------------------------
+      *
+      * We use the CapBlade Yield Percents for the hardcoded Cap/Blade Items (retrieved in the
+      * Initialization subroutine from the Resource Optimization Header) to come up
+      * with our "weighted average" percents.
+      *
+     C     $wgtavg       begsr
+      *
+      * We will calc a Cap Meat Rate and a Regular Trim Rate.
+      *
+     C                   z-add     0             wkcaprt
+     C                   z-add     0             wkregrt
+      *
+      * Calc the Cap Meat weighted average using the Aggregate Produced Lbs
+      * and the respective retrieved Cap Meat Percents.
+      *
+     C                   eval      wkapulb =
+     C                             wk89999lb + wk89998lb + wk89997lb +
+     C                             wk89996lb + wk89995lb + wk89990lb +
+     C                             wk83357lb + wk83356lb + wk83354lb +
+     C                             wk955lb   + wk953lb   + wk951lb
+      *
+     C                   if        wkcbcm2rt <> 0
+     C                   eval(h)   wk89998lb = wk89998lb / wkcbcm2rt
+     C                   eval(h)   wk83356lb = wk83356lb / wkcbcm2rt
+     C                   endif
+      *
+     C                   if        wkcbcm1rt <> 0
+     C                   eval(h)   wk89999lb = wk89999lb / wkcbcm1rt
+     C                   eval(h)   wk89997lb = wk89997lb / wkcbcm1rt
+     C                   eval(h)   wk89996lb = wk89996lb / wkcbcm1rt
+     C                   eval(h)   wk89995lb = wk89995lb / wkcbcm1rt
+     C                   eval(h)   wk89990lb = wk89990lb / wkcbcm1rt
+     C                   eval(h)   wk83357lb = wk83357lb / wkcbcm1rt
+     C                   eval(h)   wk83354lb = wk83354lb / wkcbcm1rt
+     C                   eval(h)   wk955lb   = wk955lb   / wkcbcm1rt
+     C                   eval(h)   wk953lb   = wk953lb   / wkcbcm1rt
+     C                   eval(h)   wk951lb   = wk951lb   / wkcbcm1rt
+     C                   endif
+      *
+     C                   eval      wklb =
+     C                             wk89999lb + wk89998lb + wk89997lb +
+     C                             wk89996lb + wk89995lb + wk89990lb +
+     C                             wk83357lb + wk83356lb + wk83354lb +
+     C                             wk955lb   + wk953lb   + wk951lb
+     C                   if        wklb <> 0
+     C                   eval(h)   wkcaprt = wkapulb / wklb
+     C                   endif
+      *
+      * Calc the Reg Trim rate as the value left over out of 100%.
+      *  Regular Trim = 1 - Cap Meat Rate - Blade Meat Rate - Cut Loss Rate
+      *
+     C                   eval      wkregrt = 1 - wkcaprt
+     C                                         - wkcbbm1rt - wkcbcl1rt
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Calculate a Seaboard and a Triumph Yield Rate
+      *-------------------------------------------------------------------------------
+      *
+     C     $yield        begsr
+      *
+      * Seaboard
+     C                   select
+     C                   when      wkcapspulb = 0 and wkbldspulb = 0
+     C                   z-add     0             wksrate
+      *
+     C                   when      wkcapspulb > wkbldspulb
+     C                   eval      wksrate = wkregrt + wkcbbm1rt
+     C                   other
+      *
+     C                   eval      wksrate = wkregrt + wkcaprt
+     C                   endsl
+      *
+      * Triumph
+     C                   select
+     C                   when      wkcaptpulb = 0 and wkbldtpulb = 0
+     C                   z-add     0             wktrate
+      *
+     C                   when      wkcaptpulb > wkbldtpulb
+     C                   eval      wktrate = wkregrt + wkcbbm1rt
+     C                   other
+      *
+     C                   eval      wktrate = wkregrt + wkcaprt
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Calculate the values for the "decreasing" record
+      *-------------------------------------------------------------------------------
+      *
+      * This logic calculates the dollars/pounds to take away from
+      * Item 61210-Pork Trim Regular Combo (Meat Cost Group TRGA)
+      *
+     C     $decrease     begsr
+      *
+     C                   eval      peexcom = 'Split to 61410 Cap&Blade'
+     C                   z-add     61210         peprcd
+      *
+     C                   z-add     0             wkslb
+     C                   z-add     0             wktlb
+     C                   z-add     0             wksam
+     C                   z-add     0             wktam
+      * Pounds
+      *         Seaboard
+     C                   select
+     C                   when      wkcapspulb = 0 and wkbldspulb = 0
+      *
+     C                   when      wkcapspulb > wkbldspulb
+     C                   if        wkcaprt <> 0
+     C                   eval(h)   wkslb = (((xxcapspulb / wkcaprt) * wksrate) -
+     C                                     xxbldspulb) * -1
+     C                   endif
+      *
+     C                   other
+     C                   if        wkcbbm1rt <> 0
+     C                   eval(h)   wkslb = (((xxbldspulb/wkcbbm1rt)* wksrate)
+     C                                     - xxcapspulb) * -1
+     C                   endif
+     C                   endsl
+      *
+     C                   z-sub     wkslb         svslb
+      *
+      *         Triumph
+     C                   select
+     C                   when      wkcaptpulb = 0 and wkbldtpulb = 0
+      *
+     C                   when      wkcaptpulb > wkbldtpulb
+     C                   if        wkcaprt <> 0
+     C                   eval(h)   wktlb = (((xxcaptpulb / wkcaprt) * wktrate) -
+     C                                     xxbldtpulb) * -1
+     C                   endif
+      *
+     C                   other
+     C                   if        wkcbbm1rt <> 0
+     C                   eval(h)   wktlb = (((xxbldtpulb/wkcbbm1rt) * wktrate)
+     C                                     - xxcaptpulb) * -1
+     C                   endif
+     C                   endsl
+      *
+     C                   z-sub     wktlb         svtlb
+      * Amount
+      *         Seaboard
+     C                   eval(h)   wksam = (wkslb * wk210pr) -
+     C                                     (wkslb * (wk210kco + wk210lco))
+      *
+      *         Triumph
+     C                   eval(h)   wktam = (wktlb * wk210pr) -
+     C                                     (wktlb * (wk210kco + wk210lco))
+      *
+      *
+      * If you have pounds and/or amount:
+      *   1) Write a Product Exception record
+      *
+     C                   if        wkslb <> 0 or wksam <> 0 or
+     C                             wktlb <> 0 or wktam <> 0
+     C                   exsr      $wrt019
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Calculate the values for the "increasing" record
+      *-------------------------------------------------------------------------------
+      *
+      * This logic calculates the dollars/pounds to give to
+      * Item 61410-Pork Trim Special Lean Combo (Meat Cost Group T72A)
+      *
+     C     $increase     begsr
+      *
+     C                   eval      peexcom = 'Trfr from 61210 Cap&Blade'
+     C                   z-add     61410         peprcd
+      *
+     C                   z-add     0             wkslb
+     C                   z-add     0             wktlb
+     C                   z-add     0             wksam
+     C                   z-add     0             wktam
+      * Pounds
+      *         Seaboard
+     C                   select
+     C                   when      wkcapspulb = 0 and wkbldspulb = 0
+      *
+     C                   when      wkcapspulb > wkbldspulb
+     C                   if        wkcaprt <> 0
+     C                   eval(h)   wkslb=svslb +
+     C                                   ((xxcapspulb/wkcaprt) * wkcbcl1rt)
+     C                   endif
+      *
+     C                   other
+     C                   if        wkcbbm1rt <> 0
+     C                   eval(h)   wkslb=svslb +
+     C                                   ((xxbldspulb/wkcbbm1rt) * wkcbcl1rt)
+     C                   endif
+     C                   endsl
+      *
+      *         Triumph
+     C                   select
+     C                   when      wkcaptpulb = 0 and wkbldtpulb = 0
+      *
+     C                   when      wkcaptpulb > wkbldtpulb
+     C                   if        wkcaprt <> 0
+     C                   eval(h)   wktlb=svtlb +
+     C                                  ((xxcaptpulb/wkcaprt) * wkcbcl1rt)
+     C                   endif
+      *
+     C                   other
+     C                   if        wkcbbm1rt <> 0
+     C                   eval(h)   wktlb=svtlb +
+     C                                   ((xxbldtpulb/wkcbbm1rt) * wkcbcl1rt)
+     C                   endif
+     C                   endsl
+      *
+      * Amount
+      *         Seaboard
+     C                   eval(h)   wksam = (wkslb * wk210pr) -
+     C                                     (wkslb * (wk210kco + wk210lco))
+      *         Triumph
+     C                   eval(h)   wktam = (wktlb * wk210pr) -
+     C                                     (wktlb * (wk210kco + wk210lco))
+      *
+      * If you have pounds and/or amount:
+      *   1) Write a Product Exception record
+      *
+     C                   if        wkslb <> 0 or wksam <> 0 or
+     C                             wktlb <> 0 or wktam <> 0
+     C                   exsr      $wrt019
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------
+      * Write a Product Exception record
+      *-------------------------------------------------------------------------------
+      *
+     C     $wrt019       begsr
+      *
+      * Hardcoded values
+     C                   move      'Y'           pesysfl
+     C                   eval      pepgm = sdpgm
+      * LDA values
+     C                   z-add     ldyr          peyr
+     C                   z-add     ldwk          pewk
+     C                   z-add     ldwedt        pewedt
+      *
+     C                   z-add     xxsn          pepesn
+      *
+      * Retrieve various values for this Item from the Revenue Detail file
+      *
+     C                   exsr      $rtv010
+      *
+      * Retrieve Description for Item Structure Class Code.
+      *
+     C     peisclcd      chain     omfarel1                           92
+     C                   if        *in92 = *off
+     C                   eval      peisclds = fadetx
+     C                   endif
+      *
+      * Pounds and Amounts
+     C                   z-add     wkslb         pesexpulb
+     C                   z-add     wksam         pesexpuam
+      *
+     C                   z-add     wktlb         petexpulb
+     C                   z-add     wktam         petexpuam
+      *
+     C                   write     perec
+     C                   clear                   perec
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------
+      * Retrieve the various values from the Weekly Product Revenue Detail file
+      *-----------------------------------------------------------------------------------
+      *
+     C     $rtv010       begsr
+      *
+      * Key values:
+      *  Product Code
+      *  WeekEnding Date
+      *
+     C     key02         chain     tfp010                             92
+     C                   if        *in92 = *off
+     C                   move      prvolfl       pevolfl
+     C                   move      prtfclcd      petfclcd
+     C                   move      prtfcgcd      petfcgcd
+     C                   move      prcgcd        pecgcd
+     C                   move      prcgcd        pesgcd
+     C                   move      prmixfl       pemixfl
+     C                   movel     pritycd       peitycd
+     C                   z-add     pristycd      peistycd
+     C                   z-add     prisgrcd      peisgrcd
+     C                   z-add     prisclcd      peisclcd
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    wkprcd
+     C                   kfld                    ldwedt
+      *
+     C     key02         klist
+     C                   kfld                    peprcd
+     C                   kfld                    ldwedt
+      *
+     C     key03         klist
+     C                   kfld                    ldcono
+     C                   kfld                    ldwedt
+      *
+     C     key04         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    wkistycd
+     C                   kfld                    wkisgrcd
+     C                   kfld                    wkisclcd
+      *
+      * Retrieve the CapBlade Yield %s from the Resource Optimization Header
+      *
+     C     key03         chain     rop100                             92
+     C                   if        *in92 = *off
+     C                   eval      wkcbcm1rt = ohcbcm1pc / 100
+     C                   eval      wkcbcm2rt = ohcbcm2pc / 100
+     C                   eval      wkcbcl1rt = ohcbcl1pc / 100
+     C                   eval      wkcbbm1rt = ohcbbm1pc / 100
+     C                   endif
+      *
+      * Call the program to create the T72A/TRGA exceptions.
+      * This program passes back values that we will use here in this program.
+      *
+     C                   call      'RO234'
+     C                   parm      0             xxcapspulb
+     C                   parm      0             xxcaptpulb
+     C                   parm      0             xxbldspulb
+     C                   parm      0             xxbldtpulb
+      *
+      *
+      * Get a Product Exception Number  (system-assigned)
+      * (We will use a single number for both exception records).
+      *
+     C                   call      'TF810'
+     C                   parm      ldpfcd        xxpfcd
+     C                   parm      0             xxsn
+      *
+     C                   endsr
+      /eject

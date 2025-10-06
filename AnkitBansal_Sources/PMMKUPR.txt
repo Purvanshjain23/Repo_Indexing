@@ -1,0 +1,359 @@
+     Y* ADDLIBLE LIB(DLY029) POSITION(*LAST)
+     Y* ADDLIBLE LIB(COMMON) POSITION(*LAST)
+     Y* ADDLIBLE LIB(JRDATA) POSITION(*LAST)
+     **
+     **  Environment: Pork Division
+     **  System:      OMS
+     **  Program:     EXU Cnv Dailys A/R     UP
+     **  Programmer:  Tim Adams
+     **  Created:     8/20/07
+     **
+     **  Function:    Using the Invoice files provided by Dailys, generate A/R Summary and
+     **               A/R Header records in OMS. This program will be called immediately
+     **               after the customer conversion and will be called for Missoula and
+     **               Salt Lake separately.
+     **
+     **  Method:      Read the A/R Balance file for the specific company and validate the
+     **               invoice number. If ok then write records to the A/R Summary and A/R
+     **               Header file in OMS.
+     **
+     **  Parameters:  Return Code - 7 char
+     **               Company Code - 3 numeric (363 = Missoula & 364 = Slat Lake)
+     **
+     **  Input Files:     JRARBAL   :   Dailys A/R Balance file
+     **                   CSTMSTL1  :   Daily Cust for Conversion (By Daily's Cust #)
+     **                   CSTSLSL1  :   Salesman Codes Mapping
+     **
+     **  Output Files:    ARBDCPP   :   A/R Header
+     **
+     **************************************************************************************
+     ** MODIFICATIONS:
+     **************************************************************************************
+     **
+     **************************************************************************************
+      * FILE SPECIFICATIONS
+     **************************************************************************************
+     FJRARBAL   IF   E             DISK
+      *  JRD Accounts Receivable - 363   Format : JRARBA      (Missoula - 363)
+      *
+     FCSTMSTL1  IF   E           K DISK    RENAME(CSTMST:CSTMSL1)
+      *  Daily Cust by Daily Cust #   K: DLYCST
+      *
+     FCSTSLSL1  IF   E           K DISK
+      *  Salesman Codes Mapping     K: SLSNUM
+      *
+      *
+     FARBDCPL0  O    E           K DISK
+      *  OMS A/R Header         K: Comp, Inv #, Inv Suff (BDAIC3,BDCONB,BDCEST)   Format : @BDCPFG
+      *
+     FQPRINT    O    F  132        PRINTER OFLIND(*INOF)
+      *  Audit Report
+      /EJECT
+     **************************************************************************************
+      * DEFINITION SPECIFICATIONS
+     **************************************************************************************
+      *
+      *------------------------------------------------------------------------------------
+      *  Standalone fields
+      *------------------------------------------------------------------------------------
+     D P_Company       S              3  0
+     D Comp_Name       S             11
+     D Inv_Increment   S              7  0 INZ(9000000)
+     D Inv_1_ch        S              1
+     D Inv_2_ch        S              2
+     D Inv_3_ch        S              3
+     D Inv_4_ch        S              4
+     D Inv_5_ch        S              5
+     D Inv_6_ch        S              6A
+     D Inv_#_len       S              2  0
+      *
+     D Time_Report     S               T   TIMFMT(*HMS:)
+     D Date_Report     S               D   DATFMT(*MDY/)
+     D Date_ISO        S               D   DATFMT(*ISO)
+     D Inv_Date_Rep    S               D   DATFMT(*MDY/)
+     D Job_Dat_YMD     S              6  0
+     D Job_Dat_CYMD    S              7  0
+     D Tot_AR_read     S              7  0
+     D Tot_AR_writ     S              7  0
+      *
+     D Error_msg       S             42
+      *------------------------------------------------------------------------------------
+      *  Named Constants
+      *------------------------------------------------------------------------------------
+     D W_ARBDCPP       C                   'Error writing to A/R Header file - +
+     D                                      ARBDCPP'
+     D NF_CSTSLS       C                   ' not found on Salesman map (CSTSLS)'
+     D INV_INVOICE     C                   'Invalid Invoice Nbr'
+     **************************************************************************************
+      * Data Structures
+     **************************************************************************************
+      *
+      *------------------------------------------------------------------------------------
+      * Standard program status data structure
+      *------------------------------------------------------------------------------------
+      * Externally defined as UTPGFR (record format: PGMDSR)
+     DPGMDS          ESDS                  EXTNAME(UTPGFR)
+      *
+      *
+     **************************************************************************************
+      * Mainline
+     **************************************************************************************
+      *
+      *  Initialization and housekeeping.
+      *
+     C                   EXSR      S999
+      *                  ----      ----
+      *
+      *  Read A/R Balance records from Daily's and write them to OMS
+     C                   READ      JRARBAL                                91
+    šC                   DOW       *IN91 = *OFF
+      *  Format and write A/R data to OMS
+     C                   EXSR      S001
+     C                   READ      JRARBAL                                91
+    šC                   ENDDO
+      *
+     C                   EXCEPT    Jrbal_Tot
+      *
+     C                   EXCEPT    End_of_Rep
+      *
+     C                   SETON                                        LR
+      *
+     **************************************************************************************
+      *          S001 - Format and write A/R data to OMS
+     **************************************************************************************
+     C     S001          BEGSR
+      *
+     C                   EVAL      Tot_AR_read = Tot_AR_read + 1
+     C                   EVAL      BDAIC3 = P_Company
+      *
+      *  Invoice number is 6 alpha in Daily's and 7 numeric in OMS.
+      *  In some cases it is non standard, so the following rules apply to the way the
+      *  number will be disected.
+      *  Records with Invoice numbers that contain any characters will be rejected.
+      *
+     C     ' 0123456789' CHECK     INVPRT                                 50
+    šC                   IF        *IN50 = *ON
+     C                   EVAL      Error_msg = INV_INVOICE
+     C                   MOVE      DATE          Date_ISO
+     C                   MOVE      Date_ISO      Inv_Date_Rep                   Transaction Date
+     C                   EXSR      S009
+     C                   GOTO      SKIP_001
+    šC                   ELSE
+      *  Right justify and move to Invoice number
+     C                   EVAL      Inv_#_len = %CHECKR(' ':INVPRT)
+     C                   EVAL      Inv_6_ch = *BLANKS
+    ‚C                   SELECT
+    ‚C                   WHEN      Inv_#_len = 0 or Inv_#_len = 6
+     C                   EVAL      Inv_6_ch = INVPRT
+    ‚C                   WHEN      Inv_#_len = 1
+     C                   EVAL      Inv_1_ch = %SUBST(INVPRT:1:1)
+     C                   MOVE      Inv_1_ch      Inv_6_ch
+    ‚C                   WHEN      Inv_#_len = 2
+     C                   EVAL      Inv_2_ch = %SUBST(INVPRT:1:2)
+     C                   MOVE      Inv_2_ch      Inv_6_ch
+    ‚C                   WHEN      Inv_#_len = 3
+     C                   EVAL      Inv_3_ch = %SUBST(INVPRT:1:3)
+     C                   MOVE      Inv_3_ch      Inv_6_ch
+    ‚C                   WHEN      Inv_#_len = 4
+     C                   EVAL      Inv_4_ch = %SUBST(INVPRT:1:4)
+     C                   MOVE      Inv_4_ch      Inv_6_ch
+    ‚C                   WHEN      Inv_#_len = 5
+     C                   EVAL      Inv_5_ch = %SUBST(INVPRT:1:5)
+     C                   MOVE      Inv_5_ch      Inv_6_ch
+    ‚C                   ENDSL
+     C                   TESTN                   Inv_6_ch             5051
+    ˜C                   IF        *IN50 = *ON or *IN51 = *ON
+     C                   MOVE(P)   Inv_6_ch      BDCONB                         Invoice Number
+    ˜C                   ELSE
+     C                   EVAL      Error_msg = INV_INVOICE
+     C                   MOVE      DATE          Date_ISO
+     C                   MOVE      Date_ISO      Inv_Date_Rep                   Transaction Date
+     C                   EXSR      S009
+     C                   GOTO      SKIP_001
+    ˜C                   ENDIF
+    šC                   ENDIF
+      *
+    šC                   IF        BAL < 0
+      *  If the invoice number is 4 digits then it is a Credit Memo
+     C                   IF        BDCONB > 999 and BDCONB < 10000
+     C                   EVAL      BDCEST = 'CM'                                Invoice Suffix
+     C                   EVAL      BDUHCD = 'CRM'                               Adjustment Type Code
+     C                   ELSE
+     C                   EVAL      BDCEST = 'OA'                                Invoice Suffix
+     C                   EVAL      BDUHCD = 'OA '                               Adjustment Type Code
+     C                   ENDIF
+     C                   EVAL      BDBGVA = BAL * -1                            Remaining Bal Due
+    šC                   ELSE
+     C                   EVAL      BDCEST = 'IN'                                Invoice Suffix
+     C                   EVAL      BDUHCD = 'INV'                               Adjustment Type Code
+     C                   EVAL      BDBGVA = BAL                                 Remaining Bal Due
+     C                   EVAL      BDaova = cred * -1                           Remaining Bal Due
+    šC                   ENDIF
+      *
+     C                   EVAL      BDBSVA = DEB                                 Transaction Amount
+      *  Balance moved in case stmt above
+     C                   EVAL      BDAJST = 'O'                                 A/R Processing Sts
+     C                   EVAL      BDE3ST = 'O'                                 Purge Status
+     C                   EVAL      BDG4CD = 'UMB'                               Bank Code
+     C                   EVAL      BDCAC7 = BDCONB                              Order Nbr Ref
+      *
+     C     CUST          CHAIN     CSTMSTL1                           80        Daily's Customers
+    šC                   IF        *IN80 = *OFF
+     C                   EVAL      BDBKC7 = SHIPTO                              Ship-to Customer
+     C                   EVAL      BDANC7 = BILLTO                              A/R Customer Number
+    šC                   ELSE
+      * waiting on instruction as to whether we should not write the record if we
+      * can't get the customer number.
+     C                   EVAL      BDBKC7 = *ZEROS
+     C                   EVAL      BDANC7 = *ZEROS
+    šC                   ENDIF
+      *
+      *  Use Salesman code from JRARBAL to go to Salesman Route mapping file CSTSLS
+     C     SLSMAN        CHAIN     CSTSLSL1                           80        Salesman Codes Map
+    šC                   IF        *IN80 = *OFF
+     C                   MOVE      SBDNUM        BDBCCD                         Salesperson Code
+     C                   MOVE      SBDNUM        BDR4CD                         Sales Route Code
+    šC                   ELSE
+     C                   EVAL      Error_msg = SLSMAN + NF_CSTSLS
+     C                   MOVE      DATE          Date_ISO
+     C                   MOVE      Date_ISO      Inv_Date_Rep                   Transaction Date
+     C                   EXSR      S009
+     C                   EVAL      BDBCCD = *BLANKS
+     C                   EVAL      BDR4CD = *BLANKS
+    šC                   ENDIF
+     C
+      *
+     C                   MOVE      DATE          Date_ISO
+     C     *CYMD         MOVE      Date_ISO      BDB4DT                         Transaction Date
+      *
+     C                   ADDDUR    7:*Days       Date_ISO
+     C     *CYMD         MOVE      Date_ISO      BDATDT                         Due Date
+      *
+     C                   MOVE      OLTRAN        Date_ISO
+     C     *CYMD         MOVE      Date_ISO      BDH0DT                         Last Payment Date
+      *
+     C                   WRITE     @BDCPFG                              90
+     C                   IF        *IN90 = *ON
+     C                   EVAL      Error_msg = W_ARBDCPP
+     C                   MOVE      DATE          Date_ISO
+     C                   MOVE      Date_ISO      Inv_Date_Rep                   Transaction Date
+     C                   EXSR      S009
+     C                   ELSE
+     C                   EVAL      Tot_AR_writ = Tot_AR_writ + 1
+     C                   ENDIF
+      *
+     C     SKIP_001      TAG
+     C                   ENDSR
+      *
+     **************************************************************************************
+      *          S999 - Initialization & Housekeeping
+     **************************************************************************************
+      *
+     C     S999          BEGSR
+      *
+      *  Entry Parameters
+     C     *ENTRY        PLIST
+     C                   PARM                    P0RTN             7
+     C                   PARM                    P_Company
+      *
+     C                   IF        P_Company = 363
+     C                   EVAL      Comp_Name = '(Missoula)'
+     C                   ELSE
+     C                   EVAL      Comp_Name = '(Salt Lake)'
+     C                   ENDIF
+      *
+      *  Set record stamp and all other defaults that will be consistent on all records
+      *  of a specific file.
+      *
+     C     SDSDT         MULT      10000.01      Job_Dat_YMD
+     C                   EVAL      Job_Dat_CYMD = 1000000 + Job_Dat_YMD
+     C                   EVAL      BDAATM = SDSTM
+     C                   EVAL      BDAYNA = SDUSR
+     C                   EVAL      BDA0NA = SDJOB
+     C                   EVAL      BDAXDT = Job_Dat_CYMD
+      *
+     C                   TIME                    $TIME12          12 0
+     C                   MOVEL     $TIME12       $TIME6            6 0
+     C                   MOVE      $TIME6        Time_Report
+     C                   MOVE      UDATE         Date_Report
+      *
+     C                   EXCEPT    Heading
+     C                   EXCEPT    Heading_2
+      *
+     C                   ENDSR
+      *
+     **************************************************************************************
+      *          S009 - Write an Error Message to the report
+     **************************************************************************************
+     C     S009          BEGSR
+      *
+      *  Handle overflow here
+     C                   IF        *INOF = *ON
+     C                   EXCEPT    Heading
+     C                   EXCEPT    Heading_2
+     C                   ENDIF
+      *
+     C                   EXCEPT    Detail_2
+      *
+     C                   ENDSR
+     **************************************************************************************
+      *          Report Layout
+     **************************************************************************************
+      *
+     OQPRINT    E            Heading           2
+     O                                            8 'PMMKUPR'
+     O                                           64 'Convert Daily A/R Invoice'
+     O                                           72 's to OMS'
+     O                       Date_Report        120
+     O                       Time_Report        130
+      *
+     O          E            Heading     1
+     O                                          117 'Page:'
+     O                       PAGE               125
+      *
+      *
+     O          E            Heading_2   3
+     O                                           28 ' ---- JRARBAL Record being'
+     O                                           42 'processed for'
+     O                       P_Company           46
+     O                       Comp_Name           59
+     O                                           64 '----'
+     O          E            Heading_2   3
+     O                                           10 'Invoice #'
+     O                                           24 'Daily Cust #'
+     O                                           37 'OMS Ship-to'
+     O                                           50 'OMS Bill-to'
+     O                                           60 'Salesman'
+     O                                           76 'Balance'
+     O                                           86 'Inv Date'
+     O                                          105 'Error Description'
+     O          E            Heading_2   1  1
+     O                                           10 '_________'
+     O                                           24 '____________'
+     O                                           37 '___________'
+     O                                           50 '___________'
+     O                                           60 '________'
+     O                                           76 '_______'
+     O                                           86 '________'
+     O                                          105 '_________________'
+      *
+     O          E            Detail_2    1
+     O                       INVPRT               8
+     O                       CUST          Z     22
+     O                       BDBKC7        Z     35
+     O                       BDANC7        Z     48
+     O                       SLSMAN              57
+     O                       BAL           J     76
+     O                       Inv_Date_Rep        86
+     O                       Error_msg      B   130
+      *
+     O          E            Jrbal_Tot   2
+     O                                           37 'Number of JRARBAL records'
+     O                                           43 ' read:'
+     O                       Tot_AR_read   JB    53
+     O                                           83 'Number of records written'
+     O                                           95 ' to ARBDCPP:'
+     O                       Tot_AR_writ   JB   105
+      *
+     O          E            End_of_Rep  3
+     O                                           77 '***  End of Report ***'

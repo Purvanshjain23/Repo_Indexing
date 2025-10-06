@@ -1,0 +1,959 @@
+     Y* ADDLIBLE LIB(DLY029) POSITION(*LAST)
+     Y* ADDLIBLE LIB(COMMON) POSITION(*LAST)
+     Y* ADDLIBLE LIB(JRDATA) POSITION(*LAST)
+     Y* OVRDBF FILE(LABINST364) TOFILE(DFDATA/LABINST) MBR(LABINST)
+     **
+     **  Environment: Pork Division
+     **  System:      OMS
+     **  Program:     EXU Conv Daily's to OMS UP
+     **  Programmer:  Tim Adams
+     **  Created:     7/19/07
+     **
+     **  Function:    Using the files provided by Daily's convert the data into the OMS files.
+     **               The JDE Address, Customer and Vendor files will also be populated by this
+     **               program via a call.
+     **
+     **  Method:      The CSTMST file is a list of the Customers to be brought into OMS and
+     **               it will act as the primary file for this program. Supporting data from
+     **               the Dailys Customer Master, Customer Extension and Customer Address files
+     **               is required. OMS/JDE records will not be written when there are not found
+     **               conditions on the reads to these files.
+     **
+     **  Input Files:     CSTMSTL2  :   Daily Cust for Conversion (By Parent, Bill to, Ship to)
+     **                   JRCUSTS   :   Daily Customer Master
+     **                   JRCUSTEX  :   Daily Customer Extension
+     **                   CSTADRL1  :   Daily Customer New Address
+     **                   JRTAXID   :   Customer Tax ID
+     **                   CSTCNTL1  :   Country Codes Mapping
+     **                   CSTSLSL1  :   Salesman Codes Mapping
+     **                   CSTFRTL1  :   Customer Freight
+     **                   CSTMSTL1  :   Daily Cust for Conversion (By Daily's Cust #)
+     **                   CSTZNEL1  :   Shipping Zone Cross-Reference
+     **                   LABINST   :   JRD Customer Label Instruction
+     **
+     **  Update Files:    PDLUREP   :   Destination-Zone
+     **
+     **  Output Files:    CABBREP   :   Customer
+     **                   PDNEREP   :   Customer EXT
+     **                   PDM3REP   :   Customer Fax
+     **                   CAEOREP   :   Company Customer
+     **                   ARBCREP   :   A/R Summary
+     **                   PMA4REP   :   Company Customer Comment
+     **
+     **************************************************************************************
+     ** MODIFICATIONS:
+     **************************************************************************************
+     **
+     **************************************************************************************
+      * FILE SPECIFICATIONS
+     **************************************************************************************
+      *
+     FCSTMSTL2  IF   E           K DISK
+      *  Daily Cust for Conv     K: PARENT, BILLTO, SHIPTO
+      *
+     FJRCUSTS   IF   E           K DISK
+      *  Daily Customer Master    K: CUST
+      *
+     FJRCUSTEX  IF   E           K DISK
+      *  Daily Customer Extension     K: CUST
+      *
+     FCSTADRL1  IF   E           K DISK
+      *  Daily Customer New Addresses   K: DLYCST
+      *
+     FJRTAXID   IF   E           K DISK
+      *  Customer Tax ID     K: CUST
+      *
+     FCSTCNTL1  IF   E           K DISK
+      *  Country Codes Mapping     K: CUST
+      *
+     FCSTFRTL1  IF   E           K DISK
+      *  Customer Freight           K: CUST
+      *
+     FCSTSLSL1  IF   E           K DISK
+      *  Salesman Codes Mapping     K: SLSNUM
+      *
+     FCSTZNEL1  IF   E           K DISK    RENAME(VIEWFMT:CSTZNER)
+      *  Shipping Zone Cross-Reference     K: Territory (TERR)
+      *
+     FCSTMSTL1  IF   E           K DISK    RENAME(CSTMST:CSTMSL1)
+      *  Daily Cust by Daily Cust #   K: DLYCST
+      *
+     FLABINST   IF   E           K DISK
+      *  Company Customer Comment - Missoula (363)      K: CUST
+      *
+     FLABINST364IF   E           K DISK    RENAME(LABIN:LABIN364)
+      *  Company Customer Comment - Salt Lake (364)      K: CUST
+      *
+      *
+     FPDLUREL0  UF A E           K DISK
+      *  OMS Destination-Zone    K: Company, State, City (AIC3,BGCD,XECD)     Format : @LUREQL
+      *
+     FCABBREL0  O    E           K DISK
+      *  OMS Customer      K: Ship to Customer (BBBKC7)    Format : @BBREE8
+      *
+     FPDNEREL0  O    E           K DISK
+      *  OMS Customer EXT  K: Ship to Customer (BBBKC7)    Format : @NEREAS
+      *
+     FPDM3REL0  O    E           K DISK
+      *  OMS Customer Fax     K: Ship to Cust, Fax App Code (M3BKC7, M3A0AA)  Format : @M3REZD
+      *
+     FCAEOREL0  O    E           K DISK
+      *  OMS Company Customer   K: Comp, Customer (EOAIC3, EOBKC7)  Format : @EOREXL
+      *
+     FARBCREL0  O    E           K DISK
+      *  OMS A/R Summary        K: Comp, A/R Cust # (BCAIC3,BCANC7)    Format : @BCREFD
+      *
+     FARBDCPL0  O    E           K DISK
+      *  OMS A/R Header         K: Comp, Inv #, Inv Suff (BDAIC3,BDCONB,BDCEST)   Format : @BDCPFG
+      *
+     FPMA4REL0  O    E           K DISK
+      *  Comp Cust Comment    K: Comp, Ship-to, Comm Type, Seq #.      Format : @A4REKF
+      *
+     FQPRINT    O    F  132        PRINTER OFLIND(*INOF)
+      *  Audit Report
+      /EJECT
+     **************************************************************************************
+      * DEFINITION SPECIFICATIONS
+     **************************************************************************************
+      *
+      *------------------------------------------------------------------------------------
+      *  Standalone fields
+      *------------------------------------------------------------------------------------
+      *
+     D Saved_Parent    S                   LIKE(PARENT)
+     D Saved_Billto    S                   LIKE(BILLTO)
+     D New_Cust_#      S                   LIKE(BBBKC7)
+     D Cust_type       S              1                                         P, B, S
+     D Country_6       S              6
+     D Phone_a         S             10
+     D Fax_a           S             10
+     D Apphone_a       S             10
+     D Apext_a         S              5
+     D Zip_7_char      S              7
+     D Read_count      S              5  0
+     D Parent_proc     S              5  0
+     D Bill_to_proc    S              5  0
+     D Ship_to_proc    S              5  0
+     D Parent_writ     S              5  0
+     D Bill_to_writ    S              5  0
+     D Ship_to_writ    S              5  0
+     D Tot_rec_writ    S              5  0
+     D JDE_rec_writ    S              5  0
+     D Dest_Zn_writ    S              5  0
+     D Cust_Char_7     S              7
+     D Report_Section  S              1    INZ('C')
+     D Company_name    S              9
+     D Return_code     S              7
+     D Z_File_Batch    S             15
+      *
+     D Job_Dat_YMD     S              6  0
+     D Job_Dat_CYMD    S              7  0
+     D Century         S              2  0
+     D Time_Report     S               T   TIMFMT(*HMS:)
+     D Date_Report     S               D   DATFMT(*MDY/)
+     D Date_ISO        S               D   DATFMT(*ISO)
+      *
+     D Error_msg       S             60
+     D JDE_Call        S             54
+      *
+      *------------------------------------------------------------------------------------
+      *  Named Constants
+      *------------------------------------------------------------------------------------
+      *
+     D W_CABBREP       C                   'Error writing to Customer file - CA+
+     D                                      BBREP'
+     D W_PDNEREP       C                   'Error writing to Customer EXT file +
+     D                                      - PDNEREP'
+     D W_PDM3REP       C                   'Error writing to Customer Fax file +
+     D                                       - PDM3REP'
+     D W_CAEOREP       C                   'Error writing to Company Customer f+
+     D                                      ile - CAEOREP'
+     D W_ARBCREP       C                   'Error writing to A/R Summary file -+
+     D                                       ARBCREP'
+     D NF_JRCUSTS      C                   'Record not found on JRCUSTS'
+     D NF_CSTSLS       C                   ' not found on Salesman map (CSTSLS)'
+     D NF_JRCUSTEX     C                   'Record not found on JRCUSTEX'
+     D NF_CSTADR       C                   'Record not found on CSTADR'
+     D NF_CSTCNT       C                   ' not found on Country map (CSTCNT)'
+     D W_PDLUREP       C                   'Error writing to Dest-Zone file - +
+     D                                      PDLUREP'
+     D CALL_JDE_BAD    C                   'Error on call to JDE Batch Upload -+
+     D                                       see job log'
+     D CALL_JDE_OK     C                   'JDE Batch Upload called look for re+
+     D                                      ps R01110Z & R0110Z'
+     **************************************************************************************
+      * Data Structures
+     **************************************************************************************
+      *
+      *------------------------------------------------------------------------------------
+      * Standard program status data structure
+      *------------------------------------------------------------------------------------
+      * Externally defined as UTPGFR (record format: PGMDSR)
+     DPGMDS          ESDS                  EXTNAME(UTPGFR)
+      *
+      *
+      /EJECT
+     **************************************************************************************
+      * Mainline
+     **************************************************************************************
+      *
+      *  Initialization and housekeeping.
+      *
+     C                   EXSR      S999
+      *                  ----      ----
+      *
+      *  Read CSTMST by Parent, Bill-to and Ship-to. On each break in Parent and Bill-to
+      *  write Customer records and also write a Customer record for each Ship-to.
+      *
+     C                   READ      CSTMSTL2                               91
+    šC                   DOW       *IN91 = *OFF
+      *
+     C                   ADD       1             Read_count
+      *
+     C                   IF        PARENT <> Saved_Parent
+     C                   EVAL      New_Cust_# = PARENT
+     C                   EVAL      Cust_type = 'P'
+     C                   ADD       1             Parent_proc
+     C                   EXSR      S002
+     C                   ENDIF
+      *
+     C                   IF        BILLTO <> Saved_Billto
+     C                   EVAL      New_Cust_# = BILLTO
+     C                   EVAL      Cust_type = 'B'
+     C                   ADD       1             Bill_to_proc
+     C                   EXSR      S002
+     C                   ENDIF
+      *
+     C                   EVAL      New_Cust_# = SHIPTO
+     C                   EVAL      Cust_type = 'S'
+     C                   ADD       1             Ship_to_proc
+     C                   EXSR      S002
+      *
+     C
+     C                   EVAL      Saved_Parent = PARENT
+     C                   EVAL      Saved_Billto = BILLTO
+      *
+     C                   READ      CSTMSTL2                               91
+    šC                   ENDDO
+      *
+      *  Call JD Edwards Batch Address Book Upload program
+     C                   EXSR      S003
+      *
+      *  Call Program to Update JDE Relationships and set Phone type to Fax for Fax numbers
+     C                   EXSR      S004
+      *
+     C                   EVAL      Tot_rec_writ = Parent_writ + Bill_to_writ +
+     C                              Ship_to_writ
+     C                   EXCEPT    End_of_Rep
+      *
+     C                   SETON                                        LR
+      *
+      /EJECT
+     **************************************************************************************
+      * Subroutines
+     **************************************************************************************
+      *
+     **************************************************************************************
+      *          S999 - Initialization & Housekeeping
+     **************************************************************************************
+      *
+     C     S999          BEGSR
+      *
+      *  Entry Parameters
+     C     *ENTRY        PLIST
+     C                   PARM                    P0RTN             7
+      *
+      *  Key list for Destination-Zone
+      *
+     C     LUKY01        KLIST
+     C                   KFLD                    LUAIC3
+     C                   KFLD                    LUBGCD
+     C                   KFLD                    LUXECD
+      *
+      *  Set record stamp and all other defaults that will be consistent on all records
+      *  of a specific file.
+      *
+     C     SDSDT         MULT      10000.01      Job_Dat_YMD
+     C                   EVAL      Job_Dat_CYMD = 1000000 + Job_Dat_YMD
+     C                   EVAL      BBAATM = SDSTM
+     C                   EVAL      BBAYNA = SDUSR
+     C                   EVAL      BBA0NA = SDJOB
+     C                   EVAL      BBAXDT = Job_Dat_CYMD
+     C                   EVAL      NEAATM = SDSTM
+     C                   EVAL      NEAYNA = SDUSR
+     C                   EVAL      NEA0NA = SDJOB
+     C                   EVAL      NEAXDT = Job_Dat_CYMD
+     C                   EVAL      EOAATM = SDSTM
+     C                   EVAL      EOAYNA = SDUSR
+     C                   EVAL      EOA0NA = SDJOB
+     C                   EVAL      EOAXDT = Job_Dat_CYMD
+     C                   EVAL      BCAATM = SDSTM
+     C                   EVAL      BCAYNA = SDUSR
+     C                   EVAL      BCA0NA = SDJOB
+     C                   EVAL      BCAXDT = Job_Dat_CYMD
+     C                   EVAL      LUVSST = 'A'
+     C                   EVAL      LUAATM = SDSTM
+     C                   EVAL      LUAYNA = SDUSR
+     C                   EVAL      LUA0NA = SDJOB
+     C                   EVAL      LUAXDT = Job_Dat_CYMD
+     C                   EVAL      A4VSST = 'A'
+     C                   EVAL      A4MJDT = Job_Dat_CYMD
+     C                   EVAL      A4BETM = SDSTM
+     C                   EVAL      A4CCVN = SDUSR
+     C                   EVAL      A4CDVN = SDPGM
+      *
+     C                   TIME                    $TIME12          12 0
+     C                   MOVEL     $TIME12       $TIME6            6 0
+     C                   MOVE      $TIME6        Time_Report
+     C                   MOVE      UDATE         Date_Report
+      *
+     C                   EXCEPT    Heading
+     C                   EXCEPT    Heading_1
+      *
+      * Setup Batch number to pass on to the Z-file creation program
+     C                   EVAL      Z_File_Batch = %CHAR($TIME12)
+      *
+     C                   ENDSR
+      *
+     **************************************************************************************
+      *          S002 - Write a Customer and associated records
+     **************************************************************************************
+      *
+     C     S002          BEGSR
+      *
+      *  Gather further data for multiple output files
+      *
+     C     DLYCST        CHAIN     JRCUSTS                            80        JRD Customer Master
+     C                   IF        *IN80 = *ON
+     C                   EVAL      Error_msg = NF_JRCUSTS                       ERROR
+     C                   EXSR      S009
+      *  Dont normally use GOTO's but this code may need to be removed so this is cleaner
+     C                   GOTO      SKIP_002
+     C                   ELSE
+      *  Use Salesman code from JRCUSTS to go to Salesman Route mapping from CSTSLS
+     C     SLSMAN        CHAIN     CSTSLSL1                           80        Salesman Codes Map
+     C                   IF        *IN80 = *ON
+     C                   EVAL      Error_msg = SLSMAN + NF_CSTSLS
+     C                   EXSR      S009
+     C                   EVAL      SBDNUM = *ZEROS                              ERROR
+     C                   ENDIF
+     C                   ENDIF
+      *
+     C     DLYCST        CHAIN     JRCUSTEX                           80        Customer Extension
+     C                   IF        *IN80 = *ON
+     C                   EVAL      Error_msg = NF_JRCUSTEX
+     C                   EXSR      S009
+     C                   GOTO      SKIP_002
+     C                   ENDIF
+      *
+     C     DLYCST        CHAIN     CSTADRL1                           80        Daily New Cust Addr
+     C                   IF        *IN80 = *ON
+     C                   EVAL      Error_msg = NF_CSTADR
+     C                   EXSR      S009
+     C                   GOTO      SKIP_002
+     C                   ENDIF
+      *
+     C     DLYCST        CHAIN     JRTAXID                            80        Customer Tax ID
+     C                   IF        *IN80 = *ON
+     C                   EVAL      TAXID = *BLANKS
+     C                   ENDIF
+      *
+     C     TERR          CHAIN     CSTZNEL1                           80        Shipping Code X-ref
+     C                   IF        *IN80 = *ON
+     C                   EVAL      SHPZNE = *BLANKS
+     C                   ENDIF
+      *
+      *  Move the Cognos Country (30) to a 6 alpha for chain to Country Code Mapping
+     C                   EVAL      Country_6 = DCCTRY
+     C     Country_6     CHAIN     CSTCNTL1                           80        Customer Tax ID
+     C                   IF        *IN80 = *ON
+     C                   EVAL      NEWCNT = *BLANKS                             ERROR
+     C                   EVAL      Error_msg = Country_6 + ' ' + NF_CSTCNT
+     C                   EXSR      S009
+     C                   ENDIF
+      *
+    šC                   IF        Cust_type = 'S'
+     C     DLYCST        CHAIN     CSTFRTL1                           80        Customer Freight
+     C                   IF        *IN80 = *ON
+     C                   EVAL      FRTMSLA = *ZEROS
+     C                   EVAL      FRTSLC = *ZEROS
+     C                   ENDIF
+    šC                   ENDIF
+      *
+      *
+      *------------------------------------------------------------------------------------
+      *  Format and write Customer - CABBREP
+      *
+     C                   EVAL      BBBKC7 = New_Cust_#
+    šC                   IF        Cust_type = 'P' or Cust_type = 'B'
+     C                   EVAL      BBAYTX = CSTNME
+     C                   EVAL      BBACNA = BTNEWAD1
+     C                   EVAL      BBADNA = BTNEWAD2
+     C                   EVAL      BBAENA = BTNEWAD3
+     C                   EVAL      BBAJNA = BTNEWCTY
+     C                   EVAL      BBBGCD = BTNEWST
+     C                   EVAL      Zip_7_char = %CHAR(BTNEWZIP)                 Zip is 7 numeric
+     C                   MOVEL(P)  Zip_7_char    BBBTTX
+     C                   EVAL      BBRJST = 'N'
+    šC                   ELSE
+     C                   EVAL      BBAYTX = STNEWNME
+     C                   EVAL      BBACNA = STNEWAD1
+     C                   EVAL      BBADNA = STNEWAD2
+     C                   EVAL      BBAENA = STNEWAD3
+     C                   EVAL      BBAJNA = STNEWCTY
+     C                   EVAL      BBBGCD = STNEWST
+     C                   MOVEL(P)  STNEWZIP      BBBTTX
+     C                   EVAL      BBRJST = 'Y'
+    šC                   ENDIF
+     C                   EVAL      BBG5CD = *BLANKS                             CountyCode
+    šC                   IF        PHONE > 0
+     C                   MOVE      PHONE         Phone_a
+     C                   EVAL      BBBVTX = %SUBST(Phone_a:1:3) + '-' +
+     C                                       %SUBST(Phone_a:4:3) + '-' +
+     C                                        %SUBST(Phone_a:7:4)
+    šC                   ELSE
+     C                   EVAL      BBBVTX = *BLANKS
+    šC                   ENDIF
+    šC                   IF        FAX > 0
+     C                   MOVE      FAX           Fax_a
+     C                   EVAL      BBBWTX = %SUBST(Fax_a:1:3) + '-' +
+     C                                       %SUBST(Fax_a:4:3) + '-' +
+     C                                        %SUBST(Fax_a:7:4)
+    šC                   ELSE
+     C                   EVAL      BBBWTX = *BLANKS
+    šC                   ENDIF
+     C                   EVAL      BBABTX = *BLANKS                             AlphaSearch
+      *  Per note from Purva on 8/8/07 Taxid now goes to NEW0TX
+     C                   EVAL      BBA2NA = *BLANKS
+     C                   EVAL      BBCBST = 'Y'
+     C                   EVAL      BBB0NA = *BLANKS                             SIC Number
+     C                   EVAL      BBP3NB = *ZEROS                              D&B Number
+     C                   EVAL      BBAXNA = *BLANKS                             D&B Rating
+     C                   EVAL      BBI6DT = *ZEROS                              Date of D&B Rating
+     C                   EVAL      BBAYDT = 1071231
+     C                   EVAL      BBANC7 = BILLTO
+     C                   EVAL      BBBTC7 = PARENT
+     C                   EVAL      BBK6ST = 'N'                                 Cred Check A/R Cust
+     C                   EVAL      BBUZST = 'Y'                                 Cred Chk Parent Cust
+     C                   EVAL      BBKXCD = NEWCNT
+     C                   EVAL      BBLTCD = 'N'                                 EDI Status Code
+     C                   EVAL      BBQNST = 'N'                                 Order Entry Hold
+    šC                   IF        DLYCST = 13060000
+    šC                              OR DLYCST = 48320000
+    šC                              OR DLYCST = 54600000
+     C                   EVAL      BBS2NB = *ZEROS
+    šC                   ELSE
+     C                   EVAL      BBS2NB = 1000000.00
+    šC                   ENDIF
+     C                   EVAL      BBVHVA = *ZEROS                              A/R Credit Limit
+     C                   EVAL      BBI7DT = *ZEROS                              Order Entry Hld Date
+      *   Ship to Customer flag moved in case statement ealier
+     C                   EVAL      BBRKST = *BLANKS                             Secured Terms Flag
+     C                   EVAL      BBQWST = 'N'                                 Email When Ord Ships
+    šC                   IF        Cust_type = 'B'
+     C                   EVAL      BBQXST = 'Y'                                 Print Invoice Status
+    šC                   ELSE
+     C                   EVAL      BBQXST = 'N'                                 Print Invoice Status
+    šC                   ENDIF
+     C                   EVAL      BBQYST = 'N'                                 Item Ref Status
+     C                   EVAL      BBUNCS = 'W'                                 Stmt Print Freq
+     C                   EVAL      BBUVST = *BLANKS                             EDI Status 1
+     C                   EVAL      BBUWST = *BLANKS                             EDI Status 2
+     C                   EVAL      BBUXST = *BLANKS                             EDI Status 3
+     C                   EVAL      BBVSST = 'A'                                 Record Status
+      *
+     C                   WRITE     @BBREE8                              90
+    šC                   IF        *IN90 = *ON
+     C                   EVAL      Error_msg = W_CABBREP
+     C                   EXSR      S009
+      *  If initial Customer write fails, don't write any recs for this customer
+     C                   GOTO      SKIP_002
+    šC                   ELSE
+     C                   SELECT
+     C                   WHEN      Cust_type = 'P'
+     C                   ADD       1             Parent_writ
+     C                   WHEN      Cust_type = 'B'
+     C                   ADD       1             Bill_to_writ
+     C                   WHEN      Cust_type = 'S'
+     C                   ADD       1             Ship_to_writ
+     C                   ENDSL
+    šC                   ENDIF
+     C
+      *------------------------------------------------------------------------------------
+      *
+      *  Format and write Customer EXT - PDNEREP
+      *
+      *
+     C                   EVAL      NEBKC7 = New_Cust_#
+     C                   EVAL      NEUFTX = *BLANKS                             Internet Password
+     C                   EVAL      NEUGTX = EMAIL
+     C                   MOVE      New_Cust_#    Cust_Char_7
+     C                   EVAL      NEPFNA = 'A' + Cust_Char_7                   Email User ID
+     C                   EVAL      NEJ5NX = *BLANKS                             EDI Trad Partner No
+     C                   EVAL      NEU5TX = *BLANKS                             EDI Cust Duns Nbr
+     C                   EVAL      NEU6TX = *BLANKS                             EDI Warehse/Store No
+     C                   EVAL      NEW0TX = TAXID                               State Tax ID
+     C                   EVAL      NEHSSX = 'F'                                 Cust Ship Temp C/F
+     C                   EVAL      NEHUSX = 'N'                                 One Invoice Per PO
+     C                   EVAL      NEHVSX = *BLANKS                             EDI Acknowledgements
+     C                   EVAL      NEAAC8 = New_Cust_#                          Cust G/L Vendor Nbr
+     C                   EVAL      NEP0SX = 'N'                                 Air Freight Orders
+     C                   EVAL      NEP1SX = *BLANKS                             Reg Mgr Fax/Email
+     C                   EVAL      NEP2SX = *BLANKS                             Cust Unused Sts 3
+     C                   EVAL      NEP3SX = 'EC'                                Cust TF Exempt Code
+     C                   EVAL      NEP4SX = *BLANKS                             Cust Unused Sts 5
+     C                   EVAL      NEP5SX = *BLANKS                             Cust Sales Region
+     C                   EVAL      NEP6SX = *BLANKS                             Cust Unused Sts 7
+     C                   EVAL      NEUVST = *BLANKS                             EDI Status 1
+     C                   EVAL      NEUWST = *BLANKS                             EDI Status 2
+     C                   EVAL      NEUXST = *BLANKS                             EDI Status 3
+     C                   EVAL      NEVSST = 'A'                                 Record Status
+      *
+     C                   WRITE     @NEREAS                              90
+    šC                   IF        *IN90 = *ON
+     C                   EVAL      Error_msg = W_PDNEREP
+     C                   EXSR      S009
+    šC                   ENDIF
+      *------------------------------------------------------------------------------------
+      *
+      *  Format and write Customer Fax  -  PDM3REP
+      *
+    šC                   IF        Cust_type = 'S'
+     C                   EVAL      M3BKC7 = New_Cust_#
+     C                   EVAL      M3A0AA = *BLANKS                             Fax Application Code
+     C                   EVAL      M3HXNX = *BLANKS                             Buyer Fax Number
+     C                   EVAL      M3TFTX = BUNAME                              Buyer Fax Name
+     C                   EVAL      M3HYNX = *BLANKS                             Field Rep Fax Number
+     C                   EVAL      M3TGTX = *BLANKS                             Field Rep Fax Name
+     C                   EVAL      M3HZNX = *BLANKS                             Fax Number 3
+     C                   EVAL      M3THTX = *BLANKS                             Fax Contact Name 3
+     C                   EVAL      M3D7T1 = *BLANKS                             Fax Number 4
+     C                   EVAL      M3D8T1 = *BLANKS                             Fax Contact Name 4
+     C                   EVAL      M3D9T1 = *BLANKS                             Fax Number 5
+     C                   EVAL      M3EAT1 = *BLANKS                             Fax Contact Name 5
+     C                   EVAL      M3FISX = *BLANKS                             Fax Unused Sts 1
+     C                   EVAL      M3FJSX = *BLANKS                             Fax Unused Sts 2
+     C                   EVAL      M3FKSX = *BLANKS                             Fax Unused Sts 3
+     C                   EVAL      M3FLSX = *BLANKS                             Fax Unused Sts 4
+     C                   EVAL      M3FMSX = *BLANKS                             Fax Unused Sts 5
+     C                   EVAL      M3VSST = 'A'                                 RecordStatus
+     C                   EVAL      M3MJDT = Job_Dat_CYMD                        Create Date
+     C                   EVAL      M3BETM = SDSTM                               Create Time
+     C                   EVAL      M3CCVN = SDUSR                               Create User
+     C                   EVAL      M3CDVN = SDPGM                               Create Program
+     C                   EVAL      M3MKDT = *ZEROS                              Change Date
+     C                   EVAL      M3BFTM = *ZEROS                              Change Time
+     C                   EVAL      M3CEVN = *BLANKS                             Change User
+     C                   EVAL      M3CFVN = *BLANKS                             Change Program
+      *
+     C                   WRITE     @M3REZD                              90
+    šC                   IF        *IN90 = *ON
+     C                   EVAL      Error_msg = W_PDM3REP
+     C                   EXSR      S009
+    šC                   ENDIF
+      *
+    šC                   ENDIF
+      *------------------------------------------------------------------------------------
+      *
+      *  Format and write 363 & 364 Company Customer -  CAEOREP
+      *
+      *  Fields common to both
+     C                   EVAL      EOAIC3 = 363                                 Company Number
+     C                   EVAL      EOBKC7 = New_Cust_#                          Ship To Customer
+     C                   EVAL      EOAQCD = '01'                                TermsCode
+     C                   MOVE      SBDNUM        EOR4CD                         Sales Route Code
+     C                   EVAL      EOBYNA = *BLANKS                             Spec Instruct 2
+     C                   EVAL      EOB6NA = *BLANKS                             Spec Instruct
+     C                   EVAL      EOBZNA = *BLANKS                             Carrier Code
+     C                   EVAL      EOLLST = 'N'                                 Broker
+     C                   EVAL      EOPPST = 'Y'                                 PO Required Flag
+      * SAZ 10/11/07 default del by and after time
+     C                   EVAL      EOR5NB = 600                                 Deliv after time
+     C                   EVAL      EOR6NB = 600                                 Deliv before time
+    šC                   IF        DCEXPO = 'Y'
+     C                   EVAL      EOBOCD = 'EX'                                TypeCode
+    šC                   ELSE
+     C                   IF        DCRETA = 'F'
+     C                   EVAL      EOBOCD = 'FS'                                TypeCode
+     C                   ELSE
+     C                   EVAL      EOBOCD = 'RT'                                TypeCode
+     C                   ENDIF
+    šC                   ENDIF
+     C                   EVAL      EOTBNB = *ZEROS                              Abs Freight Rate
+     C                   EVAL      EOMTCU = *ZEROS                              Mileage To Customer
+     C                   EVAL      EOW2NB = *ZEROS                              Freight Overate Rate
+     C                   EVAL      EORPCD = 'G'                                 Age Code
+     C                   EVAL      EOX9ST = 'N'                                 Outside Warehse Flag
+    šC                   SELECT
+    šC                   WHEN      EOBOCD = 'DS' or EOBOCD = 'RT'
+    šC                              or EOBOCD = 'FS'
+     C                   EVAL      EOT9CD = '1'                                 Customer Group Code
+    šC                   WHEN      EOBOCD = 'FP' or EOBOCD = 'TR'
+     C                   EVAL      EOT9CD = '2'                                 Customer Group Code
+    šC                   ENDSL
+     C                   EVAL      EOUBCD = *BLANKS                             Customer Group Cde 2
+     C                   EVAL      EOISTX = 'ARREGTRD'                          G/L Code
+     C                   EVAL      EOLQCD = 'USD'                               Commodity Market Cde
+     C                   EVAL      EONJNA = APNAME                              Credit Contact Name
+      *  Format phone as 123-456-7890 EXT 12345
+    šC                   IF        APPHON <> *ZEROS
+     C                   MOVE      APPHON        Apphone_a
+     C                   EVAL      EOI0TX = %SUBST(Apphone_a:1:3) + '-' +
+     C                                       %SUBST(Apphone_a:4:3) + '-' +
+     C                                        %SUBST(Apphone_a:7:4)
+    šC                   IF        APEXT <> *ZEROS
+     C                   EVAL      Apext_a = %CHAR(APEXT)
+     C                   EVAL      EOI0TX = %TRIMR(EOI0TX) + ' EXT ' +
+     C                                       %SUBST(Apext_a:1:5)
+    šC                   ENDIF
+    šC                   ELSE
+     C                   EVAL      EOI0TX = *BLANKS
+    šC                   ENDIF
+     C                   EVAL      EONKNA = *BLANKS                             Cred Cont Bus Title
+     C                   EVAL      EOI1TX = *BLANKS                             Cred Cont Fax Number
+     C                   EVAL      EOVLST = 'Y'                                 Allow Man/QtWO/Apprv
+     C                   EVAL      EORLST = 'N'                                 Fax Invoice Flag
+     C                   EVAL      EOMMTX = *BLANKS                             Fax Inv Fax Number
+     C                   EVAL      EOOHNA = *BLANKS                             Fax Inv Cont Name
+    šC                   IF        DCDIST = 'Y'
+     C                   EVAL      EOQ6ST = 'Y'                                 Distributor
+    šC                   ELSE
+     C                   EVAL      EOQ6ST = 'N'                                 Distributor
+    šC                   ENDIF
+     C                   EVAL      EORBST = *BLANKS                             Unused Co/Cust Sts 3
+     C                   EVAL      EOREST = *BLANKS                             Unused Co/Cust Sts 4
+     C                   EVAL      EOUVST = *BLANKS                             EDI Status 1
+     C                   EVAL      EOUWST = *BLANKS                             EDI Status 2
+     C                   EVAL      EOUXST = *BLANKS                             EDI Status 3
+     C                   EVAL      EOVSST = 'A'                                 Record Status
+      *
+      *  Format specific fields for the 363 Company and write a record
+     C                   EVAL      EOAIC3 = 363                                 Company Number
+     C                   EVAL      EOQGST = '1'                                 Alt Remittance Flag
+    šC                   IF        Cust_type = 'S'
+    šC                   IF        frtmsla = 0
+     C                   EVAL      EOTBNB = 0                                   Abs Freight Rate
+     c                   else
+     C                   EVAL      EOTBNB = FRTMSLA * 100                       Abs Freight Rate
+     C* Purva 09/10      EVAL      EOW2NB = FRTMSLA * 100                       Freight Overate Rate
+    šC                   ENDIF
+    šC                   ENDIF
+     C                   EVAL      EOAJCD = 'MSL'                               Warehouse Code
+     C                   EVAL      EOQ8ST = 'N'                                 Default Ship Comp St
+      *
+     C                   WRITE     @EOREXL                              90
+     C                   IF        *IN90 = *ON
+     C                   EVAL      Error_msg = W_CAEOREP
+     C                   EXSR      S009
+     C                   ENDIF
+      *
+      *  Format specific fields for the 364 Company and write a record
+     C                   EVAL      EOAIC3 = 364                                 Company Number
+     C                   EVAL      EOQGST = '2'                                 Alt Remittance Flag
+    šC                   IF        Cust_type = 'S'
+    šC                   IF        frtslc    = 0
+     C                   EVAL      EOTBNB = 0                                   Abs Freight Rate
+     c                   else
+     C                   EVAL      EOTBNB = FRTSLC * 100                        Abs Freight Rate
+     C* Purva 09/10      EVAL      EOW2NB = FRTSLC * 100                        Freight Overate Rate
+    šC                   ENDIF
+    šC                   ENDIF
+     C                   EVAL      EOAJCD = 'SLC'                               Warehouse Code
+     C                   EVAL      EOQ8ST = 'Y'                                 Default Ship Comp St
+      *
+     C                   WRITE     @EOREXL                              90
+     C                   IF        *IN90 = *ON
+     C                   EVAL      Error_msg = W_CAEOREP
+     C                   EXSR      S009
+     C                   ENDIF
+      *
+      *------------------------------------------------------------------------------------
+      *
+      *  Format and write A/R Summary records for Bill-to's for both 363 & 364 Companies
+      *
+    šC                   IF        Cust_type = 'B'
+      *
+     C                   EVAL      BCAIC3 = 363
+     C                   EVAL      BCANC7 = New_Cust_#
+     C                   MOVE      SBDNUM        BCBCCD                         Salesperson Code
+     C                   MOVE      SBDNUM        BCR4CD                         Sales Route Code
+     C     SDSDT         MULT      .0001         BCCUMO                         Current Month Nbr
+      *
+     C                   WRITE     @BCREFD                              90
+     C                   IF        *IN90 = *ON
+     C                   EVAL      Error_msg = W_ARBCREP
+     C                   EXSR      S009
+     C                   ENDIF
+      *
+      *  Now write again for 364
+     C                   EVAL      BCAIC3 = 364
+     C                   WRITE     @BCREFD                              90
+     C                   IF        *IN90 = *ON
+     C                   EVAL      Error_msg = W_ARBCREP
+     C                   EXSR      S009
+     C                   ENDIF
+      *
+    šC                   ENDIF
+      *
+      *------------------------------------------------------------------------------------
+      *
+      *  Make sure that a Destination Zone record is present for both 363 & 364 Companies
+      *  if adding, use the Zone retrieved from the Shipping Zone Cross-Reference file.
+      *
+     C                   EVAL      LUAIC3 = 363
+     C                   EVAL      LUBGCD = BBBGCD
+     C                   CALL      'PMNAXFR'
+     C                   PARM                    RTNCD             7
+     C                   PARM                    BBAJNA
+     C                   PARM                    LUXECD
+     C*                  EVAL      LUXECD = BBAJNA
+     C     LUKY01        CHAIN     PDLUREL0                           81        Destination-Zone
+    šC                   IF        *IN81 = *ON
+     C                   EVAL      LUX1CD = SHPZNE
+     C                   WRITE     @LUREQL                              90
+     C                   IF        *IN90 = *ON
+     C                   EVAL      Error_msg = W_PDLUREP
+     C                   EXSR      S009
+     C                   ELSE
+     C                   ADD       1             Dest_Zn_writ
+     C                   ENDIF
+    šC                   ENDIF
+      *
+     C                   EVAL      LUAIC3 = 364
+     C     LUKY01        CHAIN     PDLUREL0                           81        Destination-Zone
+    šC                   IF        *IN81 = *ON
+     C                   EVAL      LUX1CD = SHPZNE
+     C                   WRITE     @LUREQL                              90
+     C                   IF        *IN90 = *ON
+     C                   EVAL      Error_msg = W_PDLUREP
+     C                   EXSR      S009
+     C                   ELSE
+     C                   ADD       1             Dest_Zn_writ
+     C                   ENDIF
+    šC                   ENDIF
+      *
+      *------------------------------------------------------------------------------------
+      *
+      *  Read the Daily's Label Instructions files and populate Company Customer Comment if
+      *  records found with comments. Key to LABINST is not unique so use read rather than chain.
+      *
+     C                   EVAL      A4I1SX = 'LB'
+      *  Missoula - 363
+     C                   EVAL      A4AIC3 = 363
+     C                   EVAL      A4M5NX = 0
+     C     DLYCST        SETLL     LABINST                                81
+     C     DLYCST        READE     LABINST                                81
+    šC                   DOW       *IN81 = *OFF
+     C                   EXSR      S0021
+     C     DLYCST        READE     LABINST                                81
+    šC                   ENDDO
+      *
+      *  Salt Lake - 364
+     C                   EVAL      A4AIC3 = 364
+     C                   EVAL      A4M5NX = 0
+     C     DLYCST        SETLL     LABINST364                             81
+     C     DLYCST        READE     LABINST364                             81
+    šC                   DOW       *IN81 = *OFF
+     C                   EXSR      S0021
+     C     DLYCST        READE     LABINST364                             81
+    šC                   ENDDO
+      *
+      *------------------------------------------------------------------------------------
+      *
+      *  Write JD Edwards Z-file entry for this customer
+      *
+     C                   EXSR      S0022
+      *
+     C     SKIP_002      TAG
+     C                   ENDSR
+      *
+     **************************************************************************************
+      *          S0021 - Format and write records to Company Customer Comment
+     **************************************************************************************
+     C     S0021         BEGSR
+      *
+     C                   EVAL      A4BKC7 = New_Cust_#
+      *
+     C                   IF        INST1 <> *BLANKS
+     C                   EVAL      A4M5NX = A4M5NX + 1
+     C                   EVAL      A4Q6NA = INST1
+     C                   WRITE     @A4REKF                              90
+     C                   ENDIF
+      *
+     C                   IF        INST2 <> *BLANKS
+     C                   EVAL      A4M5NX = A4M5NX + 1
+     C                   EVAL      A4Q6NA = INST2
+     C                   WRITE     @A4REKF                              90
+     C                   ENDIF
+      *
+     C                   IF        INST3 <> *BLANKS
+     C                   EVAL      A4M5NX = A4M5NX + 1
+     C                   EVAL      A4Q6NA = INST3
+     C                   WRITE     @A4REKF                              90
+     C                   ENDIF
+      *
+     C                   IF        INST4 <> *BLANKS
+     C                   EVAL      A4M5NX = A4M5NX + 1
+     C                   EVAL      A4Q6NA = INST4
+     C                   WRITE     @A4REKF                              90
+     C                   ENDIF
+      *
+     C                   IF        INST5 <> *BLANKS
+     C                   EVAL      A4M5NX = A4M5NX + 1
+     C                   EVAL      A4Q6NA = INST5
+     C                   WRITE     @A4REKF                              90
+     C                   ENDIF
+      *
+     C                   IF        INST6 <> *BLANKS
+     C                   EVAL      A4M5NX = A4M5NX + 1
+     C                   EVAL      A4Q6NA = INST6
+     C                   WRITE     @A4REKF                              90
+     C                   ENDIF
+      *
+     C                   ENDSR
+      *
+     **************************************************************************************
+      *          S0022 - Write JD Edwards Z-file entry for this customer
+     **************************************************************************************
+     C     S0022         BEGSR
+      *
+     C                   CALL      'PMMHUPR'                            92
+     C     Return_code   PARM      *BLANK        WW0RTN            7            *return code
+     C                   PARM      New_Cust_#    WWCust            7 0          Customer
+     C                   PARM      Z_File_Batch  WWBatch          15            Batch number
+      *
+     C                   IF        *IN92 = *OFF
+     C                   ADD       1             JDE_rec_writ
+     C                   ELSE
+      *   Not sure if we need to check return code or indicator
+     C                   ENDIF
+      *
+     C                   ENDSR
+      *
+     **************************************************************************************
+      *          S003 - Call JD Edwards Batch Upload
+     **************************************************************************************
+     C     S003          BEGSR
+      *
+     C                   CALL      'J01110Z'                            92
+     C                   PARM      'P01110Z'     PSPID            10
+     C                   PARM      'CONVERSION'  PSVERS           10
+      *
+     C                   IF        *IN92 = *ON
+     C                   EVAL      JDE_Call = CALL_JDE_BAD
+     C                   ELSE
+     C                   EVAL      JDE_Call = CALL_JDE_OK
+     C                   ENDIF
+      *
+     C                   ENDSR
+      *
+     **************************************************************************************
+      *          S004 - Call program to Update JDE Relationships and to Fix Phone/Fax Type
+     **************************************************************************************
+     C     S004          BEGSR
+      *
+     C                   CALL      'PMMIUPR'                            92
+     C     Return_code   PARM      *BLANK        WW0RTN            7            *return code
+      *
+     C                   IF        *IN92 = *ON
+     C                   EVAL      JDE_Call = CALL_JDE_BAD
+     C                   ELSE
+     C                   EVAL      JDE_Call = CALL_JDE_OK
+     C                   ENDIF
+      *
+     C                   ENDSR
+      *
+     **************************************************************************************
+      *          S009 - Write an Error Message to the report
+     **************************************************************************************
+     C     S009          BEGSR
+      *
+      *  Handle overflow here
+     C                   IF        *INOF = *ON
+     C                   EXCEPT    Heading
+     C                   IF        Report_Section = 'C'
+     C                   EXCEPT    Heading_1
+     C                   ELSE
+     C                   ENDIF
+     C                   ENDIF
+      *
+     C                   IF        Report_Section = 'C'
+     C                   EXCEPT    Detail_1
+     C                   ENDIF
+      *
+     C                   ENDSR
+     **************************************************************************************
+      *          Report Layout
+     **************************************************************************************
+      *
+     OQPRINT    E            Heading           2
+     O                                            8 'PMJTUPR'
+     O                                           64 'Convert Daily Customers t'
+     O                                           69 'o OMS'
+     O                       Date_Report        120
+     O                       Time_Report        130
+      *
+     O          E            Heading     1
+     O                                          117 'Page:'
+     O                       PAGE               125
+      *
+      *
+     O          E            Heading_1   2
+     O                                           28 ' ---- CSTMST Record being '
+     O                                           43 'processed -----'
+     O          E            Heading_1   2
+     O                                           57 'Cust type'
+     O          E            Heading_1   1
+     O                                            9 'Parent'
+     O                                           19 'Bill-to'
+     O                                           29 'Ship-to'
+     O                                           43 'Daily Cust #'
+     O                                           59 'being written'
+     O                                           80 'Error Description'
+     O          E            Heading_1   1  1
+     O                                            9 '______'
+     O                                           19 '_______'
+     O                                           29 '_______'
+     O                                           43 '____________'
+     O                                           59 '_____________'
+     O                                           80 '_________________'
+     O          E            Detail_1    1
+     O                       PARENT        Z      9
+     O                       BILLTO        Z     19
+     O                       SHIPTO        Z     29
+     O                       DLYCST        Z     39
+     O                       Cust_type           53
+     O                       Error_msg      B   123
+      *
+     O          E            End_of_Rep  3
+     O                       JDE_Call            56
+     O                                           85 'Number of JDE Address Book'
+     O                                          105 'Records to Process:'
+     O                       JDE_rec_writ  J    112
+     O          E            End_of_Rep  2
+     O                                           23 'DLYCST records read:'
+     O                       Read_count    J     35
+     O                                           78 'Records written to OMS Cus'
+     O                                          100 'tomer Master - CABBREP'
+     O          E            End_of_Rep  1
+     O                                           28 'Parent records processed:'
+     O                       Parent_proc   J     35
+     O                                           71 'Parent rec written:'
+     O                       Parent_writ   J     82
+     O          E            End_of_Rep  1
+     O                                           29 'Bill-to records processed:'
+     O                       Bill_to_proc  J     35
+     O                                           72 'Bill-to rec written:'
+     O                       Bill_to_writ  J     82
+     O          E            End_of_Rep  1
+     O                                           29 'Ship-to records processed:'
+     O                       Ship_to_proc  J     35
+     O                                           72 'Ship-to rec written:'
+     O                       Ship_to_writ  J     82
+     O                                          113 'Dest-Zone recs written:'
+     O                       Dest_Zn_writ  J    119
+     O          E            End_of_Rep  1
+     O                                           74 'Total records written:'
+     O                       Tot_rec_writ  J     82
+     O          E            End_of_Rep  2
+     O                                           77 '***  End of Report ***'

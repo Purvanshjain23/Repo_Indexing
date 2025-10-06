@@ -1,0 +1,1190 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production
+      * PROGRAM:     HP4033
+      * TITLE:       Work with Control Records for HPS Uploades to JDE
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     10/15/01
+      *
+      * FUNCTION: This is a Work With that displays the records in the
+      *           Control File for HPS Uploads to JDE
+      *
+      *           Originally an I.S.-only function, we enhanced this and
+      *           gave to the users in November 2008.
+      *
+      *           Positioners:
+      *               Accounting year  (descending)
+      *
+      *           Selectors:
+      *               Accounting period
+      *               Upload code
+      *               Upload status
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/12/08  LeAnne Ramsey
+      *           Enhanced function in preparation for giving to the users.
+      *
+      * 04/29/09  LeAnne Ramsey
+      *           Added the Date/Time/User that last changed the Status to the subfile line.
+      *           Added the Beginning/Ending Period Dates as hidden fields on the subfile
+      *           line so they could be passed as parms on the calls to HP1033 and HP7033.
+      *
+      * 10/02/18  Danny Nguyen - S13682
+      *           Added Company Code to the control subfile & subfile format level.
+      *           Added Key02 list. Changed Key01 list to have Company Code as key 1.
+      *           Added Company Code to parm list when taking opt 2, 5 or 7.
+      *           Added hsl0071a file in order to validate against current accounting period
+      *           by Co/Year/Per to allow for Status Change (opt 2 & 7).
+      *           Added Business Office screen field as input capable to sbufile control. Allow
+      *           for F4 prompt to call HP503. This functionality will allow to control what
+      *           Company will be displayed in the subfile. Get Company from HSP009 file.
+      *           Changed subfile page from 11 to 10.
+      *           Added $sec subroutine to determine user authorizations on Business Office.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhpd4033   cf   e             workstn sfile(hp4033s1:hdrrn1)
+     F                                     infds(iofeed)
+      *
+     Fhsp035    if   e           k disk
+      *    HPS to JDE upload codes
+      *
+      *
+     Fhsl087a   if   e           k disk    infds(dbfeed)
+      *    Control file: HPS upload to JDE
+      *
+      *
+     Fhsl116a   if   e           k disk
+      *   HPS-To-JDE Uploads: Status changes
+      *
+     Fhsl0071a  if   e           k disk
+      *   Company Control - By Co/Year/Per
+      *
+13682Fhsp009    if   e           k disk
+      *    Business Office
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D delete          c                   'DELETE'
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D set1            c                   'SET1  '
+     D edit1           c                   'EDIT1 '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+      *
+      *
+     D upper           c                   'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+     D lower           c                   'abcdefghijklmnopqrstuvwxyz'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D mode            s              6
+     D pgm             s             10
+     D msgfl           s             10
+     D maxmsg          s              2  0  inz(20)
+     D routne          s              6
+     D maxrrn          s              4  0
+     D reset           s              1    inz('N')
+     D norecs          s              1    inz('N')
+     D count           s              2  0
+     D wkflow          s                   like(idflow)
+     D rtncd           s              2    inz('00')
+     D svrrn1          s                   like(hdrrn1)
+      *
+      *
+      * Control fields
+      * Save fields for restrictors, positioners and selectors
+      *
+13682D termfl          s              1
+     D procfl          s              1
+      *
+13682D svfsbo          s                   like(c1fsbo)
+     D svhucd          s                   like(c1hucd)
+     D svhuds          s                   like(c1huds)
+     D svuplscd        s                   like(c1uplscd)
+     D svacyr          s                   like(c1acyr)
+     D svacpe          s                   like(c1acpe)
+      *
+     D svcuracyr       s                   like(c1acyr)
+     D svcuraper       s                   like(c1acpe)
+13682D svcurexist      s              1
+  |  D svbods          s                   like(c1bods)
+13682D svdvcd          s                   like(oudvcd)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+      *
+      * Workfields
+      *
+     D wkdesc          s                   like(c1huds)
+     D wkhuds          s                   like(d1huds)
+     D wkscan          s              2  0
+13682D wkfncd          s             10
+  |   * S13682-Note: Year is in DESC seq.
+13682D wkacyr          s                   like(c1acyr) inz(9999)
+      *
+      *
+      * Workfields required for subfile paging--see initialization
+      * subroutine.
+      *
+     D wkplin          s              2  0
+     D wkrlin          s              2  0
+      *
+      *
+      * Parm fields
+      *
+     D xxhucd          s                    like(huhucd)
+     D xxhuds          s                    like(huhuds)
+      *
+     D xxtouplscd      s                    like(hsuplscd)
+     D xxuplscd        s                    like(hsuplscd)
+     D xxuplsds        s             35
+      *
+      * S13682-Parm Fields for HPSEC program.
+13682D infncd          s             10
+  |  D inbobo          s              5
+  |  D indvfl          s              1
+  |  D inbofl          s              1
+  |  D oubobo          s              5
+  |  D oubods          s             30
+  |  D oudvcd          s              5
+  |  D secfl           s              1
+  |  D oubofl          s              1
+13682D ourmfl          s              1
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard subfile option conversion
+      *---------------------------------------------------------------
+     D                 ds                  inz
+     D d1opt                          2
+     D   wkopt1                       1    overlay(d1opt)
+     D   wkopt2                       1    overlay(d1opt:2)
+      *
+      *
+      *---------------------------------------------------------------
+      *  Definition for external data area 'DAAPER'
+      *---------------------------------------------------------------
+     D
+     D daaper          ds                  dtaara(daaper)
+     D  daccyy                 1      4  0
+     D  daper                  5      6  0
+     D  dabpdt                 7     14  0
+     D  daepdt                15     22  0
+     D  dapgfl                23     23
+     D  dappfl                24     24
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     edit1         $edit1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo
+      /EJECT
+      *----------------------------------------------------------------
+      * Set environment for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $set1         begsr
+      *
+      * Clear and fill the subfile
+      *
+13682C                   if        termfl = no
+     C                   exsr      $clr1
+     C                   exsr      $frsh1
+13682C                   endif
+      *
+      * Set routine to display screen
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Perform operator I/O for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $scrn1        begsr
+      *
+13682 * If the user failed the initial security checks, set on indicator to
+  |   * protect input fields and invalidate function keys.
+  |   *
+  |  C                   if        termfl = yes
+  |  C                   seton                                        99
+13682C                   endif
+      *
+      * Write the error messages from the error arrays to the
+      * error message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * Write screen 1 to crt
+      *
+     C                   write     hp4033k1
+     C                   write     hp4033ec
+     C                   exfmt     hp4033c1
+      *
+      * Save the value of the lowest subfile rrn on the screen for
+      * later repositioning of the subfile
+      *
+     C                   eval      wkflow = idflow
+      *
+      * Clear the messages from the message data structures and
+      * program message queue
+      *
+     C                   exsr      $clmsg
+      *
+      * Get user's entry and set next routine
+      *
+     C                   select
+13682C**                 when      *in03 = *on                                  F3-EXIT
+13682C                   when      *in03 = *on or termfl = yes                  F3-EXIT
+     C                   eval      routne = exit
+      *
+     C                   when      *in04 = *on                                  F4-PROMPT
+     C                   exsr      $f4s1
+      *
+      * S13682-Check Business Office.
+13682C     fld           ifeq      'C1FSBO'
+  |  C     c1fsbo        andne     svfsbo
+  |  C                   movel(p)  'HP441'       wkfncd
+  |  C                   exsr      $chkbo
+  |  C                   exsr      $getco
+13682C                   endif
+      *
+13682C                   if        error = 0
+     C                   exsr      $chksv
+13682C                   else
+  |  C                   movel     scrn1         routne
+13682C                   endif
+      *
+     C                   when      *in05 = *on                                  F5-refresh
+     C                   movel     yes           reset
+13682C                   movel     svfsbo        c1fsbo
+13682C                   movel     svbods        c1bods
+     C                   eval      routne = set1
+      *
+     C                   when      *in20 = *on                                  F20-WRKSPLF
+     C                   call      'QEZOUTPT'                                       API
+     C                   z-add     wkflow        hdpag1
+     C                   eval      routne = scrn1
+      *
+      *
+      * Reposition the subfile if the user has changed any of the positioners
+      * or selectors in the control record.
+      *
+     C                   when      svacyr   <> c1acyr or
+     C                             svacpe   <> c1acpe or
+     C                             svhucd   <> c1hucd or
+     C                             svhuds   <> c1huds or
+13682C                             svfsbo   <> c1fsbo or
+     C                             svuplscd <> c1uplscd
+      *
+      * S13682-Check Business Office if Changed.
+13682C                   if        svfsbo <> c1fsbo
+  |  C                   move      *blank        c1bods
+  |  C                   movel(p)  'HP441'       wkfncd
+  |  C                   exsr      $chkbo
+  |  C                   exsr      $getco
+13682C                   endif
+      *
+13682C                   if        error = 0
+     C                   exsr      $chksv
+13682C                   else
+  |  C                   movel     scrn1         routne
+13682C                   endif
+      *
+     C                   when      *in25 = *on                                  F25-ROLLUP
+     C                   exsr      $load1
+     C                   other
+      *
+      * User has pressed enter
+      *
+     C                   if        norecs = yes                                 IF EMPTY SFL
+     C                   eval      routne = set1
+     C                   else
+     C                   eval      routne = edit1
+     C                   endif                                                  IF EMPTY SFL
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Save the control record positioners/selectors
+      *----------------------------------------------------------------
+      *
+     C     $chksv        begsr
+      *
+     C                   movel     no            reset
+     C                   eval      routne = set1
+      *
+13682C                   move      c1fsbo        svfsbo
+     C                   move      c1hucd        svhucd
+     C                   move      c1uplscd      svuplscd
+     C                   z-add     c1acyr        svacyr
+     C                   z-add     c1acpe        svacpe
+      *
+      * Prepare to scan on desc
+      *  1) trim leading/trailing blanks
+      *  2) find first non-blank position from right
+      *
+     C                   eval      c1huds = %trim(c1huds)
+     C     ' '           checkr    c1huds        wkscan
+     C                   move      c1huds        svhuds
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Edit input fields for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $edit1        begsr
+      *
+      * First, edit all the selections entered by the user in the
+      * subfile option field to see that valid selections were input
+      *
+     C                   exsr      $edop1
+      *
+      * If there are no errors in the subfile option selectors entered
+      * by the user, then execute the subroutine to reread and process
+      * the records selected by the user.  After completing the
+      * subroutine, set the routine to start over.
+      *
+     C                   if        error = 0                                    If no error
+     C                   exsr      $proc1
+      *
+     C                   if        rtncd = '00'
+     C                   eval      routne = set1
+     C                   else
+     C                   eval      hdpag1 = wkflow
+     C                   eval      routne = scrn1
+     C                   endif
+      *
+      * else there were errors in the subfile options entered,
+      * so set to redisplay screen with errors to user
+      *
+     C                   else
+     C                   eval      routne = scrn1
+     C                   endif                                                  If no error
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Clear subfile for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $clr1         begsr
+      *
+     C                   z-add     0             svrrn1
+      *
+     C                   clear                   hp4033s1
+     C                   seton                                        83        sflclr
+     C                   write     hp4033c1
+     C                   setoff                                       818283
+      *                                                    81=sfldsp
+      *                                                    82=sflend
+      *                                                    83=sflclr
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Refresh/fill the subfile for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $frsh1        begsr
+      *
+      * Set position in file
+      *
+     C                   select
+      * S13682-Company Code is now primary key 1. First time thru, use Co from Business Office.
+     C                   when      c1acyr = 0
+13682C**   *hival        setll     hsl087a
+13682C     key03         setll     hsl087a
+     C                   other
+13682C**   c1acyr        setll     hsl087a
+13682C     key02         setll     hsl087a
+     C                   endsl
+      *
+      *
+      * The field 'reset' is a flag field to indicate whether you are
+      * attempting to reposition the user close to where he was in the
+      * subfile.
+      * The lowest subfile RRN on the screen from the DSPF feedback
+      * area (IDFLOW) was retrieved earlier and put in WKFLOW.
+      * Add to WKFLOW the number of lines on your subfile page or the
+      * number less 1 to determine a subfile RRN to reposition to.
+      *
+      *
+     C                   if        reset = yes
+     C                   eval      maxrrn = wkflow + wkrlin
+     C                   else
+      *
+      * Don't try to reposition the user, just start the subfile over
+      *
+     C                   eval      maxrrn = wkplin
+     C                   endif
+      *
+      * Load the subfile until you have the required number of records.
+      * The number will depend on whether uou are repositioning the
+      * subfile or not. Stop if you get to the end of the subfile.
+      *
+     C                   dou       svrrn1 >= maxrrn or *in82 = *on
+     C                   exsr      $load1
+     C                   enddo
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Load subfile for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $load1        begsr
+      *
+     C                   z-add     svrrn1        hdrrn1
+      *
+      * Set the count of records on the subfile page to zero.
+      *
+     C                   eval      count = 0
+      *
+      * Fill the subfile until the end of the database file or
+      * you have filled all the lines on the subfile page.
+      *
+     C                   setoff                                       82
+     C                   dou       *in82 = *on or count >= wkplin               Do fill
+     C                   read      hsl087a                                82
+     C                   if        *in82 = *off                                 If read
+      *
+     C                   eval      procfl = yes
+      *
+      * Retrieve upload descripton
+      *
+     C     hshucd        chain     hsp035                             92
+     C                   if        *in92 = *off
+     C                   eval      d1huds = huhuds
+     C                   else
+     C                   eval      d1huds = 'Unknown'
+     C                   endif
+      *
+      * Only include records that match the user's selectors
+      *
+      * S13682-Allow selection by Company.
+13682C                   if        c1cocd <> ' ' and                             If company
+  |  C                             c1cocd <> hscocd
+  |  C                   move      no            procfl
+13682C                   endif
+      *
+      * S13682-Allow selection by Year.
+13682C                   if        c1acyr <> 0 and                               If year
+  |  C                             c1acyr <> hsacyr
+  |  C                   move      no            procfl
+13682C                   endif
+      *
+     C                   if        c1acpe <> 0 and                               If period
+     C                             c1acpe <> hsacpe
+     C                   move      no            procfl
+     C                   endif                                                   If period
+      *
+     C                   if        c1hucd <> *blank and                          If code
+     C                             c1hucd <> hshucd
+     C                   move      no            procfl
+     C                   endif                                                   If code
+      *
+     C                   if        c1uplscd <> *blank and                        If status
+     C                             c1uplscd <> hsuplscd
+     C                   move      no            procfl
+     C                   endif                                                  If status
+      *
+     C                   if        c1huds <> *blank                             If desc
+     C     lower:upper   xlate     c1huds        wkdesc
+     C     lower:upper   xlate     d1huds        wkhuds
+     C     wkdesc:wkscan scan      wkhuds                                 92
+     C                   if        *in92 = *off
+     C                   eval      procfl = no
+     C                   endif
+     C                   endif                                                  If desc
+      *
+     C                   if        procfl = yes                                 If process
+      *
+      * Retrieve the most recent status change.
+      *
+     C     key01         chain     hsl116a                            92
+     C                   if        *in92 = *on                                  If no hit
+     C                   move      *blank        d1usr
+     C                   z-add     0             d1tm
+     C                   z-add     0             d1mdy
+     C                   else
+     C                   move      sccrusr       d1usr
+     C                   z-add     sccrtm        d1tm
+     C     *iso          test(d)                 sccrdt                 92
+     C                   if        *in92 = *off
+     C                   move      sccrdt        wkisodate
+     C     *mdy          move      wkisodate     d1mdy
+     C                   endif
+     C                   endif                                                  If no hit
+      *
+      *
+     C                   add       1             count
+     C                   add       1             hdrrn1
+     C                   move      *blank        d1opt
+13682C                   move      hscocd        d1cocd
+     C                   z-add     hsacyr        d1acyr
+     C                   z-add     hsacpe        d1acpe
+     C                   move      hshucd        d1hucd
+     C                   move      hsuplscd      d1uplscd
+     C                   z-add     hsbpdt        hdbpdt
+     C                   z-add     hsepdt        hdepdt
+      *
+     C                   write     hp4033s1
+     C                   seton                                        81
+      *
+      * For positioning, place the subfile relative record number into
+      * the sflrcdnbr field (hdpag1)
+      *
+     C                   z-add     hdrrn1        hdpag1
+      *
+     C                   endif                                                  If process
+     C                   endif                                                  If read
+     C                   enddo                                                  Do fill loop
+      *
+      * If no records were written to the subfile, then issue
+      * the standard message 'No data to Display'.
+      *
+     C                   if        hdrrn1 = 0                                   If no recs
+     C                   movel     yes           norecs
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09002'
+     C                   endif
+     C                   else
+      *
+     C                   movel     no            norecs
+     C                   endif                                                  If no recs
+      *
+     C                   z-add     hdrrn1        svrrn1
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * S13682-Check the Business Office Entered as a Restrictor.
+      *----------------------------------------------------------------
+13682 *
+  |   * THE BUSINESS OFFICE ENTERED MUST:
+  |   *    BE A VALID OFFICE IN THE BUSINESS OFFICE MASTER
+  |   *    BE A 'LIVE PRODUCTION' DIVISION OFFICE
+  |   *    HAVE A SECURITY LOCATION TO WHICH THE USER IS AUTHORIZED
+  |   *
+  |  C     $chkbo        begsr
+  |   *
+  |   * Clear Subfile
+  |   *
+  |  C                   exsr      $clr1
+  |   *
+  |   * CHECK THE USER'S SECURITY TO THIS BUSINESS OFFICE.
+  |   * SET INDVFL TO YES TO TELL SECURITY PROGRAM TO COMPARE THE
+  |   * FUNCTION DIVISION CODE TO THE B.O. DIVISION CODE.
+  |   *
+  |  C                   movel     yes           indvfl
+  |  C                   exsr      $sec
+  |  C     oubofl        ifeq      yes
+  |  C                   seton                                        31
+  |  C                   else
+  |  C                   setoff                                       31
+  |  C                   endif
+  |  C                   movel     no            indvfl                          RESET FL
+  |   *
+  |  C                   movel     oubobo        c1fsbo
+  |  C                   movel     oubods        c1bods
+  |  C                   movel     oubods        svbods
+  |   *
+13682C                   endsr
+      /EJECT
+      *-----------------------------------------------------------------------
+      * Read and edit changed subfile records for valid options on Screen 1
+      *-----------------------------------------------------------------------
+      *
+     C     $edop1        begsr
+      *
+     C                   z-add     0             error
+      *
+      * Read all changed subfile records, editing for valid options
+      *
+     C                   setoff                                       80
+     C                   dou       *in80 = *on                                  Do readc
+     C                   readc     hp4033s1                               80
+     C                   if        *in80 = *off                                 If rec read
+      *
+      * Set off error indicator for subfile option field
+      *
+     C                   setoff                                       30
+      *
+      * Convert option user entered to standard format. For example,
+      * a ' 1', '01', and '1 ' must be standardized to ' 1'.
+      *
+     C                   if        wkopt2 = *blank                              If 2 = blank
+     C                   eval      wkopt2 = wkopt1
+     C                   eval      wkopt1 = *blank
+     C                   endif                                                  If 2 = blank
+      *
+     C                   if        wkopt1 = *zero                               If 1 is zero
+     C                   eval      wkopt1 = *blank
+     C                   endif                                                  If 1 is zero
+      *
+      * Test for valid subfile option entry on all changed records
+      *
+     C                   if        d1opt <> ' 2' and                            If bad opt
+     C                             d1opt <> ' 5' and
+     C                             d1opt <> ' 7' and
+     C                             d1opt <> '  '
+     C                   seton                                        3085
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09006'
+     C                   exsr      $err1
+     C                   endif
+     C                   endif                                                  If bad opt
+      *
+      * Additional edits
+     C                   select
+     C                   when      d1opt = ' 2'
+     C                   exsr      $opt2
+      *
+     C                   when      d1opt = ' 7'
+     C                   exsr      $opt7
+     C                   endsl
+      *
+      * Checks completed.
+     C                   if        error = 0 and d1opt = *blank
+     C                   setoff                                       85
+     C                   else
+     C                   seton                                        85
+     C                   endif
+      *
+     C                   update    hp4033s1
+     C                   setoff                                       8530
+     C                   endif                                                  If rec read
+     C                   enddo                                                  Do readc
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Validate Option 2-Change status to Rerun
+      *---------------------------------------------------------------------------------------
+      *
+     C     $opt2         begsr
+      *
+      * Current Period only
+     C                   exsr      $period
+      *
+      * If status is already Rerun, issue error message.
+      *
+     C                   if        d1uplscd = 'R'
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS00542'
+     C                   exsr      $err1
+     C                   endif
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Validate Option 7-Change status to Upoaded
+      *---------------------------------------------------------------------------------------
+      *
+     C     $opt7         begsr
+      *
+      * Current Period only
+     C                   exsr      $period
+      *
+      * If status is already Uploaded, issue error message.
+      *
+     C                   if        d1uplscd = 'U'
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS00543'
+     C                   exsr      $err1
+     C                   endif
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Validate Period
+      *---------------------------------------------------------------------------------------
+      *
+      * You can only change the status for records in the Current Accounting Period
+      *
+     C     $period       begsr
+      *
+      * S13682-Validate against HSP0071 by Co/Year/Period to allow for Status Change.
+      *        Use Company from screen and Year/Period from DAAPER data area.
+13682C     key04         chain     hsl0071a
+  |  C                   if        %found
+  |  C                   eval      svcurexist = 'Y'
+  |  C                   else
+  |  C                   eval      svcurexist = 'N'
+13682C                   endif
+      *
+      * S13682-No longer will use Year/Period from DAAPER. Validate against HSP0071 instead.
+13682C**                 if        d1acyr = svcuracyr and
+  |  C**                           d1acpe = svcuraper
+13682C                   if        svcurexist = 'Y'
+     C                   else
+      *
+     C                   seton                                        30
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS00206'
+     C                   exsr      $err1
+     C                   endif
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------------------------
+      * Read subfile records and process user selections for Screen 1
+      *------------------------------------------------------------------------------------
+      *
+     C     $proc1        begsr
+      *
+     C                   z-add     0             error
+     C                   movel     '00'          rtncd
+      *
+      * Read all the changed subfile records processing the subfile
+      * selection
+      *
+     C                   setoff                                       80
+     C                   dou       *in80 = *on                                  Do process
+     C                   readc     hp4033s1                               80
+     C                   if        *in80 = *off                                 If rec read
+      *
+     C                   if        rtncd = '00'                                 If enter
+      *
+     C                   select
+      *
+      * If user selected Option 2=change status to Rerun
+      * set the flag 'reset' to YES so that when you return to this
+      * Work With you will reposition to the same place in the subfile
+      *
+     C                   when      d1opt = ' 2'
+     C                   movel     yes           reset
+     C                   call      'HP1033'
+13682C                   parm                    d1cocd
+     C                   parm                    d1acyr
+     C                   parm                    d1acpe
+     C                   parm                    hdbpdt
+     C                   parm                    hdepdt
+     C                   parm                    d1hucd
+     C                   parm                    d1huds
+     C                   parm                    d1uplscd
+     C                   parm      'R'           xxtouplscd
+     C                   parm                    rtncd
+      *
+      * If user selected Option 5=view status changes,
+      * set the flag 'reset' to YES so that when you return to this
+      * Work With you will reposition to the same place in the subfile
+      *
+     C                   when      d1opt = ' 5'
+     C                   movel     yes           reset
+     C                   call      'HP7033'
+13682C                   parm                    d1cocd
+     C                   parm                    d1hucd
+     C                   parm                    d1acyr
+     C                   parm                    d1acpe
+     C                   parm                    hdbpdt
+     C                   parm                    hdepdt
+     C                   parm                    rtncd
+      *
+      * If user selected Option 7=change status to uploaded
+      * set the flag 'reset' to YES so that when you return to this
+      * Work With you will reposition to the same place in the subfile
+      *
+     C                   when      d1opt = ' 7'
+     C                   movel     yes           reset
+     C                   call      'HP1033'
+13682C                   parm                    d1cocd
+     C                   parm                    d1acyr
+     C                   parm                    d1acpe
+     C                   parm                    hdbpdt
+     C                   parm                    hdepdt
+     C                   parm                    d1hucd
+     C                   parm                    d1huds
+     C                   parm                    d1uplscd
+     C                   parm      'U'           xxtouplscd
+     C                   parm                    rtncd
+     C                   endsl
+      *
+      * Upon returning from the called program,
+      * clear the subfile option selected by the user and rewrite
+      * the subfile record.
+      *
+     C                   move      *blank        d1opt
+     C                   setoff                                       85
+     C                   else
+     C                   seton                                        85
+     C                   endif                                                  If enter
+      *
+     C                   update    hp4033s1
+      *
+     C                   endif                                                  If rec read
+     C                   enddo                                                  Do process
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * F4 prompt on screen 1
+      *---------------------------------------------------------------
+      *
+     C     $f4s1         begsr
+      *
+      * Upload code
+     C                   select
+     C                   when      fld = 'C1HUCD'
+     C                   call      'HP5014'
+     C                   parm      *blank        xxhucd
+     C                   parm      *blank        xxhuds
+     C                   seton                                        52
+     C                   if        xxhucd <> *blank
+     C                   movel     xxhucd        c1hucd
+     C                   endif
+      *
+      * Upload status
+     C                   when      fld = 'C1UPLSCD'
+     C                   call      'HP5060'
+     C                   parm      *blank        xxuplscd
+     C                   parm      *blank        xxuplsds
+     C                   seton                                        53
+     C                   if        xxuplscd <> *blank
+     C                   movel     xxuplscd      c1uplscd
+     C                   endif
+      *
+      * S13682-Business Office
+13682C                   when      fld = 'C1FSBO'
+  |  C                   eval      xxfsbo = *blank
+  |  C                   eval      xxbods = *blank
+  |  C                   call      'HP503'
+  |  C                   parm                    xxfsbo
+  |  C                   parm                    xxbods
+  |  C                   parm                    svdvcd
+  |  C                   seton                                        51
+  |  C                   if        xxfsbo <> *blank
+  |  C                   eval      c1fsbo = xxfsbo
+  |  C                   eval      c1bods = xxbods
+  |   * Get Company by Business Office code.
+  |  C                   exsr      $getco
+13682C                   endif
+      *
+     C                   other
+      *
+      * F4 not valid for this field...issue message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error                                        013
+     C                   movel     'HS09011'     mgid(e)
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------
+      * Set the subfile to redisplay at the first page that has errors
+      *---------------------------------------------------------------------------------
+      *
+     C     $err1         begsr
+      *
+     C                   if        error = 1
+     C                   eval      hdpag1 = hdrrn1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *---------------------------------------------------------------
+      * Seton last record and end job
+      *---------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        LR
+     C                   endsr
+      *
+      /EJECT
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * S13682-Security Program
+      *---------------------------------------------------------------
+      *
+     C     $sec          begsr
+      *
+      * Set up the fields to send into the security program
+      *
+     C                   movel     wkfncd        infncd                         PGM NAME
+     C                   movel     c1fsbo        inbobo                         SCREEN BO
+      *
+     C                   move      *blank        oubobo                         BO CODE
+     C                   move      *blank        oubods                         BO DESC
+     C                   move      *blank        oudvcd                         FUNCTION DIV
+     C                   movel     no            termfl                         TERMINAL FLG
+      *
+     C                   call      'HPSEC  '
+      **** IN
+     C                   parm                    mgid                           MSGID ARRAY
+     C                   parm                    mgdt                           MSGDTA DATA
+     C                   parm                    error                          # OF errorS
+     C                   parm                    infncd                         FUNC CODE
+     C                   parm                    inbobo                         BO CODE
+     C                   parm                    indvfl                         CHECK DIV?
+     C                   parm                    inbofl                         CHECK B.O.?
+      **** OUT
+     C                   parm                    oubobo                         BO CODE
+     C                   parm                    oubods                         BO DESC.
+     C                   parm                    oudvcd                         DIV CODE
+     C                   parm                    secfl                          SEC ERR FLAG
+     C                   parm                    oubofl                         B.O. ERR FLG
+     C                   parm                    ourmfl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * S13682-Get Company by Business Office Code.
+      *----------------------------------------------------------------
+      *
+     C     $getco        begsr
+      *
+     C     c1fsbo        chain     hsp009
+     C                   if        %found
+     C                   eval      c1cocd = bococd
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *   none
+      *
+      * Key lists
+      *
+     C     key01         klist
+13682C                   kfld                    hscocd
+     C                   kfld                    hshucd
+     C                   kfld                    hsacyr
+     C                   kfld                    hsacpe
+      *
+13682C     key02         klist
+  |  C                   kfld                    c1cocd
+13682C                   kfld                    c1acyr
+      *
+13682C     key03         klist
+  |  C                   kfld                    c1cocd
+13682C                   kfld                    wkacyr
+      *
+13682C     key04         klist
+  |  C                   kfld                    d1cocd
+  |  C                   kfld                    d1acyr
+13682C                   kfld                    d1acpe
+      *
+      * S13682-Define Fields for use as Parms when calling prompt programs.
+13682C     *like         define    c1fsbo        xxfsbo
+13682C     *like         define    c1bods        xxbods
+      *
+      *
+      * Only the "view" option is valid for records NOT in the currently
+      * accounting period. So, retrieve/save Current Year/Period for validations.
+      *
+     C                   in        daaper
+     C                   z-add     daccyy        svcuracyr
+     C                   z-add     daper         svcuraper
+      *
+      * To support F5-Refresh, logic requires the number of lines on
+      * the subfile page and also the number of lines less 1.  By
+      * setting these values up as constant work fields, the processing
+      * logic can be standardized between programs.
+      *
+13682C**                 z-add     11            wkplin                         sflpag
+13682C                   z-add     10            wkplin                         sflpag
+     C     wkplin        sub       1             wkrlin                         sflpag - 1
+      *
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+      * S13682-Execute the Security Subroutine to Determine User Authorizations.
+13682C                   movel(p)  sdpgm         wkfncd
+  |  C                   movel     no            inbofl
+  |  C                   exsr      $sec
+  |  C                   movel     yes           inbofl
+  |   *
+  |   * If errors on the initial call, set the terminal flag to yes.
+  |  C                   if        secfl = yes
+  |  C                   movel     yes           termfl
+  |  C                   endif
+  |   *
+  |   * Move Returned Fields to Control Record Format and Save to Work Fields.
+  |  C                   movel     oubobo        c1fsbo                         BO Code
+  |  C                   movel     oubobo        svfsbo
+  |  C                   movel     oubods        c1bods                         BO Desc
+  |  C                   movel     oubods        svbods
+  |   *
+  |   * Save this Function's Division Code.
+  |  C                   movel     oudvcd        svdvcd
+  |   *
+  |   * Get Company by Business Office code.
+13682C                   exsr      $getco
+      *
+     C                   endsr
+      /EJECT

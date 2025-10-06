@@ -1,0 +1,959 @@
+// ?------------------------------------------------------------------------------------------------
+// ?Synon action diagram for PBFYXFR
+// ?Date: 14.08.2025 Time: 03:47:49
+// ?------------------------------------------------------------------------------------------------
+
+//?Execute user function
+
+//?********************************************************************
+//?Get Accruals:  Customer level, order Level, and product level
+//?********************************************************************
+// PAR.MPR Freight Add On = CON.*ZERO
+PAR.MPR_Freight_Add_On = *ZERO;
+
+// PAR.MPR Price Calc Exception = CND.Blank
+PAR.MPR_Price_Calc_Exception = *BLANK;
+
+//?1. Get Absorbed Freight
+// PAR.MPR Absorbed Frt Rate = CON.*ZERO
+PAR.MPR_Absorbed_Frt_Rate = *ZERO;
+
+CASE;
+
+// IF PAR.Shipping Method is Prepaid
+IF PAR.Shipping_Method = 'PR'/'PT';
+
+EXECUTE FUNCTION(RTV Pricing: CFRTAB   IF) TYPE(EXCINTFUN)                      AC1846404;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Ship_To_Customer);
+PARAMETER(LCL.Pricing_Retrieved_Amount);
+PARAMETER(LCL.Error_Return);
+PARAMETER(*BLANK);
+PARAMETER(*BLANK);
+PARAMETER(*BLANK);
+PARAMETER(*BLANK);
+PARAMETER(PAR.Order_Number);
+{
+ //?Execute internal function
+
+ EXECUTE FUNCTION(Rtv Shipping Method   RT) TYPE(RTVOBJ) FILE(OPBFCPP)           AC1848045;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Order_Number);
+ PARAMETER(LCL.Shipping_Method);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ CASE;
+
+ // IF LCL.Shipping Method is Prepaid
+ IF LCL.Shipping_Method = 'PR'/'PT';
+
+ //?R12926 DN 04/24/18-At Order level, get Absorbed Freight Rate from OH.
+ EXECUTE FUNCTION(Rtv Absorbed Frt Rate RT) TYPE(RTVOBJ) FILE(OPBFCPP)           AC2149231;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Order_Number);
+ PARAMETER(PAR.Absorbed_Freight_Rate_CWT);
+ {
+  //?USER: Initialize routine
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?Customer Absorbed Frieght is entered as Hundred weight, therefore
+ //?Converting to Hundred weight is not necessary.
+ // PAR.Pricing Retrieved Amount = PAR.Absorbed Freight Rate CWT
+ PAR.Pricing_Retrieved_Amount = PAR.Absorbed_Freight_Rate_CWT;
+
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ // PAR.Pricing Retrieved Amount = CON.*ZERO
+ PAR.Pricing_Retrieved_Amount = *ZERO;
+
+ ENDIF;
+
+}
+
+
+// LCL.Absorbed Freight Rate CWT = LCL.Pricing Retrieved Amount
+LCL.Absorbed_Freight_Rate_CWT = LCL.Pricing_Retrieved_Amount;
+
+// PAR.MPR Absorbed Frt Rate = LCL.Absorbed Freight Rate CWT
+PAR.MPR_Absorbed_Frt_Rate = LCL.Absorbed_Freight_Rate_CWT;
+
+ENDIF;
+
+//?2. Get Known Ledgered and Revenue Adjustments
+//?** This will read all accrual codes that are setup for the
+//?** ShipTo customer and accumulate the Accrual Rates.
+//?** If Actual Shipped Date is zeros, use Requested Ship Date
+CASE;
+
+// IF PAR.Actual Shipped Date is entered
+IF PAR.Actual_Shipped_Date <> *ZERO;
+
+// WRK.USR Date Shipped = PAR.Actual Shipped Date
+WRK.USR_Date_Shipped = PAR.Actual_Shipped_Date;
+
+//?** If Actual Shipped Date is zeros, use Requested Ship Date
+// IF *OTHERWISE
+IF *OTHERWISE;
+
+// WRK.USR Date Shipped = PAR.Requested Ship Date
+WRK.USR_Date_Shipped = PAR.Requested_Ship_Date;
+
+ENDIF;
+
+//?04/01/19 Only do the SFC/FRC accruals if shipping method is PT (not CT)
+//?05/02/18 DO  deduct Abs Freight if this SFC/FRC accruals exist.
+//?12/05/16 dont deduct Abs Freight if this accrual exists. the frt isnt
+//?   in the price on these sysco orders, so zero out abs, and upd sts
+EXECUTE FUNCTION(Rtv Accrual Info-MPR  RT) TYPE(RTVOBJ) FILE(OMHOREP)           AC2053328;
+PARAMETER(PAR.Ship_To_Customer);
+PARAMETER(WRK.Accrual_Code);
+PARAMETER(1);
+PARAMETER(WRK.USR_Date_Shipped);
+PARAMETER(WRK.Period_Ending_Date);
+PARAMETER(WRK.Accrual_Rate);
+PARAMETER(NLL.All_Products_Y_N);
+PARAMETER(NLL.Accrual_Rate_Type);
+PARAMETER(NLL.Comm_Threshold_Period);
+PARAMETER(NLL.CAH_Unused_Date_1);
+PARAMETER(NLL.CAH_Unused_Date_2);
+PARAMETER(NLL.Comm_Min_Amt_Period);
+PARAMETER(NLL.Comm_Retroactive_Sts);
+PARAMETER(NLL.Accrual_Detail_Search);
+PARAMETER(NLL.Broker_Code);
+PARAMETER(NLL.Max_Accrual_Amount);
+PARAMETER(PAR.MPR_Customer_Accrual_Rt);
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(PAR.Item_Code);
+PARAMETER('CW');
+PARAMETER(PAR.SFC_Accrual_Exists_USR);
+PARAMETER(PAR.FRC_Accrual_Exists_USR);
+PARAMETER(PAR.MPR_Freight_Add_On);
+PARAMETER(PAR.Shipping_Method);
+{
+ //?USER: Initialize routine
+
+ //?S14765 RMC 4/1/19 Only include SFC/FRC if PT
+ //?S13009 RMC 5/2/18 changes for Sysco with SFC and Jetro with FRC rev adj
+ //?  -- add those accrual rates and still subtract the absorbed frt.
+ // PAR.Pricing Retrieved Amount = CON.*ZERO
+ PAR.Pricing_Retrieved_Amount = *ZERO;
+
+ // PAR.SFC Accrual Exists    USR = CND.No
+ PAR.SFC_Accrual_Exists_USR = 'N';
+
+ // PAR.FRC Accrual Exists    USR = CND.No
+ PAR.FRC_Accrual_Exists_USR = 'N';
+
+ //?USER: Processing if Data record not found
+
+ MOVE *ALL (To: PAR From: CON);
+
+ //?USER: Process Data record
+
+ //?** The par.period begin date is either the Actual Shipped date
+ //?** from the Order Detail file unless it is zeros, then it is
+ //?** replaced by the Requested Ship Date.
+ //?** Select the record where the ASD is within the date range
+ CASE;
+
+ // IF PAR.Period Beginning Date GE DB1.Period Beginning Date
+ IF PAR.Period_Beginning_Date >= DB1.Period_Beginning_Date;
+
+ // AND PAR.Period Beginning Date LE DB1.Period Ending Date
+ AND PAR.Period_Beginning_Date <= DB1.Period_Ending_Date;
+
+ EXECUTE FUNCTION(RTV Accrual Info-All   RT) TYPE(RTVOBJ) FILE(OMHLREP)          AC1825083;
+ PARAMETER(DB1.Accrual_Code);
+ PARAMETER(NLL.Accrual_Description);
+ PARAMETER(NLL.Automatic_Accrual_Y_N);
+ PARAMETER(NLL.Print_On_Invoice_Y_N);
+ PARAMETER(NLL.Rate_Usage);
+ PARAMETER(LCL.Add_on_Allowance);
+ PARAMETER(NLL.Accrual_Type);
+ PARAMETER(NLL.Sub_Ledger_Code);
+ PARAMETER(NLL.Reverse_Accrual_Code);
+ PARAMETER(NLL.UOM_Primary_Dft);
+ PARAMETER(NLL.G_L_Code_Dr);
+ PARAMETER(NLL.G_L_Code_Cr);
+ PARAMETER(NLL.G_L_Sub_Account_Code);
+ PARAMETER(LCL.Sales_History_Exp_Bucket);
+ PARAMETER(NLL.Post_to_G_L_Y_N);
+ PARAMETER(NLL.All_Products_Y_N);
+ PARAMETER(NLL.Accrual_Rate);
+ PARAMETER(NLL.Accrual_Rate_Type);
+ PARAMETER(NLL.Accrual_Detail_Search);
+ PARAMETER(NLL.Standard_Schedule_Y_N);
+ PARAMETER(NLL.Affect_Sales_Realz_Rpt);
+ PARAMETER(LCL.Affect_Invoice_Price);
+ PARAMETER(NLL.Invoice_Print_Type);
+ PARAMETER(NLL.Max_Accrual_Amount);
+ PARAMETER(NLL.Max_Accrual_Amount_Type);
+ PARAMETER(NLL.Record_Status);
+ {
+  //?USER: Processing if Data record not found
+
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ CASE;
+
+ // IF LCL.Sales History Exp Bucket is Ledgered
+ IF LCL.Sales_History_Exp_Bucket = 'LEDGER';
+
+ //?{above had:   |c2: LCL.Sales History Exp Bucket is Revenue Adjust  }
+ //?{Above was:  lcl.affect invoice price}
+ //?** Accumulate rate based on All Products Y/N value
+ CASE;
+
+ // IF DB1.All Products (Y/N) is Yes
+ IF DB1.All_Products_Y_N = 'Y';
+
+ //?** If YES, then use the rate from the Customer Accrual record
+ // LCL.Accrual Rate = DB1.Accrual Rate
+ LCL.Accrual_Rate = DB1.Accrual_Rate;
+
+ CASE;
+
+ // IF LCL.Add-on/Allowance is Allowance
+ IF LCL.Add_on_Allowance = 'S';
+
+ // LCL.Accrual Rate = CON.*ZERO - DB1.Accrual Rate
+ LCL.Accrual_Rate = *ZERO - DB1.Accrual_Rate;
+
+ ENDIF;
+
+ // PAR.Pricing Retrieved Amount = PAR.Pricing Retrieved Amount + LCL.Accrual Rate
+ PAR.Pricing_Retrieved_Amount = PAR.Pricing_Retrieved_Amount + LCL.Accrual_Rate;
+
+ //?** Accumulate rate based on All Products Y/N value
+ // IF DB1.All Products (Y/N) is Yes + Exceptions
+ IF DB1.All_Products_Y_N = 'X';
+
+ //?** If YES + Exceptions, then add the rate from either the Customer
+ //?** Accrual Str or Customer Accrual Item file. The value in
+ //?** the Accrual Detail Search field will determine which file.
+ //?** If no record in either file then add the Customer Accural rate
+ //?Retrieve Accrual Rate
+ CASE;
+
+ // IF DB1.Accrual Detail Search is Item
+ IF DB1.Accrual_Detail_Search = 'I';
+
+ EXECUTE FUNCTION(Rtv Item Accrual Rate RT) TYPE(RTVOBJ) FILE(OMHPREP)           AC1613037;
+ PARAMETER(PAR.Ship_To_Customer);
+ PARAMETER(DB1.Accrual_Code);
+ PARAMETER(DB1.CAH_Sequence_No);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Accrual_Rate);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?Retrieve Accrual Rate
+ // IF DB1.Accrual Detail Search is Item Structure
+ IF DB1.Accrual_Detail_Search = 'S';
+
+ //?** Retrieve the Item Structure fields from the Order Detail
+ EXECUTE FUNCTION(Rtv Item FOB Price    RT) TYPE(RTVOBJ) FILE(OPBGWKP)           AC1559616;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Order_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(NLL.Price_Overage_Override);
+ PARAMETER(NLL.Contract_Number);
+ PARAMETER(NLL.Price_Status);
+ PARAMETER(NLL.U_M_Ordered);
+ PARAMETER(NLL.Unit_Price);
+ PARAMETER(NLL.Unit_Price_Credit);
+ PARAMETER(NLL.Unit_Price_Ordered_U_M);
+ PARAMETER(NLL.Unit_Weight_Ordered_U_M);
+ PARAMETER(NLL.Actual_Shipped_Date);
+ PARAMETER(NLL.Affect_Inventory_Status);
+ PARAMETER(NLL.Affect_Sales_Doll_Status);
+ PARAMETER(NLL.Affect_Sales_Pnds_Status);
+ PARAMETER(PAR.Item_Structure_Type_Code);
+ PARAMETER(PAR.Item_Structure_Group_Code);
+ PARAMETER(PAR.Item_Structure_Class_Code);
+ PARAMETER(NLL.Affect_Trade_Fund);
+ PARAMETER(NLL.Affect_Commission);
+ PARAMETER(NLL.Affect_Pricing);
+ PARAMETER(NLL.Ord_TF_Exempt_Code);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?PKD/SZ 07/20/09 Should check with Type/Group/Class first then just
+ //?                Type/Group.
+ EXECUTE FUNCTION(RTV & Chk Rate Exists RT) TYPE(RTVOBJ) FILE(POC8REP)           AC1679311;
+ PARAMETER(PAR.Ship_To_Customer);
+ PARAMETER(DB1.Accrual_Code);
+ PARAMETER(DB1.CAH_Sequence_No);
+ PARAMETER(PAR.Item_Structure_Type_Code);
+ PARAMETER(PAR.Item_Structure_Group_Code);
+ PARAMETER(PAR.Item_Structure_Class_Code);
+ PARAMETER(LCL.Accrual_Rate);
+ PARAMETER(NLL.Accrual_Rate_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+ }
+
+ //?Check for item str type/group without the class  RMC 08/07/07
+ CASE;
+
+ // IF PGM.*Return code is *Normal
+ IF PGM.*Return_code = *BLANK;
+
+ //?Check for item str type/group without the class  RMC 08/07/07
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ EXECUTE FUNCTION(RTV & Chk Rate Exists RT) TYPE(RTVOBJ) FILE(POC8REP)           AC1679311;
+ PARAMETER(PAR.Ship_To_Customer);
+ PARAMETER(DB1.Accrual_Code);
+ PARAMETER(DB1.CAH_Sequence_No);
+ PARAMETER(PAR.Item_Structure_Type_Code);
+ PARAMETER(PAR.Item_Structure_Group_Code);
+ PARAMETER(*ZERO);
+ PARAMETER(LCL.Accrual_Rate);
+ PARAMETER(NLL.Accrual_Rate_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+ }
+
+ ENDIF;
+
+ ENDIF;
+
+ //?PKD/SZ 07/20/09 -- Needed to check if the Item was found or not.
+ CASE;
+
+ // IF PGM.*Return code is *Normal
+ IF PGM.*Return_code = *BLANK;
+
+ //?PKD/SZ 07/20/09 -- Needed to check if the Item was found or not.
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ // LCL.Accrual Rate = DB1.Accrual Rate
+ LCL.Accrual_Rate = DB1.Accrual_Rate;
+
+ ENDIF;
+
+ CASE;
+
+ // IF LCL.Add-on/Allowance is Allowance
+ IF LCL.Add_on_Allowance = 'S';
+
+ // LCL.Accrual Rate = CON.*ZERO - LCL.Accrual Rate
+ LCL.Accrual_Rate = *ZERO - LCL.Accrual_Rate;
+
+ ENDIF;
+
+ // PAR.Pricing Retrieved Amount = PAR.Pricing Retrieved Amount + LCL.Accrual Rate
+ PAR.Pricing_Retrieved_Amount = PAR.Pricing_Retrieved_Amount + LCL.Accrual_Rate;
+
+ //?** Accumulate rate based on All Products Y/N value
+ // IF DB1.All Products (Y/N) is No
+ IF DB1.All_Products_Y_N = 'N';
+
+ //?** If NO, then only accumulate the rate if there is a record
+ //?** in either the Customer Accrual Str or Customer Accrual Item
+ //?** file. If no record in either file, just add zeros.
+ CASE;
+
+ // IF DB1.Accrual Detail Search is Item
+ IF DB1.Accrual_Detail_Search = 'I';
+
+ EXECUTE FUNCTION(Rtv Item Accrual Rate RT) TYPE(RTVOBJ) FILE(OMHPREP)           AC1613037;
+ PARAMETER(PAR.Ship_To_Customer);
+ PARAMETER(DB1.Accrual_Code);
+ PARAMETER(DB1.CAH_Sequence_No);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Accrual_Rate);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // IF DB1.Accrual Detail Search is Item Structure
+ IF DB1.Accrual_Detail_Search = 'S';
+
+ EXECUTE FUNCTION(Rtv Item FOB Price    RT) TYPE(RTVOBJ) FILE(OPBGWKP)           AC1559616;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Order_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(NLL.Price_Overage_Override);
+ PARAMETER(NLL.Contract_Number);
+ PARAMETER(NLL.Price_Status);
+ PARAMETER(NLL.U_M_Ordered);
+ PARAMETER(NLL.Unit_Price);
+ PARAMETER(NLL.Unit_Price_Credit);
+ PARAMETER(NLL.Unit_Price_Ordered_U_M);
+ PARAMETER(NLL.Unit_Weight_Ordered_U_M);
+ PARAMETER(NLL.Actual_Shipped_Date);
+ PARAMETER(NLL.Affect_Inventory_Status);
+ PARAMETER(NLL.Affect_Sales_Doll_Status);
+ PARAMETER(NLL.Affect_Sales_Pnds_Status);
+ PARAMETER(PAR.Item_Structure_Type_Code);
+ PARAMETER(PAR.Item_Structure_Group_Code);
+ PARAMETER(PAR.Item_Structure_Class_Code);
+ PARAMETER(NLL.Affect_Trade_Fund);
+ PARAMETER(NLL.Affect_Commission);
+ PARAMETER(NLL.Affect_Pricing);
+ PARAMETER(NLL.Ord_TF_Exempt_Code);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ CASE;
+
+ // IF PAR.Item Structure Type Code is Not Entered
+ IF PAR.Item_Structure_Type_Code = *ZERO;
+
+ // OR PAR.Item Structure Group Code is Not Entered
+ OR PAR.Item_Structure_Group_Code = *ZERO;
+
+ EXECUTE FUNCTION(Rtv Item Typ/Grp/Cls  RT) TYPE(RTVOBJ) FILE(CABZREP)           AC1298334;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(PAR.Item_Structure_Class_Code);
+ PARAMETER(PAR.Item_Structure_Group_Code);
+ PARAMETER(PAR.Item_Structure_Type_Code);
+ {
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ ENDIF;
+
+ EXECUTE FUNCTION(RTV & Chk Rate Exists RT) TYPE(RTVOBJ) FILE(POC8REP)           AC1679311;
+ PARAMETER(PAR.Ship_To_Customer);
+ PARAMETER(DB1.Accrual_Code);
+ PARAMETER(DB1.CAH_Sequence_No);
+ PARAMETER(PAR.Item_Structure_Type_Code);
+ PARAMETER(PAR.Item_Structure_Group_Code);
+ PARAMETER(PAR.Item_Structure_Class_Code);
+ PARAMETER(LCL.Accrual_Rate);
+ PARAMETER(NLL.Accrual_Rate_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+ }
+
+ //?Check for item str type/group without the class  RMC 08/07/07
+ CASE;
+
+ // IF PGM.*Return code is *Normal
+ IF PGM.*Return_code = *BLANK;
+
+ //?Check for item str type/group without the class  RMC 08/07/07
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ EXECUTE FUNCTION(RTV & Chk Rate Exists RT) TYPE(RTVOBJ) FILE(POC8REP)           AC1679311;
+ PARAMETER(PAR.Ship_To_Customer);
+ PARAMETER(DB1.Accrual_Code);
+ PARAMETER(DB1.CAH_Sequence_No);
+ PARAMETER(PAR.Item_Structure_Type_Code);
+ PARAMETER(PAR.Item_Structure_Group_Code);
+ PARAMETER(*ZERO);
+ PARAMETER(LCL.Accrual_Rate);
+ PARAMETER(NLL.Accrual_Rate_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+ }
+
+ ENDIF;
+
+ ENDIF;
+
+ CASE;
+
+ // IF LCL.Add-on/Allowance is Allowance
+ IF LCL.Add_on_Allowance = 'S';
+
+ // LCL.Accrual Rate = CON.*ZERO - LCL.Accrual Rate
+ LCL.Accrual_Rate = *ZERO - LCL.Accrual_Rate;
+
+ ENDIF;
+
+ // PAR.Pricing Retrieved Amount = PAR.Pricing Retrieved Amount + LCL.Accrual Rate
+ PAR.Pricing_Retrieved_Amount = PAR.Pricing_Retrieved_Amount + LCL.Accrual_Rate;
+
+ ENDIF;
+
+ ENDIF;
+
+ CASE;
+
+ // IF PAR.Shipping Method is Prepaid
+ IF PAR.Shipping_Method = 'PR'/'PT';
+
+ //?SFC and FRC Accruals only  5/2/18  RMC S13009
+ CASE;
+
+ // IF DB1.Accrual Code is Sysco Freight Charge
+ IF DB1.Accrual_Code = 'SFC';
+
+ // PAR.SFC Accrual Exists    USR = CND.Yes
+ PAR.SFC_Accrual_Exists_USR = 'Y';
+
+ CASE;
+
+ // IF LCL.Add-on/Allowance is Allowance
+ IF LCL.Add_on_Allowance = 'S';
+
+ // LCL.Accrual Rate = CON.*ZERO - DB1.Accrual Rate
+ LCL.Accrual_Rate = *ZERO - DB1.Accrual_Rate;
+
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ // LCL.Accrual Rate = DB1.Accrual Rate
+ LCL.Accrual_Rate = DB1.Accrual_Rate;
+
+ ENDIF;
+
+ // PAR.MPR Freight Add On = PAR.MPR Freight Add On + LCL.Accrual Rate
+ PAR.MPR_Freight_Add_On = PAR.MPR_Freight_Add_On + LCL.Accrual_Rate;
+
+ //?SFC and FRC Accruals only  5/2/18  RMC S13009
+ // IF DB1.Accrual Code is Freight Rate Charge-Jetro
+ IF DB1.Accrual_Code = 'FRC';
+
+ // PAR.FRC Accrual Exists    USR = CND.Yes
+ PAR.FRC_Accrual_Exists_USR = 'Y';
+
+ CASE;
+
+ // IF LCL.Add-on/Allowance is Allowance
+ IF LCL.Add_on_Allowance = 'S';
+
+ // LCL.Accrual Rate = CON.*ZERO - DB1.Accrual Rate
+ LCL.Accrual_Rate = *ZERO - DB1.Accrual_Rate;
+
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ // LCL.Accrual Rate = DB1.Accrual Rate
+ LCL.Accrual_Rate = DB1.Accrual_Rate;
+
+ ENDIF;
+
+ // PAR.MPR Freight Add On = PAR.MPR Freight Add On + LCL.Accrual Rate
+ PAR.MPR_Freight_Add_On = PAR.MPR_Freight_Add_On + LCL.Accrual_Rate;
+
+ ENDIF;
+
+ ENDIF;
+
+ ENDIF;
+
+ //?USER: Exit processing
+
+ CASE;
+
+ // IF PAR.U/M - Pricing is Not Entered
+ IF PAR.UOM_Pricing = *BLANK;
+
+ EXECUTE FUNCTION(RTV Item Pricing Info  RT) TYPE(RTVOBJ) FILE(CABZREP)          AC1412083;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(NLL.UOM_Primary);
+ PARAMETER(NLL.Conversion_Factor_1);
+ PARAMETER(NLL.Operation_Factor_1);
+ PARAMETER(NLL.UOM_Second);
+ PARAMETER(NLL.Conversion_Factor_2);
+ PARAMETER(NLL.Operation_Factor_2);
+ PARAMETER(NLL.UOM_Third);
+ PARAMETER(LCL.UOM_Pricing);
+ PARAMETER(NLL.Unit_Weight);
+ PARAMETER(NLL.Production_Date_Control);
+ PARAMETER(NLL.Catch_Weight_Status);
+ PARAMETER(NLL.Default_Commod_Mark_basis);
+ PARAMETER(NLL.Commodity_Price_Group);
+ {
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ //?mpr needs to be in cwt
+ // LCL.U/M - Pricing = PAR.U/M - Pricing
+ LCL.UOM_Pricing = PAR.UOM_Pricing;
+
+ ENDIF;
+
+ CASE;
+
+ // IF LCL.U/M - Pricing is Carcass Hundred Weight
+ IF LCL.UOM_Pricing = 'CW';
+
+ // OR LCL.U/M - Pricing is Thousand
+ OR LCL.UOM_Pricing = 'M';
+
+ // OR LCL.U/M - Pricing is Tons
+ OR LCL.UOM_Pricing = 'TN';
+
+ //?Hundred Weight
+ CASE;
+
+ // IF LCL.U/M - Pricing is Hundred Weight
+ IF LCL.UOM_Pricing = 'CW';
+
+ // PAR.Pricing Retrieved Amount =       *
+ PAR.Pricing_Retrieved_Amount = PAR.Pricing_Retrieved_Amount * 100 'H';
+
+ ENDIF;
+
+ //?Thousand
+ CASE;
+
+ // IF LCL.U/M - Pricing is Thousand
+ IF LCL.UOM_Pricing = 'M';
+
+ // PAR.Pricing Retrieved Amount =       *
+ PAR.Pricing_Retrieved_Amount = PAR.Pricing_Retrieved_Amount * 1000 'H';
+
+ ENDIF;
+
+ //?Tons
+ CASE;
+
+ // IF LCL.U/M - Pricing is Tons
+ IF LCL.UOM_Pricing = 'TN';
+
+ // PAR.Pricing Retrieved Amount =       *
+ PAR.Pricing_Retrieved_Amount = PAR.Pricing_Retrieved_Amount * 2000 'H';
+
+ ENDIF;
+
+ //?Calc CWT for Freight add on
+ //?Hundred Weight
+ CASE;
+
+ // IF LCL.U/M - Pricing is Hundred Weight
+ IF LCL.UOM_Pricing = 'CW';
+
+ // PAR.MPR Freight Add On =       *
+ PAR.MPR_Freight_Add_On = PAR.MPR_Freight_Add_On * 100 'H';
+
+ ENDIF;
+
+ //?Thousand
+ CASE;
+
+ // IF LCL.U/M - Pricing is Thousand
+ IF LCL.UOM_Pricing = 'M';
+
+ // PAR.MPR Freight Add On =       *
+ PAR.MPR_Freight_Add_On = PAR.MPR_Freight_Add_On * 1000 'H';
+
+ ENDIF;
+
+ //?Tons
+ CASE;
+
+ // IF LCL.U/M - Pricing is Tons
+ IF LCL.UOM_Pricing = 'TN';
+
+ // PAR.MPR Freight Add On =       *
+ PAR.MPR_Freight_Add_On = PAR.MPR_Freight_Add_On * 2000 'H';
+
+ ENDIF;
+
+ ENDIF;
+
+}
+
+
+//? 5/2/18 R13009
+CASE;
+
+// IF PAR.SFC Accrual Exists    USR is Yes
+IF PAR.SFC_Accrual_Exists_USR = 'Y';
+
+// PAR.MPR Price Calc Exception = CND.Sysco - frt add on SFC
+PAR.MPR_Price_Calc_Exception = 'SF';
+
+//? 5/2/18 R13009
+// IF PAR.FRC Accrual Exists    USR is Yes
+IF PAR.FRC_Accrual_Exists_USR = 'Y';
+
+// PAR.MPR Price Calc Exception = CND.Jetro - frt add on FRC
+PAR.MPR_Price_Calc_Exception = 'FR';
+
+ENDIF;
+
+//?Get Accruals:  Order Level
+EXECUTE FUNCTION(Rtv Deduct/Add-MPR    RT) TYPE(RTVOBJ) FILE(OMHQCPP)           AC2053331;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(PAR.Order_Sequence_Number);
+PARAMETER(PAR.Order_Secondary_Line_Seq);
+PARAMETER(PAR.MPR_Order_Accrual_Rate);
+PARAMETER(PAR.Quantity_Shipped_Total);
+PARAMETER(PAR.Weight_Shipped_Total);
+PARAMETER(1);
+{
+ //?USER: Initialize routine
+
+ // PAR.Extended Amount = CON.*ZERO
+ PAR.Extended_Amount = *ZERO;
+
+ //?USER: Process Data record
+
+ EXECUTE FUNCTION(RTV All Values Act NEW RT) TYPE(RTVOBJ) FILE(OMHLREP)          AC1823808;
+ PARAMETER(DB1.Accrual_Code);
+ PARAMETER(PAR.Accrual_Description);
+ PARAMETER(PAR.Automatic_Accrual_Y_N);
+ PARAMETER(PAR.Print_On_Invoice_Y_N);
+ PARAMETER(PAR.Rate_Usage);
+ PARAMETER(PAR.Add_on_Allowance);
+ PARAMETER(PAR.Accrual_Type);
+ PARAMETER(PAR.Sub_Ledger_Code);
+ PARAMETER(PAR.Reverse_Accrual_Code);
+ PARAMETER(PAR.UOM_Primary_Dft);
+ PARAMETER(PAR.G_L_Code_Dr);
+ PARAMETER(PAR.G_L_Code_Cr);
+ PARAMETER(PAR.G_L_Sub_Account_Code);
+ PARAMETER(PAR.Sales_History_Exp_Bucket);
+ PARAMETER(PAR.Post_to_G_L_Y_N);
+ PARAMETER(PAR.Accrual_Rate_Type);
+ PARAMETER(PAR.Affect_Sales_Realz_Rpt);
+ PARAMETER(PAR.Affect_Invoice_Price);
+ PARAMETER(PAR.Invoice_Print_Type);
+ {
+  //?USER: Initialize routine
+
+  //?RMC DLY029 5/23/07 Db Change - this outputs the new fields
+  //?USER: Processing if Data record not found
+
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?Calc Accrual
+ CASE;
+
+ // IF DB1.Accrual Rate Type is $/Lb
+ IF DB1.Accrual_Rate_Type = 'W';
+
+ // OR DB1.Accrual Rate Type is $/Lb by Weight Billed
+ OR DB1.Accrual_Rate_Type = 'WR';
+
+ // WRK.Extended Amount = DB1.Accrual Rate * PAR.Weight Shipped Total *
+ WRK.Extended_Amount = DB1.Accrual_Rate * PAR.Weight_Shipped_Total;
+
+ //?Calc Accrual
+ // IF DB1.Accrual Rate Type is $/Quantity
+ IF DB1.Accrual_Rate_Type = 'Q';
+
+ // OR DB1.Accrual Rate Type is $/Quantity by qty shipped
+ OR DB1.Accrual_Rate_Type = 'QR';
+
+ // WRK.Extended Amount = DB1.Accrual Rate * PAR.Quantity Shipped Total *
+ WRK.Extended_Amount = DB1.Accrual_Rate * PAR.Quantity_Shipped_Total;
+
+ //?Calc Accrual
+ // IF DB1.Accrual Rate Type is Flat Amount
+ IF DB1.Accrual_Rate_Type = 'FA';
+
+ // WRK.Extended Amount = DB1.Accrual Rate
+ WRK.Extended_Amount = DB1.Accrual_Rate;
+
+ //?Calc Accrual
+ // IF DB1.Accrual Rate Type is % of Gross Extended Amt
+ IF DB1.Accrual_Rate_Type = 'G';
+
+ //?Accrual = gross extended amt from Order dtl * accrual rate
+ // WRK.Extended Amount
+ WRK.Extended_Amount = ( DB1.Accrual_Rate * PAR.Extended_Amount 'H' ) / 100 'H';
+
+ //?Calc Accrual
+ // IF DB1.Accrual Rate Type is $/Quantity/1000
+ IF DB1.Accrual_Rate_Type = 'QT';
+
+ // WRK.Extended Amount = CON.*ZERO
+ WRK.Extended_Amount = *ZERO;
+
+ CASE;
+
+ // IF PAR.Quantity Shipped Total is Greater than zero
+ IF PAR.Quantity_Shipped_Total > *ZERO;
+
+ // Compute: Amt/1000 qty
+ WRK.Extended_Amount = ( DB1.Accrual_Rate * PAR.Quantity_Shipped_Total ) / 1000;
+
+ ENDIF;
+
+ ENDIF;
+
+ //?Change trans amount according to add-on/allowance flag
+ CASE;
+
+ // IF PAR.Add-on/Allowance is Allowance
+ IF PAR.Add_on_Allowance = 'S';
+
+ // AND PAR.Billing Activity Type is Invoice
+ AND ( PAR.Billing_Activity_Type = '1';
+
+ // OR PAR.Billing Activity Type is Debit Memo
+ OR PAR.Billing_Activity_Type = '3' );
+
+ //?Do for debit memo too     RMC    4/14/10
+ // WRK.Extended Amount = CON.*ZERO - WRK.Extended Amount
+ WRK.Extended_Amount = *ZERO - WRK.Extended_Amount;
+
+ ENDIF;
+
+ // PAR.Extended Amount = PAR.Extended Amount + WRK.Extended Amount
+ PAR.Extended_Amount = PAR.Extended_Amount + WRK.Extended_Amount;
+
+ //?USER: Exit processing
+
+ //?calc amt per cwt
+ CASE;
+
+ // IF PAR.Weight Shipped Total is Greater than zero
+ IF PAR.Weight_Shipped_Total > *ZERO;
+
+ // PAR.Extended Amount = PAR.Extended Amount / PAR.Weight Shipped Total *
+ PAR.Extended_Amount = PAR.Extended_Amount / PAR.Weight_Shipped_Total;
+
+ // PAR.Extended Amount = PAR.Extended Amount * CON.100 *
+ PAR.Extended_Amount = PAR.Extended_Amount * 100;
+
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ // PAR.Extended Amount = CON.*ZERO
+ PAR.Extended_Amount = *ZERO;
+
+ ENDIF;
+
+}
+
+

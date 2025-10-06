@@ -1,0 +1,817 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP367
+      * TITLE:       BUILD WORKFILES FOR EXPENSE TICKET ALLOCATIONS
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     6/6/94
+      *
+      *  FUNCTION:   THIS BATCH PROGRAM IS CALLED FROM HP467CL.
+      *              IT BUILDS WORKFILES THAT ARE USED IN EXPENSE TICKET ALLOCATIONS.
+      *              THE USER'S SUBMISSION CRITERIA (CUTOFF DATE AND
+      *              EDIT/FINAL FLAG) ARE PASSED IN THE LDA.
+      *
+      *              EXPENSE CAN BE ALLOCATED TO CREATED AND OPEN GROUPS.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 09/12/94  LEANNE FEDOR
+      *           REMOVED FOUR FIELDS FROM THE EXPENSE TICKET FILE:
+      *                 PIG DAYS ALLOCATED OVER
+      *                 ALLOCATED TIME
+      *                 G/L POST TIME
+      *                 EOP POST TIME
+      *
+      * 09/12/94  LEANNE FEDOR
+      *           REMOVED THE FOLLOWING TIME FIELDS FROM THE FEED
+      *           TICKET HEADER AND DETAIL FILE.
+      *                 COSTED TIME
+      *                 ALLOCATED TIME
+      *                 G/L POST TIME
+      *                 EOP POST TIME
+      *
+      * 12/29/94  LEANNE FEDOR
+      *           AS REQUESTED BY ALICE, CHANGED TO NOT WRITE
+      *           ALLOCATION RECORDS FOR ZERO AMOUNTS.
+      *
+      * 01/19/95  LEANNE FEDOR
+      *           ADDED LOGIC TO ACCOMMODATE ALLOCATING BY COST CENTER.
+      *           PLEASE NOTE THAT COST CENTER IS TIED TO THE COMPANY
+      *           NUMBER OF THE ORIGINATING BUSINESS OFFICE--NOT THE
+      *           ALLOCATING BUSINESS OFFICE.
+      *
+      * 02/06/95  LEANNE FEDOR
+      *           A NEW WORKFILE FOR GROUP PIG DAYS PER DATE RANGE WAS
+      *           ADDED IN AN ATTEMPT TO DECREASE PROCESSING TIME. THE
+      *           NEW 'PIG DAYS' ALLOCATION LOGIC WILL ATTEMPT TO FIND
+      *           A RECORD FOR A GROUP IN THIS FILE PRIOR TO CALLING
+      *           THE GENERIC PROGRAM TO CALCULATE PIG DAYS. THUS, PIG
+      *           DAYS FOR A GROUP FOR A SPECIFIC DATE RANGE WILL BE
+      *           CALCULATED ONLY ONCE PER RUN.
+      *
+      * 02/07/95  LEANNE FEDOR
+      *           ADDED CALL TO THE UTILITY CLP TO RECLAIM RESOURCES
+      *           AND CLEAN UP AFTER THE GENERIC PROGRAMS THAT DO NOT
+      *           SET ON THE LAST RECORD INDICATOR.
+      *
+      * 04/26/95  LEANNE FEDOR
+      *           CHANGED FARM SITE CODE FROM ALPHA TO NUMERIC.
+      *
+      * 07/12/95  LEANNE FEDOR
+      *           CHANGED FOR MOVEMENT REWRITE.
+      *
+      * 12/09/97  LEANNE FEDOR
+      *           EXPENSE TICKET NUMBER FIELD RENAMED FROM 'XTNO' TO
+      *           'XTSN'.
+      *
+      * 02/04/03  LeAnne Fedor
+      *           Since we changed the JDE download of expense tickets to write 1-for-1
+      *           instead of summarizing records, this allocation was I/O intensive and
+      *           ran for an hour. So, we changed the logic to build a workfile of CR/OP
+      *           group data for each occurrence of begin/end dates. So, pretty muchly a
+      *           rewrite.
+      *
+      * 01/13/04  LeAnne Fedor
+      *           Tom Dye requested "that the system automatically change the allocation
+      *           method of expense tickets that can't allocate because of zero pig days
+      *           to the Feed Pounds Method so that the tickets get allocated on the
+      *           first pass."  So, we hard-coded to make it do this.
+      *
+      * 05/05/04  LeAnne Fedor
+      *           Tom Dye still has expense tickets that are not getting allocated because
+      *           groups have a) no pig days and b) no feed!! This is hard to imagine; but,
+      *           we have added a new Allocation Method. It is 'Group Count'. The
+      *           method simply counts the number of groups and distributes the expenses
+      *           equally to the groups. So, when Pig Days fails, we hardode to try
+      *           Feed Pounds. And, if Feed Pounds fails, we hardcode to try Group Count.
+      *
+      * 04/20/05  LeAnne Fedor
+      *           New logic was hardcoded for Purchased Feed. When the expense code is
+      *           '6150', we go thru all the allocation logic looking for Nursery groups only.
+      *           If we find no Nursery groups, we then go thru all the allocation logic a
+      *           second time looking for any/all groups.
+      *
+      * 12/07/05  LeAnne Fedor
+      *           New logic was hardcoded for expense codes: 7970 Culls-Exp Reductn
+      *                                                      7971 Cull Sales Bonus
+      *           We will now go thru all the allocation logic looking for GF groups only.
+      *           If we find no GF groups, we then go thru all the allocation logic a
+      *           second time looking for any/all groups.
+      *
+      * 01/23/06  LeAnne Fedor
+      *           In the change of 12/07/05, I hardcoded the wrong expense codes.
+      *           I hardcoded 7190 and 7191 instead of 7970 and 7971.
+      *           Codes 7190 and 7191 do not exist; so, there is no data clean-up to do.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 04/22/10  LeAnne Ramsey
+      *           John Davison does not want the BGF/GDU Farms that share a Cost Center with
+      *           a GF/GDU Farm to be allocated any expense ticket dollars from the Cost Center.
+      *           This was not really working anyway since BGF Farms do not have true PIG DAYS!
+      *           Looking at data for the last 18 months, it appears that the only BGFs getting
+      *           dollars were these BGF/GDUs (the multi-farm Cost Centers). But, I did not
+      *           want to exclude BGFs (see the 02/04/03 change above). So, for BGF groups, we will
+      *           always leave Pig Days at zero in the $bldopen subroutine.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 03/26/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * HEADING SPECIFICATIONS
+      ****************************************************************
+      *
+      * Set the systme date field (*DATE) to CCYYMMDD format
+      *
+     H DATEDIT(*YMD)
+      *
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp018    if   e           K disk
+      *    Farm site
+      *
+      *
+     Fhsl034f   if   e           k disk
+      *    Hog group
+      *
+      *
+     Fhsl038e   if   e           k disk
+      *    Feed ticket detail
+      *
+      *
+     Fhsl048i   if   e           k disk
+      *    Expense ticket (records selected by opnqry)
+      *
+      *
+     Fhsl058d   if   e           k disk
+      *    Movement event
+      *
+      *
+     Fhsp075    if   e           k disk
+      *  Transfer movement detail
+      *
+      *
+     Fhsp085    if   e           k disk
+      *    Sales movement detail
+      *
+      *
+     Fhsp366    uf a e           k disk
+      *    Workfile: Created and open groups
+      *
+      *
+     Fhsp367    o    e           k disk
+      *    Workfile: Expense ticket
+      *
+      *
+     Fhsp368    uf a e           k disk
+      *    Workfile: Hog group
+      *
+      /EJECT
+      ****************************************************************
+      * Definition specs
+      ****************************************************************
+      *
+      * Control/save fields
+      *
+     D svxbdt          s                   like(xtxbdt)
+     D svxedt          s                   like(xtxedt)
+     D totfl           s              1    inz('N')
+     D nuronlyfl       s              1    inz('N')
+     D gfonlyfl        s              1    inz('N')
+      *
+      * Workfields
+      *
+     D wkdiff          s              9  2
+     D wkamcd          s                   like(wtamcd)
+      *
+     D wkcnt           s                   like(wtcnt)
+     D wkhd            s                   like(wthd)
+     D wklb            s                   like(wtlb)
+     D wkpd            s                   like(wtpd)
+      *
+     D wkxtam          s                   like(wtxtam)
+     D wkxtlb          s                   like(wtxtlb)
+     D wkxthd          s                   like(wtxthd)
+     D wkxtqt          s                   like(wtxtqt)
+      *
+      *---------------------------------------------------------------
+      * CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      /EJECT
+      ****************************************************************
+      * Mainline
+      ****************************************************************
+      *
+      * Process each expense ticket selected by the open query
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsl048i                                90
+     C                   if        *in90 = *off                                 If not eof
+      *
+      * If the begin/end dates have changed, go clear/rebuild the group
+      * workfile.
+     C                   if        svxbdt <> xtxbdt or svxedt <> xtxedt
+     C                   exsr      $dltopen
+     C                   exsr      $bldopen
+     C                   z-add     xtxbdt        svxbdt
+     C                   z-add     xtxedt        svxedt
+     C                   endif
+      *
+      *
+      * Clear the Expense Ticket Workfile record.
+      *
+     C                   clear                   wtrec
+      *
+      * Move the Allocation Method of this Expense Ticket to a workfield.
+      *
+     C                   move      xtamcd        wkamcd
+      *
+      * Initialize flags for Nursery and GF only.
+      *
+     C                   move      no            nuronlyfl
+     C                   move      no            gfonlyfl
+      *
+     C                   select
+      *
+      * For "Purchased Feed", we will first try to find "Nursery" groups.
+      * If we don't find any Nursery groups, we will then retry using all groups.
+      *
+     C                   when      xtexcd = '6150 '
+     C                   move      yes           nuronlyfl
+     C                   exsr      $attempts
+      *
+     C                   if        wtcnt = 0
+     C                   move      no            nuronlyfl
+     C                   exsr      $attempts
+     C                   endif
+      *
+      * For "Cull Sales", we will first try to find "Grow Finish" groups.
+      * If we don't find any GF groups, we will then retry using all groups.
+      *
+     C                   when      xtexcd = '7970 ' or xtexcd = '7971 '
+     C                   move      yes           gfonlyfl
+     C                   exsr      $attempts
+      *
+     C                   if        wtcnt = 0
+     C                   move      no            gfonlyfl
+     C                   exsr      $attempts
+     C                   endif
+     C                   other
+      *
+      * All expenses other than Purchased Feed and Cull Sales
+      *
+     C                   exsr      $attempts
+     C                   endsl
+      *
+      *
+      * All groups have been processed for this Expense Ticket.
+      * Always write an expense ticket record to the workfile
+      *
+     C                   exsr      $wrt367
+      *
+      * If any groups were selected/processed,
+      *     Allocate the ticket totals to the Groups in the Group workfile
+      *
+     C                   if        wtcnt <> 0
+     C                   exsr      $allocate
+     C                   endif
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Main do
+      *
+      *---------------------------------------------------------------
+      * After all processing is complete, cleanup the group workfile by
+      * deleting all records that have zero amount.  Zero-value records
+      * can occur when the total dollars to be distributed is very small
+      * with the calculated unit amount being less than 0.0001.  In this
+      * instance, the entire ticket amount will have been distributed to
+      * the last group processed.
+      *---------------------------------------------------------------
+      *
+     C     *loval        setll     hsp368
+      *
+     C                   dou       *in90 = *on                                  Do cleanup
+     C                   read      hsp368                                 90
+     C                   if        *in90 = *off and wgxtam = 0                  If not eof
+     C                   delete    wgrec
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do cleanup
+      *
+      * Call utility program to reclaim resources--close files and cleanup
+      * after the generic programs that do not set on the last record indicator.
+      *
+     C                   call      'UTRCRSC'
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * Attempts at allocating
+      *---------------------------------------------------------------
+      *
+     C     $attempts     begsr
+      *
+      * Process all created/open groups for this ticket.
+      * (A)  If the Allocation Method is NOT Pig Days,
+      *          you will make only a single attempt to allocate.
+      * (B)  If the Allocation Method is Pig Days and you are unable to allocate,
+      *      change the Allocation Method to Feed Pounds and try again.
+      *          If you still can't allocate, change the Allocation Method to Group Count
+      *          and try again.
+      *
+      * 1 attempt
+     C                   select
+     C                   when      wkamcd <> 'PIGDA'
+     C                   exsr      $groups
+     C                   other
+      * 3 attempts
+     C                   exsr      $groups
+      *
+     C                   if        wtcnt = 0
+     C                   move      'FDLBS'       wkamcd
+     C                   exsr      $groups
+     C                   endif
+      *
+     C                   if        wtcnt = 0
+     C                   move      'COUNT'       wkamcd
+     C                   exsr      $groups
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Process all created/open groups for a specific ticket
+      *---------------------------------------------------------------
+      *
+     C     $groups       begsr
+      *
+     C     *loval        setll     hsp366
+      *
+     C                   dou       *in91 = *on                                  Do groups
+     C                   read      hsp366                                 91
+     C                   if        *in91 = *off                                 If not eof
+      *
+      * Only include groups that match the Expense Ticket allocation level
+      *
+     C                   select
+     C                   when      xtdvcd <> *blank and xtdvcd <> wodvcd
+     C                   when      xtrgcd <> *blank and xtrgcd <> worgcd
+     C                   when      xtalbo <> *blank and xtalbo <> wofsbo
+     C                   when      xtppcd <> *blank and xtppcd <> woppcd
+     C                   when      xtptcd <> *blank and xtptcd <> woptcd
+     C                   when      xtfscd <> 0 and xtfscd <> wofscd
+     C                   when      xtblcd <> *blank and xtblcd <> woblcd
+     C                   when      xtcjd <> *blank and xtcjd <> wocjd
+     C                   when      xtcjd <> *blank and xtcocd <> wococd
+     C                   other
+      *
+      * This group record matches the allocation levels. Now, write a group
+      * record if it had any activity for the specified Allocation Method.
+      *
+     C                   if        (gfonlyfl  = no and nuronlyfl = no)     or
+     C                             (nuronlyfl = yes and woppcd  = 'NUR  ') or
+     C                             (gfonlyfl  = yes and woppcd  = 'GF   ')
+      *
+     C                   if        (wkamcd = 'PIGDA' and wopd > 0) or
+     C                             (wkamcd = 'FDLBS' and wolb > 0) or
+     C                             (wkamcd = 'FRMOV' and wohd > 0) or
+     C                             (wkamcd = 'COUNT' and wogr > 0)
+     C                   exsr      $wrt368
+     C                   endif
+      *
+     C                   endif
+      *
+     C                   endsl
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do groups
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Calculate Pig Days for a group
+      *---------------------------------------------------------------
+      *
+     C     $pigdays      begsr
+      *
+     C                   call      'HPPDAY'
+     C                   parm                    hghgsn
+     C                   parm                    xtxbdt
+     C                   parm                    xtxedt
+     C                   parm                    wkpd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Calculate feed pounds for a group
+      *---------------------------------------------------------------
+      *
+     C     $feed         begsr
+      *
+     C     hghgsn        setll     hsl038e
+      *
+     C                   dou       *in93 = *on                                  Do feed
+     C     hghgsn        reade     hsl038e                                93
+     C                   if        *in93 = *off and                             If not eof
+     C                             fdtkdt >= xtxbdt and
+     C                             fdtkdt <= xtxedt
+      *
+     C                   add       fdfdlb        wklb
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do feed
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Calculate Movement Head for a group
+      *---------------------------------------------------------------
+      *
+     C     $head         begsr
+      *
+      * Process the Movement Event file for the group.
+      * Omit daily dead and inventory adjustment movements from this logic.
+      *
+     C     hghgsn        setll     hsl058d
+      *
+     C                   dou       *in93 = *on                                  Do head
+     C     hghgsn        reade     hsl058d                                93
+     C                   if        *in93 = *off and                             If origin
+     C                             meodfl = 'O' and
+     C                             memtcd <> 'A' and
+     C                             memtcd <> 'D' and
+     C                             memedt >= xtxbdt and
+     C                             memedt <= xtxedt
+      *
+      * Transfer
+     C                   select
+     C                   when      memtcd = 'T'
+     C     key01         chain     hsp075                             92
+     C                   if        *in92 = *off
+     C                   add       mdshhd        wkhd
+     C                   endif
+      * Sale
+     C                   when      memtcd = 'S'
+     C     key02         chain     hsp085                             92
+     C                   if        *in92 = *off
+     C                   add       sgshhd        wkhd
+     C                   endif
+     C                   endsl
+      *
+     C                   endif                                                  If origin
+     C                   enddo                                                  Do head
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write a Hog Group record to the Hog Group workfile
+      *---------------------------------------------------------------
+      *
+     C     $wrt368       begsr
+      *
+     C                   clear                   wgrec
+      *
+     C                   z-add     xtxtsn        wgxtsn
+     C                   z-add     wohgsn        wghgsn
+     C                   movel     wohgcd        wghgcd
+     C                   movel     wococd        wgcocd
+     C                   movel     wocjd         wgcjd
+     C                   movel     woppcd        wgppcd
+     C                   movel     woptcd        wgptcd
+     C                   movel     wodvcd        wgdvcd
+     C                   movel     worgcd        wgrgcd
+     C                   movel     wofsbo        wgalbo
+     C                   z-add     wofscd        wgfscd
+     C                   movel     woblcd        wgblcd
+     C                   movel     wormcd        wgrmcd
+      *
+      * Populate the pig days/pounds/head fields and accumulate Expense Ticket
+      * totals basedon Allocation Method
+      *
+     C                   select
+     C                   when      wkamcd = 'PIGDA'
+     C                   z-add     wopd          wgpd
+     C                   add       wopd          wtpd
+      *
+     C                   when      wkamcd = 'FDLBS'
+     C                   z-add     wolb          wglb
+     C                   add       wolb          wtlb
+      *
+     C                   when      wkamcd = 'FRMOV'
+     C                   z-add     wohd          wghd
+     C                   add       wohd          wthd
+      *
+     C                   when      wkamcd = 'COUNT'
+     C                   z-add     wogr          wggr
+     C                   add       wogr          wtgr
+     C                   endsl
+      *
+     C                   add       1             wtcnt
+      *
+     C                   write     wgrec
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write an Expense Ticket record to the workfile
+      *---------------------------------------------------------------
+      *
+     C     $wrt367       begsr
+      *
+      * Move Expense Ticket fields to workfile record.
+      *
+     C                   z-add     xtxtsn        wtxtsn
+     C                   move      xtxscd        wtxscd
+     C                   move      xtbobo        wtbobo
+     C                   z-add     xtxbdt        wtxbdt
+     C                   z-add     xtxedt        wtxedt
+     C                   move      xteccd        wteccd
+     C                   move      xtescd        wtescd
+     C                   move      xtexcd        wtexcd
+     C                   z-add     xtxtam        wtxtam
+     C                   z-add     xtxthd        wtxthd
+     C                   z-add     xtxtlb        wtxtlb
+     C                   z-add     xtxtqt        wtxtqt
+      *
+     C                   movel     xtrpcd        wtrpcd
+     C                   movel     xtalfl        wtalfl
+      *
+     C                   movel     xtcocd        wtcocd
+     C                   movel     xtcjd         wtcjd
+     C                   movel     xtptcd        wtptcd
+     C                   movel     xtppcd        wtppcd
+     C                   movel     xtalbo        wtalbo
+     C                   movel     xtdvcd        wtdvcd
+     C                   movel     xtrgcd        wtrgcd
+     C                   z-add     xtfscd        wtfscd
+     C                   movel     xtblcd        wtblcd
+     C                   movel     xtrmcd        wtrmcd
+     C                   z-add     xthgsn        wthgsn
+      *
+     C                   z-add     xtpodt        wtpodt
+     C                   z-add     xtepdt        wtepdt
+     C                   movel     *date         wtaldt
+      *
+      * Allocation method
+     C                   movel     wkamcd        wtamcd
+      *
+      * Calculate the per unit values for the Expense Ticket based on the
+      * Allocation Method
+      *
+     C                   move      no            totfl
+      *
+     C                   select
+     C                   when      wkamcd = 'PIGDA' and wtpd <> 0
+     C                   move      yes           totfl
+     C     xtxtam        div       wtpd          wtunam
+     C     xtxthd        div       wtpd          wtunhd
+     C     xtxtlb        div       wtpd          wtunlb
+     C     xtxtqt        div       wtpd          wtunqt
+      *
+     C                   when      wkamcd = 'FDLBS' and wtlb <> 0
+     C                   move      yes           totfl
+     C     xtxtam        div       wtlb          wtunam
+     C     xtxthd        div       wtlb          wtunhd
+     C     xtxtlb        div       wtlb          wtunlb
+     C     xtxtqt        div       wtlb          wtunqt
+      *
+     C                   when      wkamcd = 'FRMOV' and wthd <> 0
+     C                   move      yes           totfl
+     C     xtxtam        div       wthd          wtunam
+     C     xtxthd        div       wthd          wtunhd
+     C     xtxtlb        div       wthd          wtunlb
+     C     xtxtqt        div       wthd          wtunqt
+      *
+     C                   when      wkamcd = 'COUNT' and wtgr <> 0
+     C                   move      yes           totfl
+     C     xtxtam        div       wtgr          wtunam
+     C     xtxthd        div       wtgr          wtunhd
+     C     xtxtlb        div       wtgr          wtunlb
+     C     xtxtqt        div       wtgr          wtunqt
+     C                   endsl
+      *
+      *
+      * Set the allocation flag to 'A' if:
+      *     1) There were active groups, and
+      *     2) accumulated totals used for calculating unit values are not zero
+      *
+     C                   if        wtcnt <> 0 and totfl = yes
+     C                   movel     'A'           wtalfl
+     C                   endif
+      *
+     C                   write     wtrec
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Allocate the Expense Ticket values to each Group
+      *---------------------------------------------------------------
+      *
+     C     $allocate     begsr
+      *
+      * Initialize work fields
+      *
+     C                   z-add     0             wkcnt
+     C                   z-add     0             wkxtam
+     C                   z-add     0             wkxtqt
+     C                   z-add     0             wkxthd
+     C                   z-add     0             wkxtlb
+      *
+     C     xtxtsn        setll     hsp368
+      *
+     C                   dou       *in91 = *on                                  Do allocation
+     C     xtxtsn        reade     hsp368                                 91
+     C                   if        *in91 = *off                                 If not eof
+      *
+      * Calcualte the portion of the Expense Ticket that should be
+      * allocated to this group based on the Allocation Method
+      *
+     C                   select
+     C                   when      wkamcd = 'PIGDA'
+     C     wgpd          mult      wtunam        wgxtam
+     C     wgpd          mult      wtunhd        wgxthd
+     C     wgpd          mult      wtunlb        wgxtlb
+     C     wgpd          mult      wtunqt        wgxtqt
+      *
+     C                   when      wkamcd = 'FDLBS'
+     C     wglb          mult      wtunam        wgxtam
+     C     wglb          mult      wtunhd        wgxthd
+     C     wglb          mult      wtunlb        wgxtlb
+     C     wglb          mult      wtunqt        wgxtqt
+      *
+     C                   when      wkamcd = 'FDMOV'
+     C     wghd          mult      wtunam        wgxtam
+     C     wghd          mult      wtunhd        wgxthd
+     C     wghd          mult      wtunlb        wgxtlb
+     C     wghd          mult      wtunqt        wgxtqt
+      *
+     C                   when      wkamcd = 'COUNT'
+     C     wggr          mult      wtunam        wgxtam
+     C     wggr          mult      wtunhd        wgxthd
+     C     wggr          mult      wtunlb        wgxtlb
+     C     wggr          mult      wtunqt        wgxtqt
+     C                   endsl
+      *
+      * Accumulate this group's portion into total workfields
+      *
+     C                   add       wgxtam        wkxtam
+     C                   add       wgxthd        wkxthd
+     C                   add       wgxtlb        wkxtlb
+     C                   add       wgxtqt        wkxtqt
+      *
+      * Increment the Group counter
+      *
+     C                   add       1             wkcnt
+      *
+      * If this is the last group to receive allocations, dump any
+      * remaining expense ticket amounts into this group.
+      *
+     C                   if        wtcnt = wkcnt                                If last group
+      *
+     C                   if        wtxtam <> wkxtam
+     C     wtxtam        sub       wkxtam        wkdiff
+     C     wkdiff        add       wgxtam        wgxtam
+     C                   endif
+      *
+     C                   if        wtxthd <> wkxthd
+     C     wtxthd        sub       wkxthd        wkdiff
+     C     wkdiff        add       wgxthd        wgxthd
+     C                   endif
+      *
+     C                   if        wtxtlb <> wkxtlb
+     C     wtxtlb        sub       wkxtlb        wkdiff
+     C     wkdiff        add       wgxtlb        wgxtlb
+     C                   endif
+      *
+     C                   if        wtxtqt <> wkxtqt
+     C     wtxtqt        sub       wkxtqt        wkdiff
+     C     wkdiff        add       wgxtqt        wgxtqt
+     C                   endif
+      *
+     C                   endif                                                  If last group
+      *
+     C                   update    wgrec
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do allocation
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Delete all records in the Group Workfile
+      *---------------------------------------------------------------
+      *
+     C     $dltopen      begsr
+      *
+     C     *loval        setll     hsp366
+      *
+     C                   dou       *in91 = *on                                  Do open delete
+     C                   read      hsp366                                 91
+     C                   if        *in91 = *off                                 If not eof
+     C                   delete    worec
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do open delete
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------
+      * Build workfile of Created/Open Groups for this begin/end date range
+      *-------------------------------------------------------------------------
+      *
+     C     $bldopen      begsr
+      *
+     C     *loval        setll     hsl034f
+      *
+     C                   dou       *in91 = *on                                  Do groups
+     C                   read      hsl034f                                91
+     C                   if        *in91 = *off                                 If not eof
+      *
+      * Initialize hog group accumulators
+      *
+     C                   z-add     0             wkpd
+     C                   z-add     0             wklb
+     C                   z-add     0             wkhd
+      *
+      * Accumulate the group totals for all possible Allocation Methods
+      * (Note: We want Pig Days for BGF groups to stay at zero.)
+      *
+     C                   if        hgppcd = 'BGF  '
+     C                   else
+     C                   exsr      $pigdays
+     C                   endif
+      *
+     C                   exsr      $feed
+     C                   exsr      $head
+      *
+      * Always write a record--even if a group did not have pig days or feed or
+      * head!
+      *
+      * Clear the group record
+      *
+     C                   clear                   worec
+      *
+     C                   z-add     wkpd          wopd
+     C                   z-add     wklb          wolb
+     C                   z-add     wkhd          wohd
+     C                   z-add     1             wogr
+      *
+     C                   z-add     hghgsn        wohgsn
+     C                   move      hghgcd        wohgcd
+     C                   move      hgcocd        wococd
+     C                   move      hgppcd        woppcd
+     C                   move      hgptcd        woptcd
+     C                   move      hgfsbo        wofsbo
+     C                   move      hgdvcd        wodvcd
+     C                   move      hgrgcd        worgcd
+     C                   z-add     hgfscd        wofscd
+     C                   move      hgblcd        woblcd
+     C                   move      hgrmcd        wormcd
+      *
+      * Retrieve the Cost Center of the group's farm.
+      *
+     C     hgfscd        chain     hsp018                             92
+     C                   if        *in92 = *off
+     C                   move      fscjd         wocjd
+     C                   endif
+      *
+     C                   write     worec
+      *
+     C                   endif                                                  If not eof
+     C                   enddo                                                  Do groups
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    memvsn
+     C                   kfld                    melnno
+      *
+      *
+     C     key02         klist
+     C                   kfld                    memvsn
+     C                   kfld                    mehgsn
+      *
+     C                   endsr
+      /EJECT

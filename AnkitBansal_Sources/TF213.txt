@@ -1,0 +1,1287 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF213 - Weekly Revenue Close: Create Cash Distribution Balance
+      *                                            and Write AR Adjustments
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     03/24/05
+      *
+      * Function:    This program runs when there are no errors from the edit. It:
+      *              1) creates two records (exempt/non-exempt) for the week in the
+      *                 Cash Distribution Balance file.
+      *              2) creates the AR Adjustment data that is used later for the
+      *                 AR Adjustment listing.
+      *
+      * INVOICE NOTES---Part #2 is Obsolete as of January 2014
+      * In January 2014, the users began using all 7 positions of the Invoice Number...
+      * this made #2 below obsolete. We have replaced this with Rose Centonze's new
+      * logic.
+      *
+      *    We do 2 "tweaking" things with Invoice Numbers to make this work correctly:
+      *
+      *    1) When an Invoice Number is less than 100,000, we retrieve the
+      *       associated AR Header record instead of the associated Sales History
+      *       record to get a "Date".
+      *
+      *       We use 100,000 because we assume that records with Invoice Numbers
+      *       under 100,000 have no corresponding Sales History record. The reason
+      *       for this is that the smaller Invoice Numbers are assigned by the
+      *       AR System for Adjustment Type transactions that don't have a real
+      *       invoice tied to them. If we don't do this, when we chain back to the
+      *       Sales History file, we are finding a hit on invoices for 1997. These
+      *       invoices in Sales History have nothing to do with the transaction we
+      *       are working with today.
+      *
+      *    2) OBSOLETE Drop the last character on Invoice Numbers greater than 1,000,000
+      *       In OMS they sometimes want to reference the same invoice on multiple
+      *       transactions and they get a duplicate key error. So, they add
+      *       a zero to the end of the invoice to get it into the system.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 03/13/06  LeAnne Fedor
+      *           Recompile only. "Floor" produced pounds and amount were added
+      *           to file TFP010.
+      *
+      * 09/07/06  LeAnne Fedor
+      *           We have changed the way we are getting the "week-ending date"
+      *           from the Sales History file. We now retrieve the Sales History
+      *           record using only "invoice number"--without "Company".
+      *
+      * 11/06/06  LeAnne Fedor
+      *           We now have a function that let's users "adjust" the Remaining
+      *           Balance Amounts. So, Remaining Balance calc has changed to
+      *           reflect this.
+      *
+      * 12/01/06  LeAnne Ramsey
+      *           Replaced call to the generic program that formatted Synon dates
+      *           into CCYYMMDD and MMDDYY formats with ILE date logic. And, added
+      *           a new parm for "period" to the generic Date program TF811.
+      *
+      * 02/14/07  LeAnne Ramsey
+      *           Recompile only. New field "STD Other Cost/LB" was added to
+      *           Weekly Product Revenue Detail file.
+      *
+      * 04/16/07  LeAnne Ramsey
+      *           Recompile only. Fields were added/changed in the Weekly
+      *           Product Revenue file.
+      *           Added:   Byproduct Mix Flag
+      *                    Meat Cost Group Code
+      *           Changed: Exclude from Mix Flag     to  Mix Flag
+      *                    Exclude from Volume Flag  to  Volume Flag
+      *                    Capability Flag           to  Inventory Flag
+      *
+      * 05/14/07  LeAnne Ramsey
+      *           Recompile only. "Co-owner" fields were added to file TFP010.
+      *           Note: By the time this program runs, we will have already
+      *           "split" the values for co-owned products in the TFP010 file.
+      *           And, per AMB, we cannot "split" the AR values since none of
+      *           the data is at the "product" level.
+      *
+      * 08/14/07  LeAnne Ramsey
+      *           Added field: Item Type Code to TFP010
+      *
+      * 01/22/08  LeAnne Ramsey
+      *           Recompile only. The AR Adjustment workfile (TFP310) was changed
+      *           to be a permanent file (TFP026).
+      *
+      * 05/19/08  LeAnne Ramsey
+      *           We are changing our AR ADJUSTMENT logic.
+      *
+      *           CHANGE #1: Extract 2 weeks of Adjustments instead of 1 week
+      *           -----------------------------------------------------------
+      *           The Cash Distribution reconciliation showed that Tim Wood was adding
+      *           AR Adjustments to weeks that had already been closed in the TFS Revenue
+      *           Close. (Thus, data did not reconcile between TFS and ARS.)
+      *           1) We will now process 2 weeks of AR Detail data--the Revenue Week being
+      *              closed AND the week prior to the Revenue Week being closed.
+      *           2) We will now update the AR Detail records as "posted" by putting the Week
+      *              Ending Date of the Revenue Week that is being closed into the AR Detail
+      *              record field "TFS Adj Week-Ending Date". (Update on a FINAL run only)
+      *           3) Since we will be going back 2 weeks, we will add an extraction rule to
+      *              select only AR Detail records with zero in this new field
+      *              "TFS Adj Week-Ending Date". (ie: adjustment records not yet brought
+      *              into TFS)
+      *
+      *           CHANGE #2: Drop Company from the key for Invoice retrieval
+      *           ------------------------------------------------------------------
+      *           On ITC adjustment types in the AR System, they post the same invoice to
+      *           both companies, so when we chain back to the Sales History file, we only
+      *           find the Actual Ship Date for the company that generated the invoice.
+      *           1) We will now retrieve Actual Ship Date for our AR Adjustments with a
+      *              key list that DOES NOT INCLUDE Company.
+      *
+      * 09/11/08  LeAnne Ramsey
+      *           Recompile only. Export/Domestic Flag was added to TFP010-
+      *           Weekly Product Revenue Detail file.
+      *
+      * 04/15/09  LeAnne Ramsey
+      *           Going forward we want to include Agg AR Adjustment Amount in the calc
+      *           of AGG Gross Sales Expense %. NOTE: All expenses were getting distributed just
+      *           fine the old way since we always "dumped" on the last record. This new way
+      *           just decreases the amount "dumped" on that last record. We thought about adding
+      *           Agg Cash Dist Bal Adj Amt to the calc as well. But, since these are rare, are
+      *           after the TFP011 record is built, and there can be more than 1, we did not
+      *           want to have our AGG Gross Sales Expense % changing over time; so, we did not put
+      *           that into the calc.
+      *
+      * 09/08/09  Alice Brownfield    ---   E00493
+      *           1. Change to allocate AR Adjustments at gross vs net; i.e. give some
+      *              to Sales Expense then the NET to TF & SBF.
+      *           2. also populate the new AR Customer Number field in TFP026.
+      *           3. assign the GL Post Method Code and the Payout Code
+      *           4. calculate the payout amount and update TFP011 with it.
+      *
+      * 01/19/10  LeAnne Ramsey       ---   C468
+      *           The 'Agg Gross Revenue $$$ Balance' on TF607-Cash Distribution Balance Report
+      *           was wrong for the Exempt records. The reason was that in this program we are
+      *           setting the 'Agg AR Adj Net Amount' to zero on Exempt records. Therefore, the
+      *           calc in TF607, which uses the Agg AR Adj Net Amount is wrong.
+      *           So, we will change this program to populate the Agg AR Adj Net Amount with the
+      *           Agg AR Adj Gross Amount on Exempt records.
+      *
+      * 03/04/10  LeAnne Ramsey
+      *           Barb G. added a new parm XXPEC (the posting edit code associated with the
+      *           account number) to ARACTRET.
+      *
+      * 02/11/11  LeAnne Ramsey (E1332)
+      *           Changed logic to attempt to match the accounts in Jeff Sherbondy's notes
+      *           in the CD/AR Recon XLS.
+      *
+      * 01/28/14  LeAnne Ramsey (E2991)
+      *           Since the users have started using all 7 digits of the Invoice Number,
+      *           our "tweaking" logic no longer works. I replaced it with new logic that
+      *           Rose Centonze gave me.
+      *
+      * 07/28/14  LeAnne Ramsey (E3215)
+      *           This program was checked out to E1332. I saved a copy from DEVPRKS and
+      *           then broke the lock. Then, I checked it out to this Enhancement 3215.
+      *           The change here was to move slotting fees (account 5082) to be
+      *           Payment Method B with no payout.
+      *           After installing, I checked TF213 back out to E1332, moved the saved
+      *           code back over and put the Slotting Fees change into the saved code.
+      *
+      * 09/18/16  Danny Nguyen (E6933)
+      *           Conversion process was created to build the new A/R Header Ext file. Within
+      *           the conversion process, fields 'Orig Inv Actual Ship Date' (new) &
+      *           'AR Ord Ref Actual Ship Dt' (old) will be populated based on the new & old
+      *           logic to get the true Actual Shipped Date (ASD).
+      *           We will populate the true ASD in TFP026 file based on the following:
+      *             If 'AR Ord Ref Actual Ship Dt' exist then use it to populate the ASD in
+      *             the AR Adjustments (TFP026) file.
+      *             Otherwise use 'Orig Inv Actual Ship Date' to populate the ASD in TFP026.
+      *           Commented out existing logic (old) to get Actual Ship Date within subroutine
+      *           $getdt.
+      *
+      * 05/30/17  Danny Nguyen (T9996)
+      *           Added field to TFP026 - AR Adjustments file:
+      *             AJINSF - Invoice Suffix
+      *           Populate AJINSF field from AR Detail file.
+      *           Zero out Aggregate AR Adjustment Sales Expense Amount (AJAARASXAM) in TFP026
+      *           if and when:
+      *             1) Invoice Suffix = 'OA' (On Account Cash) &
+      *             2) Adjustment Type = 'WO' (In the first 2 position of BFUHCD field) &
+      *             3) A/R Adjustment Type (PDJ3CPP) record status is still 'A' (active).
+      *
+      * 01/15/18  Rose Centonze (S12308 AR CD Recon investigaion)
+      *           Also exclude offsetting account code OFFARSTF when ignoring 02506611 or 02502562
+      *
+      * 01/25/18  Danny Nguyen  (R12011A-Weekly Product Revenue)
+      *           Recompile only. Added 25 STF fields to TFP010 file.
+      *
+      * 03/07/19  Danny Nguyen  (S14609)
+      *           Added cost centers 3009951, 3009952, 3009953 & 3009954 to process the same
+      *           logic as '3009950 (Sales)'.
+      *
+      * 01/21/21  ISE            TSN593
+      *           Replaced *loval with *start
+      *
+      * 05/19/21  Danny Nguyen  (S17067)
+      *           Added cost centers 3009960 (Marketing) to process the same logic as
+      *           '3009950 (Sales)'.
+      *
+      * 07/29/21  Rose Centonze (SDN440 E1 LIVE )
+      *           CHANGE  add offsetting account code E1 GL ACCT ID:02693654 with OFFARSTF
+      *
+      * 05/17/22  Danny Nguyen  (DO2484 - WI 479 STF Variance Reporting)
+      *           Recompile only. Added 2 STF fields to TFP010 file.
+      *           PRXYPC   - STF STD YIELD %
+      *           PRXPMPPC - STF PUMP %
+      *
+      * 10/10/22  R Centonze   W105621 - Increase price fields to handle > 999.99
+      *                        CHANGE @@ANPRPR TO SIZE 10.6  --> pranprpr tfp010
+      *
+      *
+      /eject
+      ***********************************************************************************
+      * FILE SPECIFICATIONS
+      ***********************************************************************************
+      *
+     Farbdcpma  if   e           k disk
+      *   AR header
+      *
+      *
+E6933FPBC0CPL1  if   e           k disk
+  |   *   AR Header Ext
+  |   *
+E6933 *
+     Farbecpl1  uf   e           k disk
+      *  AR Detail (records selected/keyed with open query)
+      *
+      *
+     Fomhstpn0  if   e           k disk
+      *  Sales history
+      *
+      *
+T9996FPDJ3CPL1  if   e           k disk
+  |   *   AR Adjustment Type
+  |   *
+T9996 *
+     Ftfp007    if   e           k disk
+      *  Exempt codes
+      *
+      *
+     Ftfl010d   if   e           k disk
+      *  Weekly product revenue detail
+      *
+      *
+     Ftfp011    uf a e           k disk
+      *  Cash distribution balance
+      *
+      *
+     Ftfp026    o    e           k disk
+      *  AR Adjustments
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     d return          s              7
+      *
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D svexcd          s                   like(exexcd)
+      *
+      *
+      * Workfields for Date Manipulation
+      *
+     D wkisodate       s               d   datfmt(*iso)
+     D wksyndt         s              7  0
+      *
+      *
+      * Workfields
+      *
+     d wkinno          s                   like(bfconb)
+     D wkrate          s              9  6
+T9996d zeroaggadjslex  s              1
+     D wkrempc         s                   like(cbtafpc)
+     D wk1am           s                   like(cbabalam)
+     D wk2am           s                   like(cbabalam)
+      *
+     D wkrcexfl        s                   like(cbrcexfl)
+     D wkwedt          s                   like(cbwedt)
+      *
+     D wkaexam         s                   like(cbabalam)
+     D wksexam         s                   like(cbsbalam)
+     D wktexam         s                   like(cbtbalam)
+      *
+     D wkanonexam      s                   like(cbabalam)
+     D wksnonexam      s                   like(cbsbalam)
+     D wktnonexam      s                   like(cbtbalam)
+      *
+     D wktsxam         s                   like(cbaaranam)
+     D wkdiff          s                   like(cbasxam)
+      *
+     D totasxam        s                   like(cbasxam)
+     D totaarsxam      s                   like(cbasxam)
+     D tottsxam        s                   like(cbasxam)
+     D tottafam        s                   like(cbasxam)
+     D tottbcam        s                   like(cbasxam)
+     D tottoxam        s                   like(cbasxam)
+     D totarapam       s                   like(cbarapam)
+      *
+      *
+      * Parms
+      *
+     D xxdt            s              8  0
+     D xxsatdt         s              8  0
+     D xxyr            s              4  0
+     D xxpe            s              2  0
+     D xxwk            s              2  0
+      *
+     d xxcc            s             12
+     d xxobj           s              6
+     d xxsub           s              8
+     d xxaid           s              8
+     d xxdesc          s             30
+     d xxco            s              3  0
+     d xxpec           s              1
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldyr                   1      4  0
+     D  ldwk                   5      6  0
+     D  ldwbdt                 7     14  0
+     D  ldsynwbdt             15     21  0
+     D  ldwedt                22     29  0
+     D  ldsynwedt             30     36  0
+     D  ldpfcd                37     37
+      *
+     D  ldfmdy                39     44  0
+     D  ldtmdy                45     50  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *************************************************************************************
+      * Mainline
+      *************************************************************************************
+      *
+      * Process all Non-Exempt Weekly Product Revenue Detail records for the week.
+      * Finished Goods Only.
+      *
+     C                   move      no            wkrcexfl
+     C                   move      yes           first
+     C                   exsr      $process
+     C                   if        first = no
+     C                   exsr      $wrt011
+     C                   endif
+      *
+      * Process all Exempt Weekly Product Revenue Detail records for the week
+      * Finished Goods Only.
+      *
+     C                   move      yes           wkrcexfl
+     C                   move      yes           first
+     C                   exsr      $process
+     C                   if        first = no
+     C                   exsr      $wrt011
+     C                   endif
+      *
+      * Process all AR Adjustments for the week and update the Balance records
+      * that you just wrote with the A/R stuff.
+      *
+     C                   exsr      $adjust
+      *
+      * EOF processing
+     C                   seton                                        lr
+      /eject
+      *-------------------------------------------------------------------
+      * Process TFP010 records
+      *-------------------------------------------------------------------
+      *
+     C     $process      begsr
+      *
+     C     key01         setll     tfl010d
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     key01         reade     tfl010d                                91
+     C                   if        *in91 = *off and                             If not EOF
+     C                             pritycd = 'FG '
+     C                   move      no            first
+     C                   exsr      $accum
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------
+      * Accumulate values for the Cash Distribution Balance record
+      *-------------------------------------------------------------------
+      *
+     C     $accum        begsr
+      *
+      * Aggregate
+     c                   add       prasllb       cbasllb
+     c                   add       pragpram      cbagpram
+     c                   add       pranpram      cbanpram
+     c                   add       pracllb       cbacllb
+     c                   add       pranclam      cbanclam
+     c                   add       pragclam      cbagclam
+      *
+     c                   add       praslsxam     cbasxam
+     c                   add       praclsxam     cbasxam
+      *
+      * Seaboard
+     c                   add       prssllb       cbssllb
+     c                   add       prsnpram      cbsnpram
+     c                   add       prscllb       cbscllb
+     c                   add       prsnclam      cbsnclam
+      *
+      * Triumph
+     c                   add       prtsllb       cbtsllb
+     c                   add       prtnpram      cbtnpram
+     c                   add       prtcllb       cbtcllb
+     c                   add       prtnclam      cbtnclam
+      *
+      *        Accumulate Expenses from Sales and Claims together for:
+      *
+      *                                                    Absorbed freight
+     c                   add       prtslafam     cbtafam
+     c                   add       prtclafam     cbtafam
+      *                                                    Broker commission
+     c                   add       prtslbcam     cbtbcam
+     c                   add       prtclbcam     cbtbcam
+      *                                                    Other sales expenses
+     c                   add       prtsloxam     cbtoxam
+     c                   add       prtcloxam     cbtoxam
+      *                                                    Total sales expenses
+     c                   add       prtslsxam     cbtsxam
+     c                   add       prtclsxam     cbtsxam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a Weekly Cash Distribution Balance record
+      *---------------------------------------------------------------
+      *
+     C     $wrt011       begsr
+      *
+     C                   z-add     ldyr          cbyr
+     C                   z-add     ldwk          cbwk
+     C                   z-add     ldwbdt        cbwbdt
+     C                   z-add     ldwedt        cbwedt
+      *
+     C                   move      ldpfcd        cbpfcd
+     C                   move      wkrcexfl      cbrcexfl
+      *
+      *
+      * Calculate: Seaboard Net Product Revenue Percent as:
+      *      (SBF Net Product Revenue Amt + SBF Net Claim Amt) /
+      *      (Agg Net Product Revenue Amt + Agg Net Claim Amt)
+      *      Then, multiply the result times 100 to get the value into % format
+      *
+     C                   eval      wk1am = cbsnpram + cbsnclam
+     C                   eval      wk2am = cbanpram + cbanclam
+     C                   if        wk2am <> 0
+     C                   eval      cbsnprpc = 100 * (wk1am / wk2am)
+     C                   endif
+      *
+      *
+      * Calculate: Triumph Net Product Revenue Percent as:
+      *            100% less Seaboard Net Product Revenue Percent
+      *
+     C     100           sub       cbsnprpc      cbtnprpc
+      *
+      *
+      * Make Sales Expense calculations
+      *
+     C                   exsr      $salesexp
+      *
+     C                   write     cbrec
+     C                   clear                   cbrec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculations for Sales Expenses
+      *   executed before & after AR Adjustment processing
+      *---------------------------------------------------------------
+      *
+     C     $salesexp     begsr
+      *
+      * Calculate: Aggregate Gross Sales Expense Percent as:
+      *   Aggregate Total Sales Expense Amount /
+      *   (Agg Gross Product Revenue Amt + Agg Gross Claim Amount + Agg AR Adjustment Gross Amt)
+      *   Then, multiply the result times 100 to get the value into % format
+      *   Note: We execute this SR before we do the AR processing because we may need this
+      *         info for some of our calcs.  We execute it again after the AR processing
+      *         is complete because we add some $$$ to the Sales Expense fields from the
+      *         AR Adjustments, so we need to re-calc %'s.
+      *
+     C                   eval      wk2am = cbagpram + cbagclam + cbaaragam
+     C                   if        wk2am <> 0
+     C                   eval      cbagsxpc = 100 * (cbasxam / wk2am)
+     C                   endif
+      *
+      * Set Remaining Balances for Sales Expenses equal to the corresponding
+      * Total Sales Expense for Aggregate and Triumph
+      *
+     C                   z-add     cbasxam       cbabsxam
+     C                   z-add     cbtsxam       cbtbsxam
+      *
+      * Calculate: Triumph Percent of All Sales Expenses as:
+      *      TF Total Sales Expense Amount / Aggregate Total Sales Expense Amount
+      *      Then, multiply the result times 100 to get the value into % format
+      *
+     C                   if        cbasxam <> 0
+     C                   eval      cbtsxpc = 100 * (cbtsxam / cbasxam)
+     C                   endif
+      *
+      *
+      * Set Remaining Balances for Triumph's Sales Expense breakdown
+      *
+      *                                                    Absorbed freight
+     C                   z-add     cbtafam       cbtbafam
+      *                                                    Broker commission
+     C                   z-add     cbtbcam       cbtbbcam
+      *                                                    Other sales expenses
+     C                   z-add     cbtoxam       cbtboxam
+      *
+      * If Triumph had ANY Sales Expenses, then we must determine what percentage
+      * of the TF Total Expenses is represented by: absorbed freight, broker commission and
+      * other sales expense.
+      *
+     C                   if        cbtsxam <> 0                                 If any TF exp
+     C                   z-add     100           wkrempc
+      *
+      * Calculate: TF Absorbed Freight %:
+      *      TF Absorbed Freight Amount / TF Total Sales Expense Amount
+      *      Then, multiply the result times 100 to get the value into % format
+      *
+     C                   eval      cbtafpc = 100 * (cbtafam / cbtsxam)
+     C                   if        cbtafpc > wkrempc
+     C                   z-add     wkrempc       cbtafpc
+     C                   endif
+     C                   sub       cbtafpc       wkrempc
+      *
+      * Calculate: TF Broker Commissions %:
+      *      TF Broker Commission Amount / TF Total Sales Expense Amount
+      *      Then, multiply the result times 100 to get the value into % format
+      *
+     C                   eval      cbtbcpc = 100 * (cbtbcam / cbtsxam)
+     C                   if        cbtbcpc > wkrempc
+     C                   z-add     wkrempc       cbtbcpc
+     C                   endif
+     C                   sub       cbtbcpc       wkrempc
+      *
+      * Calculate: TF Other Sale Expenses %:
+      *      TF Other Sale Expenses Amount / TF Total Sales Expense Amount
+      *      Then, multiply the result times 100 to get the value into % format
+      *
+     C                   eval      cbtoxpc = 100 * (cbtoxam / cbtsxam)
+     C                   if        cbtoxpc > wkrempc
+     C                   z-add     wkrempc       cbtoxpc
+     C                   endif
+     C                   sub       cbtoxpc       wkrempc
+      *
+      * If the Remaining Percent is not zero, you have to add the
+      * Remaining Percent to some field.
+      *
+     C                   if        wkrempc <> 0                                 If remaining %
+      *
+      * First, try to add it to any field where the percent is zero but
+      * the amount is not zero.
+      *
+     C                   select
+     C                   when      cbtafam <> 0 and cbtafpc = 0
+     C                   add       wkrempc       cbtafpc
+     C                   sub       wkrempc       wkrempc
+      *
+     C                   when      cbtbcam <> 0 and cbtbcpc = 0
+     C                   add       wkrempc       cbtbcpc
+     C                   sub       wkrempc       wkrempc
+      *
+     C                   when      cbtoxam <> 0 and cbtoxpc = 0
+     C                   add       wkrempc       cbtoxpc
+     C                   sub       wkrempc       wkrempc
+     C                   endsl
+      *
+      * Now, if you still have some remaining percent, dump it on the first
+      * record that had dollars.
+      *
+     C                   if        wkrempc <> 0                                 If still left
+      *
+     C                   select
+     C                   when      cbtafam <> 0
+     C                   add       wkrempc       cbtafpc
+      *
+     C                   when      cbtbcam <> 0
+     C                   add       wkrempc       cbtbcpc
+      *
+     C                   when      cbtoxam <> 0
+     C                   add       wkrempc       cbtoxpc
+     C                   endsl
+     C                   endif                                                  If still left
+     C                   endif                                                  If remaining %
+      *
+     C                   endif                                                  If any TF exp
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve AR Adjustments
+      *---------------------------------------------------------------
+      *
+     C     $adjust       begsr
+      *
+     C                   move      yes           first
+      *
+      * Process each AR Detail record selected by the Open Query. Only "adjustment"
+      * records are selected. Extraction rules:
+      *   1) records with a Payment/Deposit Date in the Revenue week being closed OR
+      *      in the week prior to this closing week
+      *   2) cash/adjustment value of "ADJ"
+      *   3) AR Processing Status = (P)osted
+      *   4) Records not yet posted to TFS (TFS Adj Week-Ending Date = 0)
+      *   5) exclude 'Trade Account' records: "00443012" (360.1410)
+      *                                       "00443012" (360.1410)
+      *      The '1410' account is the AR 'total' account. We have never done anything with
+      *      the dollars posted directly to the 1410 accounts.
+      *
+      * Records selected in this pgm. Extraction rules:
+      *   6) exclude ITC's that are already posted to the due-to/from account
+      *         type = ITC with account ID = 02506611 or 02502562
+      *         (Note: There are a lot of 'offsetting' entries in AR..they net to zero.
+      *                We don't want them; so, this logic excludes them.)
+      *   S12308  RMC 1.15.18  Also exclude offsetting account OFFARSTF
+      *
+593  C*    *loval        setll     arbecpl1
+593  C     *start        setll     arbecpl1
+      *
+     C                   dou       *in93 = *on                                  Do adjusts
+     C                   read      arbecpl1                               93
+      *
+     C                   select                                                 Select
+     C                   when      *in93 = *on
+      *
+      * Do not process ITC's posted to due to/from accounts
+      *
+     C                   when      bfuhcd = 'ITC' and
+     C                             (bfiztx = '02506611' or
+     C                              bfiztx = '02502562' or
+     C                              bfiztx = 'OFFARSTF' or                      incl for fix run
+     C                              bfiztx = '02693654')                        E1  OFFARSTF
+     C                   other
+      * Process
+     C                   move      no            first
+      **
+T9996 *  When 'OA' (On Accounts) for Write Offs transactions, set flag to zero
+  |   *  out Aggregate AR Adjustment Sales Expense Amount.
+  |  C                   eval      zeroaggadjslex = 'N'
+  |  C                   if        bfcest = 'OA' and %Subst(bfuhcd:1:2) = 'WO'
+  |   *  Check Record Status is active.
+  |  C     key05         chain     PDJ3CPL1                           92
+  |  C                   if        *in92 = *off and J3VSST = 'A'
+  |  C                   eval      zeroaggadjslex = 'Y'
+  |  C                   endif
+  |  C                   endif
+T9996 *
+      *
+      * When Exempt Code changes, retrieve its associated Exempt Flag.
+      *
+     C                   if        bfw3sx <> svexcd
+     C                   move      bfw3sx        svexcd
+     C     svexcd        chain     tfp007                             92
+     C                   if        *in92 = *off
+     C                   move      exrcexfl      wkrcexfl
+     C                   else
+     C                   move      no            wkrcexfl
+     C                   endif
+     C                   endif
+      *
+      * Accumulate "Transaction Amount" into Exempt or Non-Exempt buckets.
+      *
+     C                   if        wkrcexfl = yes
+     C                   exsr      $exempt
+     C                   else
+     C                   exsr      $nonexempt
+     C                   endif
+      *
+      * Get Synon Deposit Date into CCYYMMDD format
+      *
+     C     *cymd         test(d)                 bfdvdt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      bfdvdt        wkisodate
+     C     *iso          move      wkisodate     ajdpdt
+     C                   endif
+      *
+      * Write a record to the AR Adjustments file
+      *
+     C                   exsr      $wrt026
+      *
+      * If this is a "Final" run, then update the 'TFS Adj Week-Ending Date' in
+      * the AR Detail record.
+      *
+     C                   if        ldpfcd = 'F'
+     C                   z-add     ldsynwedt     bfqhdt
+     C                   update    @bfcpfo
+     C                   endif
+      *
+     C                   endsl                                                  Select
+     C                   enddo                                                  Do adjusts
+      *
+      *
+      * Adjustments: update the 2 Cash Distributon Balance records.
+      *   1) Exempt
+      *   2) Non-exempt
+     C                   if        first = no
+      *
+     C                   move      yes           wkrcexfl
+     C                   exsr      $upd011
+      *
+     C                   move      no            wkrcexfl
+     C                   exsr      $upd011
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculations for Exempt AR Adjustment Amounts
+      *---------------------------------------------------------------
+      *
+      * We will not worry about allocating some of these Exempt dollars to
+      *    Sales Expenses....they are just too small
+      *
+     C     $exempt       begsr
+      *
+      * Get Transaction Amount into appropriate buckets (and flip the sign).
+      *
+      *         Aggregate
+     C     -1            mult      bfbsva        ajaaragam
+     C                   add       ajaaragam     wkaexam
+      *
+      *         Seaboard
+     C                   select
+     C                   when      bfaic3 = 360
+     C     -1            mult      bfbsva        ajsaranam
+     C                   add       ajsaranam     wksexam
+      *         Triumph
+     C                   when      bfaic3 = 960
+     C     -1            mult      bfbsva        ajtaranam
+     C                   add       ajtaranam     wktexam
+     C                   endsl
+      *
+      * Find a Date (either Transaction or Actual Ship Date) that we can plop
+      * into our TFP026 "Actual Ship Date" field. (Then, flip it to CCYYMMDD format.)
+      *
+     C                   exsr      $getdt
+     C                   if        wksyndt <> 0
+     C                   exsr      $flipdt
+     C                   endif
+      *
+      * Retrieve GL Cost Center/Object/Subsidiary for this Account ID
+      *
+     C                   exsr      $rtvact
+      *
+      * setup GL Post Method and Pay Out Codes
+      *
+     C                   eval      ajpmcd = 'N'
+     C                   eval      ajpocd = 'N'
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculations for Non-Exempt AR Adjustment Amounts
+      *---------------------------------------------------------------
+      *
+     C     $nonexempt    begsr
+      *
+      * Flip the sign on the Transaction Amount and plop it into the Aggregate Gross bucket.
+      * Accumulate this Aggregate Gross amount into the workfield.
+      *
+     C     -1            mult      bfbsva        ajaaragam
+     C                   add       ajaaragam     wkanonexam
+      *
+      * Calculate: To get the %'s to use for the allocation of the AR Adj Amount,
+      *            we need to find the %'s associated with the original AR Transaction
+      *            (Invoice or On Account or Charge Back, etc)...not the AR Transaction
+      *            we are currently working with.
+      *
+      * So, find a Date (either Transaction or Actual Ship Date) that we can plop
+      * into our TFP026 "Actual Ship Date" field. Then, flip it to CCYYMMDD format
+      * and find its WeekEnding Date.
+      *
+     C                   exsr      $getdt
+     C                   if        wksyndt <> 0                                 If synon date
+     C                   exsr      $flipdt
+      *
+      * Find subsequent Saturday
+      *
+     C                   call      'TF811'
+     C                   parm      ajasdt        xxdt
+     C     wkwedt        parm      0             xxsatdt
+     C                   parm      0             xxyr
+     C                   parm      0             xxpe
+     C                   parm      0             xxwk
+     C                   endif                                                  If synon date
+      *
+      * Now, find a Cash Distribution Balance record for this subsequent
+      * Saturday.
+      *
+     C     key02         chain(n)  tfp011                             92
+     C                   select
+     C                   when      *in92 = *off
+     C                   z-add     cbagsxpc      ajagsxpc
+     C                   z-add     cbsnprpc      ajsnprpc
+     C                   z-add     cbtsxpc       ajtsxpc
+     C                   z-add     cbtafpc       ajtafpc
+     C                   z-add     cbtbcpc       ajtbcpc
+     C                   z-add     cbtoxpc       ajtoxpc
+     C                   other
+      *
+      * If you didn't get a hit, chain again using the WeekEnding Date from the
+      * LDA
+     C     key01         chain(n)  tfp011                             92
+     C                   if        *in92 = *off
+     C                   z-add     cbagsxpc      ajagsxpc
+     C                   z-add     cbsnprpc      ajsnprpc
+     C                   z-add     cbtsxpc       ajtsxpc
+     C                   z-add     cbtafpc       ajtafpc
+     C                   z-add     cbtbcpc       ajtbcpc
+     C                   z-add     cbtoxpc       ajtoxpc
+     C                   endif
+     C                   endsl
+      *
+      * Cash Week-ending Date
+      *
+     C                   z-add     cbwedt        ajcwedt
+      *
+      * Calculate the Sales Expense amounts using the %'s just found.
+      *
+     C                   exsr      $aradjse
+      *
+      *
+      * Now that you have the Sales Expense Amounts, calc the SBD and TF NET Amounts...
+      * Note: The Agg Gross Amount less the Sales Expense Amount gives us the Agg NET.
+      *
+      * SBF AR Adj NET Amount
+      *    Calc: (Agg AR Adj Gross Amount - Agg AR Adj Sales Expense Amount)
+      *                          * (SBF Net Prod Rev Percent  / 100)
+      *
+     C                   eval      wkrate = ajsnprpc / 100
+     C                   eval(h)   ajsaranam = (ajaaragam - ajaarasxam) * wkrate
+     C                   add       ajsaranam     wksnonexam
+      *
+      * TF AR Adjustment NET Amount
+      *   Calc: Agg AR Adj Gross Amount - Agg AR Adj Sales Expense Amount
+      *                                 - Seaboard AR Adjustment Net Amount
+      *
+     C                   eval      ajtaranam= ajaaragam - ajaarasxam - ajsaranam
+     C                   add       ajtaranam     wktnonexam
+      *
+      * Retrieve GL Cost Center/Object/Subsidiary for this Account ID
+      *
+     C                   exsr      $rtvact
+      *
+      * setup GL Post Method and Pay Out Codes
+      * assign the Payout amount and add to the accumulated total for TFP011
+      *
+     C                   exsr      $payout
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * setup GL Post Method and Pay Out Codes
+      * assign the Payout amount and add to the accumulated total for TFP011
+      *---------------------------------------------------------------
+      *
+     C     $payout       begsr
+      *
+     C                   select
+      *
+      * if Object Account = 5130 (write offs)
+      *    setup as method 'A' and NO Payout
+      *
+     C                   when      ajobj = '5130  '
+     C                   eval      ajpmcd = 'A'
+     C                   eval      ajpocd = 'N'
+     C                   eval      ajarapam = *zeros
+      *
+      * if Object Account = 5082 (slotting fees)
+      *    setup as method 'B' and NO Payout
+      *
+     C                   when      ajobj = '5082  '
+     C                   eval      ajpmcd = 'B'
+     C                   eval      ajpocd = 'N'
+     C                   eval      ajarapam = *zeros
+      *
+      *
+      * if Object Account = 1557 (bad debt)
+      *    setup as method 'N' and NO Payout
+      *
+     C                   when      ajobj = '1557  '
+     C                   eval      ajpmcd = 'N'
+     C                   eval      ajpocd = 'N'
+     C                   eval      ajarapam = *zeros
+      *
+      * if Cost Center = 3009401 (FEE) or 3009950 (Sales)
+      *    setup as method 'B' with NO Payout
+      * S14609-Added Cost Centers 3009951, 3009952, 3009953 & 3009954.
+      * S17067-Added Cost Centers 3009960 (Marketing).
+      *
+     C                   when      ajcc = '     3009401' or
+14609C                             ajcc = '     3009951' or
+  |  C                             ajcc = '     3009952' or
+  |  C                             ajcc = '     3009953' or
+14609C                             ajcc = '     3009954' or
+17067C                             ajcc = '     3009960' or
+     C                             ajcc = '     3009950'
+     C                   eval      ajpmcd = 'B'
+     C                   eval      ajpocd = 'N'
+     C                   eval      ajarapam = *zeros
+      *
+      * catch all - generic share
+      *    setup as method 'C' with Payout code depending on sign of TF NET
+      *    adj amt = TF NET regardless of who owes who
+      *    TF NET (-) = SBF owes TF
+      *    TF NET (+) = TF owes SBF
+      *
+      * we reverse the sign (z-sub) the TF NET into the Payout amount so we can
+      *    just add it in to the Cash Distribution amounts later.
+      *
+     C                   other
+     C                   eval      ajpmcd = 'C'
+      *
+     C                   z-sub     ajtaranam     ajarapam
+      *
+     C                   if        ajtaranam < 0
+     C                   eval      ajpocd = 'S'
+     C                   else
+     C                   eval      ajpocd = 'T'
+     C                   endif
+     C                   endsl
+      *
+      * add payout amt to TFP011 total
+      *
+     C                   add       ajarapam      totarapam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculations for AR Adjustment Sales Expense Amounts
+      *---------------------------------------------------------------
+      * Note: This subroutine was added in September 2009.
+      *
+     C     $aradjse      begsr
+      *
+     C                   z-add     0             wktsxam
+      *
+T9996 ** Zero out Aggregate AR Adjustment Sales Expense Amount if On Accounts for Write Offs.
+  |   *  Bypass procedure below.
+T9996C                   if        zeroaggadjslex = 'N'
+      *
+      * Aggregate AR Adjustment Sales Expense Amount
+      *    calc: Agg AR Adjustment Gross Amount times the Agg Gross Sales Expense % from TFP011
+      *
+     C                   eval      wkrate = ajagsxpc / 100
+     C     ajaaragam     mult(h)   wkrate        ajaarasxam
+     c                   add       ajaarasxam    totaarsxam
+     c                   add       ajaarasxam    totasxam
+      *
+      *
+      * Triumph: Total Sales Expense Amount
+      *
+     C                   eval      wkrate = ajtsxpc / 100
+     C     ajaarasxam    mult(h)   wkrate        ajtsxam
+     c                   add       ajtsxam       tottsxam
+      *
+T9996C                   endif                                                  zeroaggadjslex = N
+      *
+      * Triumph: Absorbed Freight Amt
+      *
+     C                   eval      wkrate = ajtafpc / 100
+     C     ajtsxam       mult(h)   wkrate        ajtafam
+     c                   add       ajtafam       wktsxam
+     c                   add       ajtafam       tottafam
+      *
+      *
+      * Triumph: Broker Commission Amt
+      *
+     C                   eval      wkrate = ajtbcpc / 100
+     C     ajtsxam       mult(h)   wkrate        ajtbcam
+     c                   add       ajtbcam       wktsxam
+     c                   add       ajtbcam       tottbcam
+      *
+      *
+      * Triumph: Other Sales Expense Amt
+      *
+     C                   eval      wkrate = ajtoxpc / 100
+     C     ajtsxam       mult(h)   wkrate        ajtoxam
+     c                   add       ajtoxam       wktsxam
+     c                   add       ajtoxam       tottoxam
+      *
+      *
+      * Check to see if we have over/under distributed the total TF Sales Expense Amt
+      *     put any difference against the Absorbed Freight Amount
+      *
+     C                   if        wktsxam <> ajtsxam
+     C                   eval      wkdiff = wktsxam - ajtsxam
+     C                   sub       wkdiff        ajtafam
+     C                   sub       wkdiff        tottafam
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *------------------------------------------------------------------------
+      * Find a date (transaction or actual ship date) for AR Adjustment logic
+      *------------------------------------------------------------------------
+      *
+     C     $getdt        begsr
+      *
+     C                   z-add     0             wkwedt
+     C                   z-add     0             wksyndt
+      *
+E6933 ** Commented out existing logic (old) to get Actual Ship Date. We will now get the
+  |   ** Actual Ship Date from the A/R Header Ext file by Com/Inv/InvSfx.
+  |   *
+  |   * Retrieve either:
+  |   *  1) AR Header record to get a Transaction Date or
+  |   *  2) Sales History record to get an Actual Ship Date
+  |   * Use Rose's new Original Invoice field (BFQIDT) if it is valued;
+  |   * otherwise, use the old Invoice Number for retrievals.
+  |   *
+  |  C**                 select
+  |   * Use Rose new fld
+  |  C**                 when      bfqidt <> 0
+  |  C**                 z-add     bfqidt        wkinno
+  |  C**   wkinno        chain     omhstpn0                           92
+  |  C**                 if        *in92 = *off
+  |  C**                 z-add     f4gndt        wksyndt
+  |  C**                 endif
+  |  C**                 other
+  |   *
+  |   * Use old field
+  |  C**                 z-add     bfconb        wkinno
+  |   *
+  |  C**                 if        bfconb < 100000                              If < 100000
+  |  C**   key03         chain     arbdcpma                           92
+  |  C**                 if        *in92 = *off
+  |  C**                 z-add     bdb4dt        wksyndt
+  |  C**                 endif
+  |  C**                 else
+  |   *
+  |  C**   wkinno        chain     omhstpn0                           92
+  |  C**                 if        *in92 = *off
+  |  C**                 z-add     f4gndt        wksyndt
+  |  C**                 endif
+  |  C**                 endif                                                  If < 100000
+  |  C**                 endsl
+  |   *
+  |   ** Use 'Orig Inv Actual Ship Date' (new) or 'AR Ord Ref Actual Ship Dt' (old) to set ASD.
+  |   ** The 'AR Ord Ref Actual Ship Dt' will take prcedence if it exist.
+  |  C     key04         chain     PBC0CPL1                           92
+  |  C                   if        *in92 = *off
+  |  C                   if        C0V8DT <> 0
+  |  C                   z-add     C0V8DT        wksyndt                        Actual Ship Date
+  |  C                   else
+  |  C                   z-add     C0V7DT        wksyndt                        Actual Ship Date
+  |  C                   endif
+  |  C                   endif
+E6933 *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Flip the Synon Date into CCYYMMDD format
+      *---------------------------------------------------------------
+      *
+     C     $flipdt       begsr
+      *
+     C     *cymd         test(d)                 wksyndt                92
+     C                   if        *in92 = *off
+     C     *cymd         move      wksyndt       wkisodate
+     C     *iso          move      wkisodate     ajasdt
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Update a Weekly Cash Distribution Balance record
+      *---------------------------------------------------------------
+      *
+     C     $upd011       begsr
+      *
+     C     key01         chain     tfp011                             92
+     C                   if        *in92 = *off                                 If hit
+      *
+      * Populate AR Adjustment Amounts with either Exempt or Non-Exempt dollars.
+      * (Note: The signs have been flipped on these workfields.)
+      *
+      *      Exempt
+     C                   if        cbrcexfl = yes                               If exempt
+     C                   z-add     wkaexam       cbaaragam
+     C                   z-add     wkaexam       cbaaranam
+     C                   z-add     wksexam       cbsaranam
+     C                   z-add     wktexam       cbtaranam
+     C                   z-add     0             cbarapam
+     C                   z-add     ldwedt        cbarapddt
+     C                   else
+      * Non-exempt NET
+     C                   z-add     wkanonexam    cbaaragam
+     C                   z-add     wksnonexam    cbsaranam
+     C                   z-add     wktnonexam    cbtaranam
+      *
+      * Non-exempt AR Sales Expense
+      *
+     C                   add       totasxam      cbasxam
+     C                   z-add     totaarsxam    cbaarasxam
+     c                   eval      cbaaranam = cbaaragam - cbaarasxam
+     C                   add       tottsxam      cbtsxam
+     C                   add       tottbcam      cbtbcam
+     C                   add       tottoxam      cbtoxam
+     C                   add       tottafam      cbtafam
+      * Payout amount
+     C                   z-add     totarapam     cbarapam
+      * E00493ON
+      *  to turn on 1. remove ***//// and 2. delete the 20010911 date line.
+      *
+     C                   z-add     20010911      cbarapddt
+     C***////            if        totarapam = 0
+     C***////            z-add     ldwedt        cbarapddt
+     C***////            endif
+      *
+     C                   endif                                                  If exempt
+      *
+      * Set "SBF Balance Remaining Amount" equal to:
+      *     SBF Net Product Revenue Amount
+      *   + SBF Net Claim Amount
+      *   + SBF Net AR Adjustment Amount
+      *   + SBF Cash Distribution Balance Adjustment Amount
+      *
+     C                   eval      cbsbalam = cbsnpram + cbsnclam + cbsaranam  +
+     C                                        cbscdbaam
+      *
+      * Set "TF Balance Remaining Amount" equal to:
+      *     TF Net Product Revenue Amount
+      *   + TF Net Claim Amount
+      *   + TF Net AR Adjustment Amount
+      *   + TF Cash Distribution Balance Adjustment Amount
+      *
+     C                   eval      cbtbalam = cbtnpram + cbtnclam + cbtaranam +
+     C                                        cbtcdbaam
+      *
+      * Set "Aggregate Balance Remaining Amount" equal to:
+      *     Aggregate Net Product Revenue Amount
+      *   + Aggregate Net Claim Amount
+      *   + Aggregate Net AR Adjustment Amount
+      *   + Aggregate Cash Distribution Balance Adjustment Amount
+      *
+     C                   eval      cbabalam = cbanpram + cbanclam + cbaaranam +
+     C                                        cbacdbaam
+      *
+      * Since we have added dollars to the Sales Expense Amounts from the AR Adjustments,
+      * execute the Sales Expense subroutine to recalc the Sales Expense Percents.
+      *
+     C                   exsr      $salesexp
+      *
+     C                   update    cbrec
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------------------------------
+      * Write a record to the AR Adjustments file
+      *-------------------------------------------------------------------------------------------
+      *
+     C     $wrt026       begsr
+      *
+      * Populate fields with LDA values
+      *
+     C                   z-add     ldwedt        ajrwedt
+     C                   z-add     ldwbdt        ajrwbdt
+     C                   z-add     ldyr          ajyr
+     C                   z-add     ldwk          ajwk
+      *
+      * Populate remaining fields with data from the AR Detail record
+      *
+     C                   z-add     bfaic3        ajcono
+     C                   move      bfuhcd        ajajty
+     C                   move      bfw3sx        ajexcd
+     C                   move      wkrcexfl      ajrcexfl
+     C                   z-add     bfbsva        ajtram
+E6933 ** Commented out work field 'wkinno', no longer needed.
+  |  C**                 z-add     wkinno        ajinno
+E6933C                   z-add     BFCONB        ajinno
+T9996 ** Populate Invoice Suffix.
+T9996C                   move      BFCEST        ajinsf
+     C                   move      bfiztx        ajaid
+      *
+      * Get AR Customer Number from AR Header
+      *
+     C     key03         chain     arbdcpma                           92
+     C                   if        *in92 = *off
+     C                   z-add     bdanc7        ajarcuno
+     C                   endif
+      *
+     C                   write     ajrec
+     C                   clear                   ajrec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve GL Cost Center/Object/Subsidiary for this Account ID
+      *---------------------------------------------------------------
+      *
+     C     $rtvact       begsr
+      *
+     c                   move      *blanks       xxcc                               s12308
+     C                   call      'ARACTRET'
+     C                   parm      bfiztx        xxaid
+     C     ajcc          parm                    xxcc
+     C     ajobj         parm                    xxobj
+     C     ajsub         parm                    xxsub
+     C                   parm                    xxdesc
+     C                   parm                    xxco
+     C                   parm                    xxpec
+     C                   parm                    return
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    wkrcexfl
+      *
+     C     key02         klist
+     C                   kfld                    wkwedt
+     C                   kfld                    wkrcexfl
+      *
+     C     key03         klist
+     C                   kfld                    bfconb
+     C                   kfld                    bfcest
+      *
+E6933C     key04         klist
+  |  C                   kfld                    BFAIC3
+  |  C                   kfld                    BFCONB
+  |  C                   kfld                    BFCEST
+E6933 *
+T9996C     key05         klist
+  |  C                   kfld                    BFAIC3
+  |  C                   kfld                    BFUHCD
+T9996 *
+     C                   endsr
+      /eject

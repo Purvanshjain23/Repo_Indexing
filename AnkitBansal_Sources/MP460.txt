@@ -1,0 +1,699 @@
+      *
+      * ENVIRONMENT: PORK DIVISION
+      * SYSTEM:      AS/400
+      * PROGRAM:     MP460
+      * TITLE:       Specify Invoice/Post of Invoices to JDE
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     05/05/02
+      *
+      *
+      * FUNCTION: This Specify uses an edit record format to allow the user
+      *           to submit function.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 03/11/14  LeAnne Ramsey (E2992)
+      *           Added Accounting Company as a required selection.
+      *           I will default in a Company from the new I.S.-controlled file
+      *           MPP108.
+      *
+      * 04/22/17  Barb Gutierrez (E10220)
+      *           Company 360 is no longer valid in JDE.  It is now in M3.  Don't
+      *           allow 360 to be processed into JDE.
+      *
+      *  3/12/09  Brad Baden   E14631/Project 387-Seaboard Energy MP2 to JDE
+      *           Adding an update to file MPP108 to populate the new
+      *           edit/post flag in the file prior to submitting the job.
+      *           The flag is used to determine if the edit or post is
+      *           already submitted by company.  Added new message HS09272
+      *           when record in MPP108 is not found.
+      *
+      * 06/02/21  Danny Nguyen (S17068)
+      *           Recompile only due to MPJ102B file change. MPP104 file was changed.
+      *
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fmpd460    cf   e             workstn infds(iofeed)
+      *
+      *
+     Fmpj102b   if   e           k disk
+      *    MP2: Purchase order header + Invoice header
+      *         (LF selects unposted Invoice records)
+      *
+     Fmpp108    if   e           k disk
+      *    MP2: Upload companies
+      *
+      *
+     Fcaabrel1  if   e           k disk
+      *    Company
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D set1            c                   'SET1  '
+     D edit1           c                   'EDIT1 '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Compile time array for SBMJOB used in QCMDEXC
+      *---------------------------------------------------------------
+     D cmd             s              1    dim(80) ctdata perrcd(80)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D pgm             s             10
+     D msgfl           s             10
+     D routne          s              6
+     D maxmsg          s              2  0  inz(20)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkcymdiso       s               d   datfmt(*iso)
+      *
+      *
+      * Parm fields
+      *
+     D xxjobq          s             10     inz('*JOBD     ')
+     D xxnite          s              1     inz('N')
+     D xxcopy          s              1  0
+      *
+     D xxalphcono      s              3
+     D xxacono         s                    like(d1acono)
+     D xxaconm         s                    like(d1aconm)
+      *
+      *
+      *  Parms for use with QCMDEXC.  'LENGTH' is the length of the
+      *  command that will be issued with QCMDEXC.  QCMDEXC requires
+      *  the field containing length to be defined as 15 with 5 decimal
+      *  positions.  The field 'CMDSBM' will hold the values of the
+      *  submit job command when passed as a parm on the call to
+      *  QCMDEXC.
+      *
+     D length          s             15  5 inz(80)
+     D cmdsbm          s             80
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Data areas
+      *---------------------------------------------------------------
+      *
+      *  Definition for external data area 'DAMP2EPFL'
+      *
+      **  3/13/2019 JBB E14631/P387 - Seaboard Energy MP2 to JDE
+      ** Replacing data area with new field in MP2 Companies upload file
+     D*                ds
+     D* damp2epfl              1      1
+     D* daepfl                 1      1
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+      *
+     D  ldepfl                 1      1
+     D  ldcymd                 2      9  0
+     D  ldmdy                 10     15  0
+     D  lduser                16     25
+     D  ldjdvnno              29     36  0
+     D  ldacono               86     88  0
+      *
+     D  ldhold               411    411
+     D  ldcopy               412    412  0
+     D  ldoutq               413    422
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+     C
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off                                         Main do loop
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     edit1         $edit1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo                                                  Main do loop
+      /EJECT
+      *----------------------------------------------------------------
+      * Set environment for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $set1         begsr
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Perform operator I/O for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $scrn1        begsr
+      *
+      * Write the error messages from the error arrays to the error
+      * message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * Write screen 1 to CRT.
+      *
+     C                   write     mp460k1
+     C                   write     mp460ec
+     C                   exfmt     mp460r1
+      *
+      * Clear the messages from the message data structures and
+      * program message queue
+      *
+     C                   exsr      $clmsg
+      *
+      * Get user's entry and set next routine
+      *
+     C                   select
+     C                   when      *in03 = *on                                  F3-exit
+     C                   eval      routne = exit
+      *
+     C                   when      *in04 = *on                                  F4-prompt
+     C                   exsr      $f4s1
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in20 = *on                                  F20-wrksplf
+     C                   call      'QEZOUTPT'                                       API
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in17 = *on                                  F17-print options
+     C                   eval      routne = scrn1
+     C                   call      'HP451'
+     C                   parm                    sdpgm
+     C     ldcopy        parm      ldcopy        xxcopy
+     C                   parm                    ldhold
+     C                   parm                    ldoutq
+     C                   parm                    xxnite
+     C                   parm                    xxjobq
+     C                   other
+      *
+     C                   eval      routne = edit1
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Edit screen 1 input fields
+      *----------------------------------------------------------------
+      *
+     C     $edit1        begsr
+      *
+      **  3/13/2019 JBB E14631/P387 - Seaboard Energy MP2 to JDE
+      ** Replacing data area with new field in MP2 Companies upload file
+     C*    *dtaara       define                  damp2epfl
+     C*                  in        damp2epfl
+      *
+      ** Retrieve Edit/Post flag from the MP2 Upload Companies data file
+     C     key01         setll     mpp108
+     C                   if        %found(mpp108)                               if %found
+     C     key01         reade     mpp108                                       Returns upepfl value
+     C                   else
+     C                   if        error < maxmsg                               if error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09272'     mgid(e)                        record not found MSG
+     C                   move      d1acono       xxalphcono
+     C                   movea     xxalphcono    mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif                                                  fi error < maxmsg
+     C                   endif                                                  fi %found
+      *
+      * Validate that the function has not already been submitted.
+      *
+     C****               if        daepfl <> *blank and
+      *
+      * Validate that the function has not already been submitted for company.
+      *
+     C                   if        upepfl = 'E' or upepfl = 'P' and             if upepfl = 'E'
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09194'     mgid(e)
+     C                   move      d1acono       xxalphcono
+     C                   movea     xxalphcono    mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif                                                  fi upepfl = 'E'
+      *
+      * Validate:
+      *  1) edit/post flag
+      *  2) cut-off date
+      *  3) user
+      *  4) accounting company
+      *
+     C                   exsr      $epfl
+     C                   exsr      $mdy
+     C                   exsr      $user
+     C                   exsr      $acono
+      *
+      * If there are no errors, execute the subroutine to submit.
+      *
+     C                   if        error = 0 and *in08 = *on                    If no error
+     C                   exsr      $proc1
+     C                   endif                                                  If no error
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate Edit/Post flag
+      *---------------------------------------------------------------
+      *
+     C     $epfl         begsr
+      *
+     C                   select
+     C                   when      d1epfl = 'E' or d1epfl = 'P'
+      *
+     C                   when      d1epfl = *blank
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09193'     mgid(e)
+     C                   endif
+      *
+     C                   other
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09193'     mgid(e)
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate cut-off date
+      *---------------------------------------------------------------
+      *
+     C     $mdy          begsr
+      *
+     C                   z-add     0             ldcymd
+      *
+     C                   select
+     C                   when      d1mdy = 0
+     C                   seton                                        32
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+      *
+     C                   when      d1mdy  < 0
+     C                   seton                                        32
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+      *
+     C                   other
+     C     *mdy          test(d)                 d1mdy                  92
+     C                   if        *in92 = *on                                  If bad
+     C                   seton                                        32
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09004'
+     C                   endif
+     C                   else
+      *
+      * Flip the date from MMDDYY to CCYYMMDD.
+      *
+     C                   z-add     d1mdy         ldmdy
+     C     *mdy          move      d1mdy         wkcymdiso
+     C                   move      wkcymdiso     ldcymd
+     C                   endif                                                  If bad
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit User ID
+      *---------------------------------------------------------------
+      *
+     C     $user         begsr
+      *
+     C                   if        d1user = *blank
+     C                   seton                                        33
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit Accounting Company
+      *---------------------------------------------------------------
+      *
+     C     $acono        begsr
+      *
+     C                   eval      d1aconm = *blank
+      *
+     C                   select
+     C                   when      d1acono < 0
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09000'
+     C                   endif
+      *
+     C                   when      d1acono = 0
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09001'
+     C                   endif
+      *
+      *** blg E010220 Don't allow 360 to be processed into JDE with invoice date >=
+      *               04/30/17.  (period 5).
+      *
+     C                   when      d1acono = 360 and d1mdy >= 043017
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09247'
+     C                   move      d1acono       xxalphcono
+     C                   movea     xxalphcono    mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+      *
+     C                   when      d1acono > 0
+      *
+     C     d1acono       chain     caabrel1                           92
+     C                   if        *in92 = *off                                 If hit
+     C                   eval      d1aconm = abadtx
+     C                   else
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS08020'
+     C                   clear                   mgw
+     C                   move      d1acono       xxalphcono
+     C                   movea     xxalphcono    mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If hit
+      *
+      * Has this company been set up as an upload file from MP2
+      *
+     C     d1acono       chain     mpp108                             92
+     C                   if        *in92 = *on
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09240'
+     C                   endif
+     C                   endif
+      *
+      * Does this Accounting Company have any unposted invoices?
+      *
+     C                   if        *in34 = *off                                 If still ok
+     C     d1acono       chain     mpj102b                            92
+     C                   if        *in92 = *on
+     C                   seton                                        34
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09244'
+     C                   endif
+     C                   endif
+     C                   endif                                                  If still ok
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Process user's request
+      *---------------------------------------------------------------
+      *
+     C     $proc1        begsr
+      *
+      * Set the flag indicating the edit/post has been submitted.
+      *
+      **  3/13/2019 JBB E14631/P387 - Seaboard Energy MP2 to JDE
+      ** Replacing data area with new field in MP2 Companies upload file
+      *
+     C*    *lock         in        damp2epfl
+     C*                  move      yes           daepfl
+     C*                  out       damp2epfl
+      *
+      ** Update MP2 Upload Companies record with Edit/Post flag from screen
+     C                   call      'MP260'
+     C                   parm                    d1acono
+     C                   parm                    d1epfl
+      *
+      * Move the 80-character compile time array 'CMD' to an
+      * 80-character field for passing as a parm with QCMDEXC.
+      *
+     C                   move      d1epfl        ldepfl
+     C                   move      d1user        lduser
+     C                   z-add     d1acono       ldacono
+      *
+     C                   out       lda
+     C                   movea     xxjobq        cmd(51)
+     C                   movea     cmd           cmdsbm
+     C                   call      'QCMDEXC'
+     C                   parm                    cmdsbm
+     C                   parm                    length
+      *
+      * Issue the standard request submission message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09003'
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Set on last record and end job
+      *---------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        LR
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * F4 prompt on screen 1
+      *---------------------------------------------------------------
+      *
+     C     $f4s1         begsr
+      *
+      * Accounting company
+      *
+     C                   select
+     C                   when      fld = 'D1ACONO'
+     C                   call      'MP508'
+     C                   parm      0             xxacono
+     C                   parm      *blank        xxaconm
+     C                   seton                                        50
+     C                   if        xxacono <> 0
+     C                   z-add     xxacono       d1acono
+     C                   eval      d1aconm = xxaconm
+     C                   endif
+     C                   other
+      *
+      * F4 not valid for this field...issue message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error                                        013
+     C                   movel     'HS09011'     mgid(e)
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *   none
+      *
+      * Key lists
+     C     key01         klist
+     C                   kfld                    d1acono
+      *
+      *
+      * Initialize LDA fields
+      *
+     C                   move      no            ldhold
+     C                   z-add     1             ldcopy
+     C                   move      *blank        ldoutq
+     C                   z-add     0             ldcymd
+     C                   z-add     0             ldmdy
+     C                   z-add     0             ldacono
+      *
+      * NOTE: The vendor number below is a variable in the on-demand version of the
+      *       Override Listing. Since we generate the Override Listing as part of
+      *       the Post function, we need to initialize this value to prevent
+      *       data-decimal errors in program HP351.
+      *
+     C                   z-add     0             ldjdvnno
+      *
+      * Default in an Accounting Company.
+      *
+     C     *loval        setll     mpp108
+     C                   read      mpp108                                 92
+     C                   if        *in92 = *off
+     C                   z-add     upacono       d1acono
+     C                   endif
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+     C                   endsr
+      /EJECT
+      *****************************************************************
+      * COMPILE TIME ARRAY 'CMD' USED IN QCMDEXC
+      *****************************************************************
+** CMD table 'CMD' submits listing when F8 selected
+SBMJOB CMD(CALL PGM(MP460CL )) JOB(MP2BATCH) JOBQ(__________)

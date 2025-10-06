@@ -1,0 +1,378 @@
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Resource Optimization
+      * PROGRAM:     RO233
+      * TITLE:       Byproduct Volume
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     08/28/08
+      *
+      * FUNCTION:    The driver file for this program is TF Margin Adjustment Detail.
+      *              The logic only processes records where:
+      *                   TF Classification = BP6 or OFF
+      *                   Include in Volume = Yes
+      *
+      *              A record is output at the Item Structure level.
+      *
+      ***************************************************************************************
+      * MODIFICATIONS:
+      ***************************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/21/08  LeAnne Ramsey
+      *           As part of synchronizing the LDAs between the TFS Margin Adjustment Close
+      *           and the Meat Costing, we changed the LDA positions.
+      *
+      * 12/01/08  LeAnne Ramsey
+      *           File TFP050 renamed from Cold Carcass Pounds to Kill/Cut Data.
+      *           Fields were added to the file.
+      *           The 2-letter prefix was changed from "CP" to "KC".
+      *
+      * 08/31/09  LeAnne Ramsey
+      *           Damon Ginther requested that we include OFF as well as BP6. He wants
+      *           Tongue Base (BP/OFF/740/741/765) to show up on TF618-ByProduct and
+      *           NVA Volume Adjustment Report. So, we will now need to include OFF in
+      *           our logic. (As of now, this Tongue Base is the only OFF that he has
+      *           set up as Volume = Yes.)
+      *
+      * 09/02/09  LeAnne Ramsey
+      *           Damon Ginther wants the Equivalent Net Produced Price/Lb for OFF
+      *           to equal TRGA....not BNIN.
+      *
+      * 12/21/09  LeAnne Ramsey
+      *           Damon Ginther wants the Equivalent Net Produced Price/Lb for Scruff
+      *           Jowls (700/701/727) to equal TRGA....not BNIN.
+      *
+      * 11/30/11  LeAnne Ramsey (E1827)
+      *           Damon Ginther wants the Equivalent Net Produced Price/Lb for
+      *           Kidneys (740/741/771) to equal BNIN....not TRGA.
+      *
+      * 05/02/12  LeAnne Ramsey (E2077)
+      *           Damon Ginther is adding Riblets to this. They are BP1 Items in
+      *           200/850/854. The calc will combine T72A and BNIN.
+      *
+      * 10/22/12  LeAnne Ramsey (E2301)
+      *           We are producing a new OFF Item 90615 (740/741/777). I had to
+      *           add a new Equivalent Net Produced Price/Lb calc for it ($calc).
+      *
+      * 07/24/13  LeAnne Ramsey (E2693)
+      *           Per Damon Ginther, I am changing the Equivalent Net Produced Price/Lb
+      *           calc for Offal Pork Ears (740/741/777) to be like Offal Kidneys (740/741/771).
+      *
+      * 11/10/17  Danny Nguyen    - R12011-Kill Cut Data for STF
+      *           File TFP050 was changed. Recompile only. No logic change.
+      *‚12/10/24  Jagdish Mistry JM-S003543
+      *‚          Damon Ginther wants the Equivalent Net Produced Price/Lb for OFF-Snouts
+      *‚          to equal BNIN....not TRGA.
+      *
+      /EJECT
+      ***************************************************************************************
+      * FILE SPECIFICATION
+      ***************************************************************************************
+      *
+     fppaorel1  if   e           k disk
+      *  TF Margin adjustment group detail
+      *
+      *
+     ftfp050    if   e           k disk
+      *  Kill/cut data
+      *
+      *
+     frop121    if   e           k disk
+      *  TF ByProduct mix summary
+      *
+      *
+     frol121a   if   e           k disk    rename(ysrec:ysreca)
+      *  TF ByProduct mix summary
+      *
+      *
+     frop125    o    e           k disk
+      *  TF ByProduct & NVA Volume
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Workfields
+      *
+     D wkcgcd          s                   like(yscgcd)
+     D wkbninpr        s                   like(yvbninpr)
+     D wktrgapr        s                   like(yvbninpr)
+     D wkt72apr        s                   like(yvbninpr)
+     D wkscclb         s                   like(yvscclb)
+     D wktcclb         s                   like(yvtcclb)
+     D wkacclb         s                   like(yvacclb)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwedt                29     36  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      **********************************************************************************
+      * Mainline
+      **********************************************************************************
+      *
+      * Process each record in the TF Margin Adjustment Group Detail file where:
+      *    1) Include in Volume = Yes
+      *    2) TF Classification = BP1, BP6 or OFF
+      *
+     C     *start        setll     ppaorel1
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      ppaorel1                               90
+     C                   if        *in90 = *off and aosxsx = 'Y' and            If process
+     C                             (aoflaa = 'BP1' or
+     C                              aoflaa = 'BP6' or
+     C                              aoflaa = 'OFF')
+      *
+      * Retrieve the TF ByProduct Mix record
+      *
+     C                   exsr      $rop121
+      *
+      * Write the TF ByProduct Volume record
+      *
+     C                   exsr      $rop125
+      *
+     C                   endif                                                  If process
+     C                   enddo                                                  Main do
+      *
+      * EOF processing
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * TF ByProduct Mix Summary file
+      *---------------------------------------------------------------
+      *
+     C     $rop121       begsr
+      *
+      * Retrieve the TF ByProduct Mix Summary record for this:
+      *   1) WeekEnding Date
+      *   2) TF Classification
+      *   3) Item Structure
+      *
+     C     key02         chain     rop121                             92
+     C                   if        *in92 = *off
+     C                   move      ysisclds      yvisclds
+     C                   z-add     ysspulb       yvspulb
+     C                   z-add     ystpulb       yvtpulb
+     C                   z-add     ysapulb       yvapulb
+     C                   z-add     ysspuslb      yvspuslb
+     C                   z-add     ystpuslb      yvtpuslb
+     C                   z-add     ysapuslb      yvapuslb
+     C                   z-add     ysanpupr      yvanpupr
+     C                   else
+     C                   eval      yvisclds =
+     C                             'No TF ByProduct Mix Summary'
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write the TF ByProduct Volume record
+      *---------------------------------------------------------------
+      *
+     C     $rop125       begsr
+      *
+     C                   eval      yvpgm = sdpgm
+      *
+     C                   z-add     ldwedt        yvwedt
+     C                   z-add     ldyr          yvyr
+     C                   z-add     ldwk          yvwk
+      *
+     C                   z-add     wkscclb       yvscclb
+     C                   z-add     wktcclb       yvtcclb
+     C                   z-add     wkacclb       yvacclb
+      *
+     C                   z-add     wkbninpr      yvbninpr
+     C                   z-add     wktrgapr      yvtrgapr
+     C                   z-add     wkt72apr      yvt72apr
+      *
+      * From TF Margin Adjustment Detail file
+      *
+     C                   move      aoflaa        yvtfclcd
+     C                   move      aosvsx        yvtfcgcd
+     C                   z-add     aorgnb        yvistycd
+     C                   z-add     aorhnb        yvisgrcd
+     C                   z-add     aorinb        yvisclcd
+      *
+      * Perform Calcs
+     C                   exsr      $calc
+      *
+     C                   write     yvrec
+     C                   clear                   yvrec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculations
+      *---------------------------------------------------------------
+      *
+     C     $calc         begsr
+      *
+      * Equivalent Net Produced Price/LB
+      *
+     C                   select
+      *   Kidneys (OFF)
+     C                   when      yvistycd = 740 and
+     C                             yvisgrcd = 741 and
+     C                             yvisclcd = 771
+     C                   z-add     wkbninpr      yveqnpupr
+      *   Pork Ears (OFF)
+     C                   when      yvistycd = 740 and
+     C                             yvisgrcd = 741 and
+     C                             yvisclcd = 777
+     C                   z-add     wkbninpr      yveqnpupr
+     ‚* JM-S003543-START
+     ‚* Use BNIN for Snouts
+     C                   when      yvistycd = 740 and
+     C                             yvisgrcd = 741 and
+     C                             yvisclcd = 768
+     C                   z-add     wkbninpr      yveqnpupr
+     ‚* JM-S003543-End
+      *   Other Offal
+     C                   when      yvtfclcd = 'OFF'
+     C                   z-add     wktrgapr      yveqnpupr
+      *
+      *   Scruff jowls
+     C                   when      yvistycd = 700 and
+     C                             yvisgrcd = 701 and
+     C                             yvisclcd = 727
+     C                   z-add     wktrgapr      yveqnpupr
+      *   Skinless jowls
+     C                   when      yvistycd = 700 and
+     C                             yvisgrcd = 701 and
+     C                             yvisclcd = 701
+     C                   eval      yveqnpupr = (.7815 * wktrgapr) +
+     C                                         (.2185 * wkbninpr)
+      *    Riblets
+     C                   when      yvistycd = 200 and
+     C                             yvisgrcd = 850 and
+     C                             yvisclcd = 854
+     C                   eval      yveqnpupr = (.6800 * wkt72apr) +
+     C                                         (.3200 * wkbninpr)
+     C                   other
+      *    Everything Else
+     C                   z-add     wkbninpr      yveqnpupr
+     C                   endsl
+      *
+      * Margin/LB
+      *
+     C     yvanpupr      sub       yveqnpupr     yvmgpr
+      *
+      * Margin Amount
+     C                   eval(h)   yvsmgam = yvmgpr * yvspulb
+     C                   eval(h)   yvtmgam = yvmgpr * yvtpulb
+     C                   eval(h)   yvamgam = yvmgpr * yvapulb
+      *
+      *
+      * Incremental Margin/LB (aka: Average Incremental Margin/LB of Carcass Weight)
+      *
+     C                   if        yvacclb <> 0
+     C                   eval(h)   yvincmgpr = yvamgam / yvacclb
+     C                   endif
+      *
+      *
+      * Incremental Margin Amount
+      *
+     C                   eval(h)   yvincmgam = yvincmgpr * yvtcclb
+      *
+      * Amount Due
+      *
+     C                   eval(h)   yvsduam = yvtmgam - yvincmgam
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    wkcgcd
+      *
+     C     key02         klist
+     C                   kfld                    ldwedt
+     C                   kfld                    aoflaa
+     C                   kfld                    aorgnb
+     C                   kfld                    aorhnb
+     C                   kfld                    aorinb
+      *
+      * Retrieve info used for calcs for all Volume records:
+      *
+      *    Retrieve Aggregate Net Produced Price/Lb for Meat Cost Group: Meat and BoneMeal
+      *
+     C                   eval      wkcgcd = 'BNIN'
+     C     key01         chain     rol121a                            92
+     C                   if        *in92 = *off
+     C                   z-add     ysanpupr      wkbninpr
+     C                   endif
+      *
+      * Retrieve Aggregate Net Produced Price/Lb for Meat Cost Group: Regular Trim
+      *
+     C                   eval      wkcgcd = 'TRGA'
+     C     key01         chain     rol121a                            92
+     C                   if        *in92 = *off
+     C                   z-add     ysanpupr      wktrgapr
+     C                   endif
+      *
+      * Retrieve Aggregate Net Produced Price/Lb for Meat Cost Group: Special Trim
+      *
+     C                   eval      wkcgcd = 'T72A'
+     C     key01         chain     rol121a                            92
+     C                   if        *in92 = *off
+     C                   z-add     ysanpupr      wkt72apr
+     C                   endif
+      *
+      * Retrieve Kill/Cut Data
+      *
+     C     ldwedt        chain     tfp050                             92
+     C                   if        *in92 = *off
+     C                   z-add     kcscclb       wkscclb
+     C                   z-add     kctcclb       wktcclb
+     C     kcscclb       add       kctcclb       wkacclb
+     C                   endif
+      *
+     C                   endsr
+      /eject

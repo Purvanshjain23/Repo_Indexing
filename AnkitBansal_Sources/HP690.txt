@@ -1,0 +1,1486 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP690
+      * TITLE:       DISPOSED GROUP PERFORMANCE REPORT
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     10/17/94
+      *
+      *  FUNCTION:   THIS PROGRAM PRINTS THE DISPOSED GROUP PERFORMANCE
+      *              REPORT.
+      *
+      *           THIS PROGRAM IS SUBMITTED BY HP490CL WHICH IS CALLED
+      *           FROM HP490 THROUGH QCMDEXC.
+      *
+      *           REQUIRED SELECTIONS:
+      *                 BUSINESS OFFICE
+      *                 FROM DISPOSED DATE
+      *                 TO DISPOSED DATE
+      *
+      *           OPTIONAL SELECTIONS:
+      *                 PRODUCTION PHASE
+      *                 PRODUCTION TYPE
+      *                 FARM SITE
+      *                 HOG GROUP
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 04/13/00  LeAnne Fedor
+      *           Recompile only. Workfile HSP390 was recompiled.
+      *
+      * 08/21/00  LeAnne Fedor
+      *           Added logic to retrieve the new 'adjusted transfer in' and
+      *           calculate death loss percent using the new 'adjusted' value.
+      *
+      * 05/02/01  LeAnne Fedor
+      *           Changed logic that calculates 'average pounds placed' to used
+      *           the 'adjusted' transferred in head and pounds.
+      *
+      * 05/22/01  LeAnne Fedor
+      *           The workfile fields were renamed to start with 'CG' instead of 'WG'
+      *
+      * 06/05/01  LeAnne Fedor
+      *           Recompile only. New field 'multisite' added to Farm Site file.
+      *
+      * 06/13/01  LeAnne Fedor
+      *           Added new column 'average pounds per head moved'. Users were trying
+      *           to compare this report to the Closed Group Performance Report...which
+      *           had this column.
+      *
+      * 09/04/01  LeAnne Fedor
+      *           Recompile only. New 'square feet' fields added to Farm Site file.
+      *
+      * 01/29/03  LeAnne Fedor
+      *           Removed all hardcoded special logic for SHAUL.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 06/21/10  LeAnne Ramsey    (E828)
+      *           Added 'Origin BGF Farm Site'.
+      *           Replaced HSJ018G with HSJ034N to give us a join file keyed by Hog Group
+      *           Production Phase instead of Farm Site Production Phase.
+      *
+      * 10/16/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSL006B   IF   E           K DISK
+      *    REPORTING CODES
+      *
+     FHSP011    IF   E           K DISK
+      *    PRODUCTION PHASE
+      *
+     FHSP025    IF   E           K DISK
+      *    GROUP TYPE
+      *
+     FHSJ034n   IF   E           K DISK
+      *    Hog Group + Farm Site
+      *    (records selected by open query)
+      *
+     FHSP044    IF   E           K DISK
+      *    PREMUIM/DISCOUNT
+      *
+     FHSP045    IF   E           K DISK
+      *    DEDUCTIONS/ADDONS
+      *
+     Fhsp130    if   e           k disk
+      *    Group overrides
+      *
+     FHSP390    IF   E           K DISK
+      *    WORKFILE FOR HOG GROUP
+      *
+     FQPRINT    O    F  198        PRINTER OFLIND(*INOF)
+      *
+      /EJECT
+      ****************************************************************
+      * INPUT SPECS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *---------------------------------------------------------------
+      *  DATE FORMATS
+      *---------------------------------------------------------------
+      *
+      * DATE IN MMDDYY FORMAT
+      *
+     D                 DS
+     D  WKMDY                  1      6  0
+     D  WKMM                   1      2  0
+     D  WKDD                   3      4  0
+     D  WKYY                   5      6  0
+      *
+      * DATE IN CCYYMMDD FORMAT
+      *
+     D                 DS
+     D  WKCYMD                 1      8  0
+     D  WKCEN                  1      2  0
+     D  WKYER                  3      4  0
+     D  WKMON                  5      6  0
+     D  WKDAY                  7      8  0
+      *
+      *---------------------------------------------------------------
+      *  LDA -  WITH THE REQUESTED PRINT SELECTIONS
+      *---------------------------------------------------------------
+     D                UDS
+     D  LDFSBO                 1      5
+     D  LDBODS                 6     35
+     D  LDFYMD                36     43  0
+     D  LDFMDY                44     49  0
+     D  LDTYMD                50     57  0
+     D  LDTMDY                58     63  0
+      *
+     D  LDPTCD                64     68
+     D  LDPTDS                69     78
+     D  LDPPCD                79     83
+     D  LDPPDS                84    113
+     D  LDGTCD               114    114
+      *
+     D  LDFSCD               149    153  0
+     D  LDFSNM               154    178
+     D  LDCELL               179    180  0
+      *
+     D  LDHGSN               217    223  0
+     D  LDHGCD               224    230
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+     D SALES           C                   CONST('SALES')
+      /EJECT
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+      *
+      * READ EACH HOG GROUP RECORD SELECTED BY THE OPEN QUERY.
+      *
+     C     *LOVAL        SETLL     HSJ034N
+      *
+     C     *IN99         DOUEQ     *ON                                          MAIN DO
+     C                   READ      HSJ034N                                99
+     C     *IN99         IFEQ      *OFF                                         IF NOT EOF
+      *
+      * FLIP DISPOSED DATE FROM CCYYMMDD TO MMDDYY
+      *
+     C                   Z-ADD     HGDSDT        WKCYMD
+     C                   EXSR      $TOMDY
+     C                   Z-ADD     WKMDY         DTDSDT
+      *
+      * CALCULATE THE DAYS IN THE PHASE FOR THE GROUP
+      *
+     C                   EXSR      $DAYS
+      *
+      * Origin BGF Farm Site (use the override farm if there is one)
+      *
+     C                   z-add     hgobfs        dtobfs
+     C     hghgsn        chain     hsp130                             92
+     C                   if        *in92 = *off
+     C                   z-add     goobfs        dtobfs
+     C                   endif
+      *
+      * FIRST TIME PROCESSING
+      *
+     C     FIRST         IFEQ      YES
+     C                   EXSR      $FIRST
+     C                   ENDIF
+      *
+      * BREAK ON PRODUCTION PHASE
+      *
+     C                   SELECT
+     C     HGPPCD        WHENNE    SVPPCD
+     C                   EXSR      $FSBRK
+     C                   EXSR      $PPBRK
+      *
+      * BREAK ON FARM SITE
+      *
+     C     HGFSCD        WHENNE    SVFSCD
+     C                   EXSR      $FSBRK
+     C     *INOF         IFEQ      *ON
+     C                   EXSR      $HEAD
+     C                   ELSE
+     C                   EXCEPT    HFHDR
+     C                   ENDIF
+     C                   ENDSL
+      *
+      * FOR DETAIL PROCESSING, RETIEVE AND PROCESS INFO IN
+      * THE FOLLOWING AREAS:
+      *      MOVEMENTS
+      *      PERFORMANCE
+      *      SALES
+     C                   EXSR      $MOVE
+     C                   EXSR      $PERF
+     C                   EXSR      $SALE
+      *
+     C     *INOF         IFEQ      *ON
+     C                   EXSR      $HEAD
+     C                   ENDIF
+     C                   EXCEPT    DTL
+      *
+      * CLEAR THE DETAIL LINE WORK FIELDS
+      *
+     C                   EXSR      $CLRWD
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  MAIN DO
+      *
+      *--------------------------------------------------------------
+      * EOF PROCESSING
+      *--------------------------------------------------------------
+      *
+      *  IF NO DETAIL RECORDS MATCHED THE SELECTION CRITERIA, THEN
+      *  PRINT THE STANDARD 'NO DATA...' ERROR MESSAGE; OTHERWISE
+      *  PRINT THE TOTALS.
+      *
+     C     FIRST         IFEQ      YES
+     C                   EXCEPT    HRHDR
+     C                   EXCEPT    NODATA
+     C                   ELSE
+     C                   EXSR      $FSBRK
+     C                   EXSR      $PPBRK
+     C                   ENDIF
+      *
+     C                   SETON                                        LR
+      /EJECT
+      *----------------------------------------------------------------
+      * $TOMDY - FLIP DATE FROM YYMMDD TO MMDDYY
+      *----------------------------------------------------------------
+      *
+     C     $TOMDY        BEGSR
+      *
+     C                   Z-ADD     WKMON         WKMM
+     C                   Z-ADD     WKDAY         WKDD
+     C                   Z-ADD     WKYER         WKYY
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $DAYS - CALCULATE THE DAYS IN THE PHASE
+      *----------------------------------------------------------------
+      *
+      * CALCULATE THE DAYS IN THE PHASE & CONVERT TO WEEKS - DAYS
+      *
+     C     $DAYS         BEGSR
+      *
+     C                   Z-ADD     HGOPDT        PFRM8
+     C                   Z-ADD     HGDSDT        PTO8
+     C                   MOVEL     'CYMD'        PFRFMT
+     C                   MOVEL     'CYMD'        PTOFMT
+     C                   Z-ADD     0             PDAY
+     C                   MOVEL     'W'           PCODE
+     C                   MOVE      *BLANK        PRTRN
+     C                   EXSR      $DATE
+      *
+      * CONVERT ELASPED DAYS TO WEEKS AND DAYS
+      *
+     C                   move      *blank        dtwkday
+     C     PRTRN         IFEQ      *BLANK                                       IF VALID
+     C     PDAY          ANDGT     0
+     C     PDAY          DIV       7             DTWK
+     C                   MVR                     DTDAY
+     C                   eval      dtwkday = %editw(dtwk: ' 0') + '-' +
+     C                                       %char(dtday)
+     C                   ENDIF                                                  IF VALID
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      *  MOVEMENTS INFORMATION
+      *----------------------------------------------------------------
+      *
+     C     $MOVE         BEGSR
+      *
+      * RETRIEVE TRANSFERED IN
+      *
+     C                   MOVEL     'TRANI'       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF
+     C                   Z-ADD     CGCGHD        DTTIHD
+     C                   ADD       CGCGHD        TFTIHD
+     C                   ADD       CGCGHD        TPTIHD
+     C                   ENDIF
+      *
+      *
+      * TRANSFERED OUT
+      *
+     C                   MOVEL     'TRANO'       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF
+     C                   Z-ADD     CGCGHD        DTOUHD
+     C                   ADD       CGCGHD        TFOUHD
+     C                   ADD       CGCGHD        TPOUHD
+      *
+     C                   Z-ADD     CGCGLB        WDOULB
+     C                   ADD       CGCGLB        WFOULB
+     C                   ADD       CGCGLB        WPOULB
+     C                   ENDIF
+      *
+      * RETRIEVE DEAD FOR USE IN CALCULATING DEATH LOSS %
+      *
+     C                   MOVEL     'DEAD '       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF
+     C                   ADD       CGCGHD        WDDDHD
+     C                   ADD       CGCGHD        WFDDHD
+     C                   ADD       CGCGHD        WPDDHD
+     C                   ENDIF
+      *
+      * RETRIEVE ADJUSTED HEAD AND ACCUMULATE IN WITH DEAD HEAD.
+      * WE KNOW THIS LOOKS GOOFY; BUT, THE SYSTEM HANDLES THE USER'S
+      * INVENTORY ADJUSTMENTS BY PUTTING THEM AGAINST THE MORTALITY.
+      * THUS, IF YOU ADD HOGS TO A GROUP WITH AN INVENTORY ADJUSTMENT,
+      * THE SYSTEM 'ADDS' THE HOGS TO THE GROUP BY DECREASING THE
+      * NUMBER OF DEAD PIGS.  AND, IF YOU DECREASE THE NUMBER OF PIGS
+      * IN A GROUP WITH AN INVENTORY ADJUSTMENT, IT DECREASES THE
+      * GROUP INVENTORY BY INCREMENTING THE NUMBER OF DEAD PIGS !!!
+      *
+     C                   MOVEL     'INADJ'       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF
+     C                   SUB       CGCGHD        WDDDHD
+     C                   SUB       CGCGHD        WFDDHD
+     C                   SUB       CGCGHD        WPDDHD
+     C                   ENDIF
+      *
+      * Retrieve adjusted transfers in and make some calculations:
+      *
+     C                   MOVEL     'TRANA'       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C                   if        *in92 = *off and                             If adjusted in
+     C                             CGCGHD <> 0
+      *
+     C                   add       CGCGHD        wfajtihd
+     C                   add       CGCGLB        wfajtilb
+     C                   add       CGCGHD        wpajtihd
+     C                   add       CGCGLB        wpajtilb
+      *
+      * Death loss % = dead and inventory adjustment head / adjusted tran in head
+      *
+     C     WDDDHD        DIV(H)    CGCGHD        WKMORT
+     C     WKMORT        MULT(H)   100           DTDLPR
+      *
+      * Average pounds placed = adjusted tran in pounds / adjusted tran in head
+      *
+     C     CGCGLB        div(h)    CGCGHD        dtaplb
+     C                   endif                                                  If adjusted in
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * PERFORMANCE STATISTICS
+      *----------------------------------------------------------------
+      *
+     C     $PERF         BEGSR
+      *
+      * WEIGHT GAIN
+      *
+     C                   MOVEL     'WGAIN'       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF
+     C                   Z-ADD     CGCGLB        WDWGLB
+     C                   ADD       CGCGLB        WFWGLB
+     C                   ADD       CGCGLB        WPWGLB
+     C                   ENDIF
+      *
+      * GET THE PIG DAYS FOR CALCULATION OF AVERAGE DAILY GAIN
+      *
+     C                   MOVEL     'PDAYS'       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF                                         IF PIG DAYS
+     C                   ADD       CGCGQT        WFPDAY
+     C                   ADD       CGCGQT        WPPDAY
+      *
+      * AVERAGE DAILY GAIN = WEIGHT GAIN / TOTAL PIG DAYS
+      *
+     C     CGCGQT        IFNE      0                                            IF DAYS
+     C     WDWGLB        DIV(H)    CGCGQT        DTADGN
+     C                   ENDIF                                                  IF DAYS
+     C                   ENDIF                                                  IF PIG DAYS
+      *
+      *---------------------------------------------------------------
+      * DO THE FOLLOWING FOR PRODUCTION PHASE GROW/FINISH ONLY
+      *---------------------------------------------------------------
+      *
+     C     HGPPCD        IFEQ      'GF   '                                      IF G/F
+      *
+      * BACKFAT INCHES
+      *
+     C                   MOVEL     'BFIN '       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF
+     C                   Z-ADD     CGCGQT        DTBFIN
+      *
+      * MULTIPLY BACKFAT INCHES * CARCASS POUNDS
+      * ACCUMULATE THE BACKFAT INCHES AND CARCASS POUNDS
+      *
+     C     CGCGQT        MULT      CGCRLB        WKBFIN
+      *
+     C                   ADD       WKBFIN        WFBFIN
+     C                   ADD       CGCRLB        WFBFCR
+      *
+     C                   ADD       WKBFIN        WPBFIN
+     C                   ADD       CGCRLB        WPBFCR
+     C                   ENDIF
+      *
+      * CARCASS YIELD
+     C                   MOVEL     'CYIEL'       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF
+     C                   Z-ADD     CGCGQT        DTCYPR
+     C                   ADD       CGCGLB        WFCYLB
+     C                   ADD       CGCRLB        WFCYCR
+     C                   ADD       CGCGLB        WPCYLB
+     C                   ADD       CGCRLB        WPCYCR
+     C                   ENDIF
+      *
+      * LEAN PERCENT
+      *
+     C                   MOVEL     'LEAN '       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF                                         IF LEAN
+     C                   Z-ADD     CGCGQT        DTLNPR
+      *
+      * MULTIPLY LEAN PERCENT * CARCASS POUNDS
+      * ACCUMULATE VALUES FOR TOTALS
+      *
+     C     CGCGQT        MULT      CGCRLB        WKLBS
+      *
+     C                   ADD       WKLBS         WFLNLB
+     C                   ADD       CGCRLB        WFLNCR
+      *
+     C                   ADD       WKLBS         WPLNLB
+     C                   ADD       CGCRLB        WPLNCR
+     C                   ENDIF                                                    IF LEAN
+     C                   ENDIF                                                    IF G/F
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $SALE
+      *----------------------------------------------------------------
+      *
+     C     $SALE         BEGSR
+      *
+      *  RETRIEVE CULL SALES
+      *
+     C                   MOVEL     'CULLS'       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF
+     C                   Z-ADD     CGCGHD        DTCLHD
+     C                   ADD       CGCGHD        TFCLHD
+     C                   ADD       CGCGHD        TPCLHD
+     C                   ENDIF
+      *
+      *  RETRIEVE BUTCHER, LIVE AND FEEDER PIG SALES
+      *
+     C     SALES         SETLL     HSL006B
+     C                   SETOFF                                       91
+      *
+     C     *IN91         DOUEQ     *ON                                          DO SALES
+     C     SALES         READE     HSL006B                                91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C     RPRPCD        IFEQ      'BTCAR'                                      IF OK SALE
+     C     RPRPCD        OREQ      'BTLIV'
+     C     RPRPCD        OREQ      'FPS  '
+      *
+     C                   MOVEL     RPRPCD        KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF                                         IF HIT
+     C                   ADD       CGCGHD        DTSLHD
+     C                   ADD       CGCGLB        WDSLLB
+     C                   ADD       CGCGAM        WDSLAM
+      *
+      * ACCUMULATE VALUES FOR TOTAL LINE CALCULATIONS
+      *
+     C                   ADD       CGCGHD        TFSLHD
+     C                   ADD       CGCGLB        WFSLLB
+     C                   ADD       CGCGAM        WFSLAM
+      *
+     C                   ADD       CGCGHD        TPSLHD
+     C                   ADD       CGCGLB        WPSLLB
+     C                   ADD       CGCGAM        WPSLAM
+      *
+     C                   ENDIF                                                  IF HIT
+     C                   ENDIF                                                  IF OK SALE
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO SALES
+      *
+      * ADD THE SOLD HEAD AND TRANSFERRED OUT HEAD TO GET
+      * MOVED OUT HEAD.
+      *
+     C     DTSLHD        ADD       DTOUHD        WDMOHD
+      *
+      * ACCUMULATE FOR TOTAL LINE CALCULATIONS
+      *
+     C                   ADD       WDMOHD        WFMOHD
+     C                   ADD       WDMOHD        WPMOHD
+      *
+      * RETRIEVE FEED CONSUMED POUNDS
+      *
+     C                   MOVEL     'FCONS'       KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF
+     C                   Z-ADD     CGCGLB        WDFCLB
+     C                   ADD       CGCGLB        WFFCLB
+     C                   ADD       CGCGLB        WPFCLB
+     C                   ENDIF
+      *
+      * MAKE 2 PER HEAD MOVED CALCULATIONS:
+      *   1) FEED CONSUMED POUNDS PER HEAD MOVED
+      *   2) AVERAGE POUNDS PER HEAD MOVED
+      *
+     C     WDMOHD        IFNE      0
+     C     WDFCLB        DIV(H)    WDMOHD        DTFHLB
+      *
+     C     WDOULB        ADD       WDSLLB        WKLBS
+     C     WKLBS         DIV(H)    WDMOHD        DTAMLB
+     C                   ENDIF
+      *
+      * CALCULATE FEED CONVERSION = FEED CONSUMED LBS / WEIGHT GAIN
+      *
+     C     WDWGLB        IFNE      0
+     C     WDFCLB        DIV(H)    WDWGLB        DTFDCV
+     C                   ENDIF
+      *
+      * CALCULATE AVERAGE POUNDS SOLD = SOLD LBS / SOLD HEAD
+      *
+     C     DTSLHD        IFNE      0
+     C     WDSLLB        DIV(H)    DTSLHD        DTASLB
+     C                   ENDIF
+      *
+      * READ THE PREMIUM/DISCOUNT MASTER FILE TO PROCESS AND
+      * ACCUMULATE PREMIUM/DISCOUNT DOLLARS FOR THE GROUP
+      *
+     C     *LOVAL        SETLL     HSP045
+     C                   SETOFF                                       91
+      *
+     C     *IN91         DOUEQ     *ON                                          DO PREMS
+     C                   READ      HSP045                                 91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C                   MOVEL     PDRPCD        KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF                                         IF FOUND
+     C                   ADD       CGCGAM        WDPDAM
+     C                   ADD       CGCGAM        WFPDAM
+     C                   ADD       CGCGAM        WPPDAM
+     C                   ENDIF                                                  IF FOUND
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO PREMS
+      *
+      * READ THE DEDUCTION/ADD-ON MASTER FILE TO RETRIEVE
+      * AND ACCUMULATE ALL THE DEDUCTIONS/ADD-ONS FOR THE
+      * GROUP.
+     C     *LOVAL        SETLL     HSP044
+     C                   SETOFF                                       91
+      *
+     C     *IN91         DOUEQ     *ON                                          DO DEDS LOOP
+     C                   READ      HSP044                                 91
+     C     *IN91         IFEQ      *OFF                                         IF DEDS
+      *
+     C                   MOVEL     DARPCD        KYRPCD
+     C     K1P390        CHAIN     HSP390                             92
+     C     *IN92         IFEQ      *OFF                                         IF GROUP DED
+     C                   ADD       CGCGAM        WDDAAM
+     C                   ADD       CGCGAM        WFDAAM
+     C                   ADD       CGCGAM        WPDAAM
+     C                   ENDIF                                                  IF GROUP DED
+     C                   ENDIF                                                  IF DEDS
+     C                   ENDDO                                                  DO DED LOOP
+      *
+      * CALCULATE THE TOTAL NET SALES =
+      *     GROSS SALES + DED/ADDONS + PREMIUM/DISCOUNTS
+      *
+     C     WDSLAM        ADD       WDDAAM        WDNTAM
+     C                   ADD       WDPDAM        WDNTAM
+      *
+      * MOVE NET SALES DOLLARS TO PRINT FIELD (9,0) AND
+      * HALF ADJUST
+      *
+     C     1             MULT(H)   WDNTAM        DTNTAM
+     C                   ADD       DTNTAM        TFNTAM
+     C                   ADD       DTNTAM        TPNTAM
+      *
+      * CALCULATE THE HUNDRED WEIGHT OF SALES POUNDS
+      *
+     C     WDSLLB        DIV(H)    100           WKCWT
+      *
+      * CALCULATE NET SALES DOLLARS PER CWT OF SALES POUNDS
+      *
+     C     WKCWT         IFNE      0
+     C     WDNTAM        DIV(H)    WKCWT         DTNCWT
+     C                   ENDIF
+      *
+      * CALCULATE DEDUCTION/ADD-ON DOLLLARS PER CWT OF SALES POUNDS
+      *
+     C     WKCWT         IFNE      0
+     C     WDDAAM        DIV(H)    WKCWT         DTDCWT
+     C                   ENDIF
+      *
+      * CALCULATE GROSS DOLLARS PER CWT OF SALES POUNDS
+      *
+     C     WKCWT         IFNE      0
+     C     WDSLAM        ADD       WDPDAM        WDGRAM
+     C     WDGRAM        DIV(H)    WKCWT         DTGCWT
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $FSBRK - CONTROL BREAK ON FARM SITE
+      *----------------------------------------------------------------
+      *
+     C     $FSBRK        BEGSR
+      *
+      * DEATH LOSS % = DEAD & INVENTORY ADJUSTMENT HEAD / ADJUSTED TRANSFERRED IN HEAD
+      *
+     C     WFAJTIHD      IFNE      0
+     C     WFDDHD        DIV(H)    WFAJTIHD      WKMORT
+     C     WKMORT        MULT(H)   100           TFDLPR
+      *
+      * CALCULATE THE AVERAGE POUNDS PLACED =
+      *     ADJUSTED TRANI POUNDS /  ADJUSTED TRANSFERRED IN HEAD
+      *
+     C     WFAJTILB      DIV(H)    WFAJTIHD      TFAPLB
+     C                   ENDIF
+      *
+      * CALCULATE THE AVERAGE POUNDS SOLD =
+      *      SOLD POUNDS / SOLD HEAD
+      *
+     C     TFSLHD        IFNE      0
+     C     WFSLLB        DIV(H)    TFSLHD        TFASLB
+     C                   ENDIF
+      *
+      *----------------------------------------------------------------
+      * DO THE FOLLOWING FOR PRODUCTION PHASE GROW/FINISH ONLY
+      *----------------------------------------------------------------
+      *
+     C     SVPPCD        IFEQ      'GF   '                                      IF G/F
+      *
+      * LEAN PERCENT = LEAN POUNDS / CARCASS LBS FOR LEAN
+      *
+     C     WFLNCR        IFNE      0
+     C     WFLNLB        DIV(H)    WFLNCR        TFLNPR
+     C                   ENDIF
+      *
+      * BACKFAT INCHES = BACKFAT / BACKFAT CARCASS POUNDS
+      *
+     C     WFBFCR        IFNE      0
+     C     WFBFIN        DIV(H)    WFBFCR        TFBFIN
+     C                   ENDIF
+      *
+      * CARCASS YIELD PERCENT = CARCASS POUNDS / LIVE POUNDS
+      *
+     C     WFCYLB        IFNE      0
+     C     WFCYCR        DIV       WFCYLB        WKPRCT
+     C     WKPRCT        MULT      100           TFCYPR
+     C                   ENDIF
+     C                   ENDIF                                                   IF G/F
+      *
+      *----------------------------------------------------------------
+      * PERFORM THE FOLLOWING FOR ALL PHASES
+      *----------------------------------------------------------------
+      *
+      * MAKE 2 PER HEAD MOVED CALCULATIONS:
+      *   1) FEED POUNDS PER HEAD MOVED
+      *   2) AVERAGE POUNDS
+      *
+     C     WFMOHD        IFNE      0
+     C     WFFCLB        DIV(H)    WFMOHD        TFFHLB
+      *
+     C     WFOULB        ADD       WFSLLB        WKLBS
+     C     WKLBS         DIV(H)    WFMOHD        TFAMLB
+     C                   ENDIF
+      *
+      * FEED CONVERSION =
+      *     FEED CONSUMED LBS / WEIGHT GAIN LBS
+      *
+     C     WFWGLB        IFNE      0
+     C     WFFCLB        DIV(H)    WFWGLB        TFFDCV
+     C                   ENDIF
+      *
+      * AVERAGE DAILY GAIN = WEIGHT GAIN LBS / PIG DAYS
+      *
+     C     WFPDAY        IFNE      0
+     C     WFWGLB        DIV(H)    WFPDAY        TFADGN
+     C                   ENDIF
+      *
+      * CALCULATE HUNDRED WEIGHT FOR SOLD POUNDS
+      *
+     C     WFSLLB        DIV(H)    100           WKCWT
+      *
+      * CACULATE DOLLARS PER CWT FOR NET SALES
+      *
+     C     WKCWT         IFNE      0
+     C     TFNTAM        DIV(H)    WKCWT         TFNCWT
+     C                   ENDIF
+      *
+      * CALCULATE DEDUCTION/ADD-ON DOLLLARS PER CWT OF SOLD POUNDS
+      *
+     C     WKCWT         IFNE      0
+     C     WFDAAM        DIV(H)    WKCWT         TFDCWT
+     C                   ENDIF
+      *
+      * CALCULATE PREMIUM/DISCOUNT DOLLLARS PER CWT OF SOLD POUNDS
+      *
+     C     WKCWT         IFNE      0
+     C     WFSLAM        ADD       WFPDAM        WFGRAM
+     C     WFGRAM        DIV(H)    WKCWT         TFGCWT
+     C                   ENDIF
+      *
+     C     *INOF         IFEQ      *ON
+     C                   EXSR      $HEAD
+     C                   ENDIF
+     C                   EXCEPT    TFTOT
+     C                   Z-ADD     HGFSCD        SVFSCD
+      *
+      * IF YOU ARE NOT DOING YOUR EOF PROCESSING,
+      *    CLEAR FARM SITE WORK FIELDS
+      *
+     C     *IN99         IFEQ      *OFF                                         IF NOT EOF
+     C                   EXSR      $CLRWF
+     C                   ENDIF                                                  IF NOT EOF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $PPBRK - CONTROL BREAK IN PRODUCTION PHASE
+      *----------------------------------------------------------------
+      *
+     C     $PPBRK        BEGSR
+      *
+      * DEATH LOSS % = DEAD AND INVENTORY ADJUSTMENT HEAD / ADJUSTED TRANSFERRED IN HEAD
+      *
+     C     WPAJTIHD      IFNE      0
+     C     WPDDHD        DIV(H)    WPAJTIHD      WKMORT
+     C     WKMORT        MULT(H)   100           TPDLPR
+      *
+      * CALCULATE  AVERAGE POUNDS PLACED =
+      *      ADJUSTED TRANSFERED IN POUNDS / ADJUSTED TRANSFERED IN HEAD
+      *
+     C     WPAJTILB      DIV(H)    WPAJTIHD      TPAPLB
+     C                   ENDIF
+      *
+      * CALCULATE AVERAGE POUNDS SOLD =
+      *      SOLD POUNDS / SOLD HEAD
+      *
+     C     TPSLHD        IFNE      0
+     C     WPSLLB        DIV(H)    TPSLHD        TPASLB
+     C                   ENDIF
+      *
+      *---------------------------------------------------------------
+      * PERFORM THE FOLLOWING FOR PRODUCTION PHASE GROW/FINISH ONLY
+      *---------------------------------------------------------------
+      *
+     C     SVPPCD        IFEQ      'GF   '                                      IF G/F
+      *
+      * LEAN % = LEAN LIVE POUNDS  / LEAN CARCASS POUNDS
+      *
+     C     WPLNCR        IFNE      0
+     C     WPLNLB        DIV(H)    WPLNCR        TPLNPR
+     C                   ENDIF
+      *
+      * BACKFAT INCHES =
+      *      BACKFAT / BACKFAT CARCASS POUNDS
+      *
+     C     WPBFCR        IFNE      0
+     C     WPBFIN        DIV(H)    WPBFCR        TPBFIN
+     C                   ENDIF
+      *
+      * CALCULATE CARCASS YIELD =
+      *      YIELD CARCASS POUNDS / YIELD LIVE POUNDS
+      *
+     C     WPCYLB        IFNE      0
+     C     WPCYCR        DIV       WPCYLB        WKPRCT
+     C     WKPRCT        MULT      100           TPCYPR
+     C                   ENDIF
+     C                   ENDIF                                                   IF G/F
+      *
+      *---------------------------------------------------------------
+      * PERFORM THE FOLLOWING FOR ALL PHASES
+      *---------------------------------------------------------------
+      *
+      * MAKE 2 PER HEAD MOVED CALCULATIONS:
+      *   1) FEED POUNDS PER HEAD MOVED
+      *   2) AVERAGE POUNDS PER HEAD MOVED
+      *
+     C     WPMOHD        IFNE      0
+     C     WPFCLB        DIV(H)    WPMOHD        TPFHLB
+      *
+     C     WPOULB        ADD       WPSLLB        WKLBS
+     C     WKLBS         DIV(H)    WPMOHD        TPAMLB
+     C                   ENDIF
+      *
+      * FEED CONVERSION =
+      *     FEED CONSUMED POUNDS / WEIGHT GAIN POUNDS
+      *
+     C     WPWGLB        IFNE      0
+     C     WPFCLB        DIV(H)    WPWGLB        TPFDCV
+     C                   ENDIF
+      *
+      * AVERAGE DAILY GAIN = WEIGHT GAIN POUNDS/ PIG DAYS
+      *
+     C     WPPDAY        IFNE      0
+     C     WPWGLB        DIV(H)    WPPDAY        TPADGN
+     C                   ENDIF
+      *
+      * CALCULATE THE HUNDRED WEIGHT FOR SOLD POUNDS
+      *
+     C     WPSLLB        DIV(H)    100           WKCWT
+      *
+      * CALCULATE NET SALES DOLLARS PER CWT OF SALES POUNDS
+      *
+     C     WKCWT         IFNE      0
+     C     TPNTAM        DIV(H)    WKCWT         TPNCWT
+     C                   ENDIF
+      *
+      * CALCULATE DEDUCTION/ADD-ON DOLLLARS PER CWT OF SALES POUNDS
+      *
+     C     WKCWT         IFNE      0
+     C     WPDAAM        DIV(H)    WKCWT         TPDCWT
+     C                   ENDIF
+      *
+      * CALCULATE PREMIUM/DISCOUNT DOLLLARS PER CWT OF SALES POUNDS
+      *
+     C     WKCWT         IFNE      0
+     C     WPSLAM        ADD       WPPDAM        WPGRAM
+     C     WPGRAM        DIV(H)    WKCWT         TPGCWT
+     C                   ENDIF
+      *
+     C     *INOF         IFEQ      *ON
+     C                   EXSR      $HEAD
+     C                   ENDIF
+     C                   EXCEPT    TPTOT
+      *
+      * IF YOU ARE NOT DOING YOUR EOF PROCESSING,
+      *    RETRIEVE NEW PRODUCTION PHASE DESCRIPTION
+      *    PRINT HEADINGS
+      *
+     C     *IN99         IFEQ      *OFF                                         IF NOT EOF
+     C                   EXSR      $PPDS
+     C                   EXSR      $HEAD
+     C                   MOVEL     HGPPCD        SVPPCD
+     C                   EXSR      $CLRWP
+     C                   ENDIF                                                  IF NOT EOF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $HEAD - OVERFLOW SUBROUTINE
+      *----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE PRINTS THE REPORT HEADING, PRODUCTION PHASE
+      * HEADING AND FARM SITE HEADING.
+      *
+     C     $HEAD         BEGSR
+      *
+     C                   EXCEPT    HRHDR
+     C                   EXCEPT    HPHDR
+     C                   EXCEPT    HFHDR
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $DATE -  MANIPULATE DATES WITH DATE UTILITY
+      *----------------------------------------------------------------
+      *
+     C     $DATE         BEGSR
+      *
+     C                   CALL      'UT80060R'
+     C                   PARM                    PFRM8             8 0
+     C                   PARM                    PTO8              8 0
+     C                   PARM                    PFRFMT            4
+     C                   PARM                    PTOFMT            4
+     C                   PARM                    PDAY              4 0
+     C                   PARM                    PCODE             1
+     C                   PARM                    PRTRN             1
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $PPDS - RETRIEVE PRODUCTION PHASE DESCRIPTION
+      *----------------------------------------------------------------
+      *
+     C     $PPDS         BEGSR
+      *
+     C     HGPPCD        CHAIN     HSP011                             91
+     C     *IN91         IFEQ      *ON                                          IF NOT FOUND
+     C                   MOVEL(P)  'UNKNOWN'     PPPPDS
+     C                   ENDIF                                                  IF NOT FOUND
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CLRWD - INITIALIZE WORK FIELDS USED IN GROUP CALCULATIONS
+      *----------------------------------------------------------------
+      *
+     C     $CLRWD        BEGSR
+      *
+     C                   Z-ADD     0             WDMOHD
+     C                   Z-ADD     0             WDDDHD
+     C                   Z-ADD     0             WDSLLB
+     C                   Z-ADD     0             WDOULB
+     C                   Z-ADD     0             WDFCLB
+     C                   Z-ADD     0             WDWGLB
+     C                   Z-ADD     0             WDSLAM
+     C                   Z-ADD     0             WDGRAM
+     C                   Z-ADD     0             WDDAAM
+     C                   Z-ADD     0             WDNTAM
+     C                   Z-ADD     0             WDPDAM
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CLRWF - CLEAR WORK FIELDS FOR FARM SITE ACCUMULATIONS
+      *----------------------------------------------------------------
+      *
+     C     $CLRWF        BEGSR
+      *
+     C                   Z-ADD     0             WFMOHD
+     C                   Z-ADD     0             WFDDHD
+     C                   Z-ADD     0             WFLNLB
+     C                   Z-ADD     0             WFOULB
+     C                   Z-ADD     0             WFSLLB
+     C                   Z-ADD     0             WFCYLB
+     C                   Z-ADD     0             WFWGLB
+     C                   Z-ADD     0             WFAJTILB
+     C                   Z-ADD     0             WFAJTIHD
+     C                   Z-ADD     0             WFFCLB
+     C                   Z-ADD     0             WFBFCR
+     C                   Z-ADD     0             WFCYCR
+     C                   Z-ADD     0             WFLNCR
+     C                   Z-ADD     0             WFBFIN
+     C                   Z-ADD     0             WFPDAY
+     C                   Z-ADD     0             WFPDAM
+     C                   Z-ADD     0             WFDAAM
+     C                   Z-ADD     0             WFSLAM
+     C                   Z-ADD     0             WFGRAM
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CLRWP - CLEAR WORK FIELDS FOR PRODUCTION PHASE
+      *----------------------------------------------------------------
+      *
+     C     $CLRWP        BEGSR
+      *
+     C                   Z-ADD     0             WPMOHD
+     C                   Z-ADD     0             WPDDHD
+     C                   Z-ADD     0             WPAJTIHD
+     C                   Z-ADD     0             WPAJTILB
+     C                   Z-ADD     0             WPFCLB
+     C                   Z-ADD     0             WPBFCR
+     C                   Z-ADD     0             WPLNLB
+     C                   Z-ADD     0             WPCYLB
+     C                   Z-ADD     0             WPWGLB
+     C                   Z-ADD     0             WPOULB
+     C                   Z-ADD     0             WPSLLB
+     C                   Z-ADD     0             WPLNCR
+     C                   Z-ADD     0             WPCYCR
+     C                   Z-ADD     0             WPBFIN
+     C                   Z-ADD     0             WPPDAY
+     C                   Z-ADD     0             WPPDAM
+     C                   Z-ADD     0             WPDAAM
+     C                   Z-ADD     0             WPSLAM
+     C                   Z-ADD     0             WPGRAM
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * FIRST TIME THROUGH
+      *----------------------------------------------------------------
+      *
+     C     $FIRST        BEGSR
+      *
+     C                   MOVEL     NO            FIRST
+      *
+      * SAVE THE CONTROL BREAK FIELDS
+      *
+     C                   MOVEL     HGPPCD        SVPPCD
+     C                   Z-ADD     HGFSCD        SVFSCD
+      *
+      * RETRIEVE DESCRIPTIONS FOR HEADINGS
+      * PRINT HEADINGS FOR FIRST TIME THROUGH
+      *
+     C                   EXSR      $PPDS
+     C                   EXSR      $HEAD
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * INITIALIZATION SUBROUTINE
+      *----------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      * KEY LISTS
+      *
+     C     K1P390        KLIST
+     C                   KFLD                    HGHGSN
+     C                   KFLD                    KYRPCD
+      *
+     C     *LIKE         DEFINE    RPRPCD        KYRPCD
+      *
+      * DEFINE SAVE FIELDS FOR CONTROL BREAKS
+      *
+     C     *LIKE         DEFINE    HGPPCD        SVPPCD
+     C     *LIKE         DEFINE    HGFSCD        SVFSCD
+      *
+      * DEFINE WORKFIELDS FOR INTERIM CALCULATIONS
+      *
+     C                   Z-ADD     0             WKLBS            15 5
+     C     *LIKE         DEFINE    WKLBS         WKCWT
+     C     *LIKE         DEFINE    WKLBS         WKPRCT
+     C     *LIKE         DEFINE    WKLBS         WKBFIN
+     C     *LIKE         DEFINE    WKLBS         WKMORT
+      *
+      * DEFINE PRINT FIELDS FOR THE REPORT HEADING LINE
+      *
+     C                   MOVE      *BLANK        HRGTCD            3
+     C     *LIKE         DEFINE    GTGTDS        HRGTDS
+      *
+      * DEFINE PRINT FIELDS FOR THE DETAIL LINE
+      *
+     C     *LIKE         DEFINE    CGCGHD        DTTIHD
+     C     *LIKE         DEFINE    CGCGHD        DTOUHD
+     C     *LIKE         DEFINE    CGCGHD        DTCLHD
+     C     *LIKE         DEFINE    CGCGHD        DTSLHD
+      *
+     C                   Z-ADD     0             DTAPLB            5 2
+     C     *LIKE         DEFINE    DTAPLB        DTASLB
+     C     *LIKE         DEFINE    DTAPLB        DTAMLB
+     C     *LIKE         DEFINE    DTAPLB        DTDLPR
+     C     *LIKE         DEFINE    DTAPLB        DTLNPR
+     C     *LIKE         DEFINE    DTAPLB        DTCYPR
+     C     *LIKE         DEFINE    DTAPLB        DTBFIN
+     C     *LIKE         DEFINE    DTAPLB        DTFDCV
+     C     *LIKE         DEFINE    DTAPLB        DTADGN
+     C     *LIKE         DEFINE    DTAPLB        DTFHLB
+     C     *LIKE         DEFINE    DTAPLB        DTNCWT
+     C     *LIKE         DEFINE    DTAPLB        DTDCWT
+     C     *LIKE         DEFINE    DTAPLB        DTGCWT
+     C                   Z-ADD     0             DTNTAM            9 0
+     C                   Z-ADD     0             DTDSDT            6 0
+     C                   Z-ADD     0             DTWK              2 0
+     C                   Z-ADD     0             DTDAY             1 0
+     C                   move      *blank        dtwkday           4
+     C     *like         define    hgfscd        dtobfs
+      *
+      * DEFINE PRINT FIELDS FOR THE FARM TOTAL LINE
+      *
+     C                   Z-ADD     0             TFTIHD            7 0
+     C     *LIKE         DEFINE    TFTIHD        TFOUHD
+     C     *LIKE         DEFINE    TFTIHD        TFSLHD
+     C     *LIKE         DEFINE    TFTIHD        TFCLHD
+     C     *LIKE         DEFINE    DTAPLB        TFAPLB
+     C     *LIKE         DEFINE    DTAPLB        TFASLB
+     C     *LIKE         DEFINE    DTAMLB        TFAMLB
+     C     *LIKE         DEFINE    DTAPLB        TFFHLB
+     C     *LIKE         DEFINE    DTAPLB        TFADGN
+     C     *LIKE         DEFINE    DTAPLB        TFLNPR
+     C     *LIKE         DEFINE    DTAPLB        TFCYPR
+     C     *LIKE         DEFINE    DTAPLB        TFDLPR
+     C     *LIKE         DEFINE    DTAPLB        TFFDCV
+     C     *LIKE         DEFINE    DTAPLB        TFBFIN
+     C     *LIKE         DEFINE    DTNTAM        TFNTAM
+     C     *LIKE         DEFINE    DTAPLB        TFNCWT
+     C     *LIKE         DEFINE    DTAPLB        TFDCWT
+     C     *LIKE         DEFINE    DTAPLB        TFGCWT
+      *
+      * DEFINE PRINT FIELDS FOR THE PRODUCTION PHASE TOTAL LINE
+      *
+     C                   Z-ADD     0             TPCLHD            7 0
+     C     *LIKE         DEFINE    TPCLHD        TPTIHD
+     C     *LIKE         DEFINE    TPCLHD        TPOUHD
+     C     *LIKE         DEFINE    TPCLHD        TPSLHD
+     C     *LIKE         DEFINE    DTAPLB        TPAPLB
+     C     *LIKE         DEFINE    DTAPLB        TPASLB
+     C     *LIKE         DEFINE    DTAMLB        TPAMLB
+     C     *LIKE         DEFINE    DTAPLB        TPFHLB
+     C     *LIKE         DEFINE    DTAPLB        TPLNPR
+     C     *LIKE         DEFINE    DTAPLB        TPCYPR
+     C     *LIKE         DEFINE    DTAPLB        TPDLPR
+     C     *LIKE         DEFINE    DTAPLB        TPBFIN
+     C     *LIKE         DEFINE    DTAPLB        TPFDCV
+     C     *LIKE         DEFINE    DTAPLB        TPADGN
+     C     *LIKE         DEFINE    DTAPLB        TPNCWT
+     C     *LIKE         DEFINE    DTAPLB        TPDCWT
+     C     *LIKE         DEFINE    DTAPLB        TPGCWT
+     C     *LIKE         DEFINE    DTNTAM        TPNTAM                                     M
+      *
+      *--------------------------------------------------------------
+      * FIELDS FOR ACCUMULATING VALUES
+      *--------------------------------------------------------------
+      *
+      * ACCUMULATORS FOR DETAIL LINE
+      *
+     C     *LIKE         DEFINE    CGCGHD        WDMOHD
+     C     *LIKE         DEFINE    CGCGHD        WDDDHD
+     C     *LIKE         DEFINE    CGCGLB        WDOULB
+     C     *LIKE         DEFINE    CGCGLB        WDSLLB
+     C     *LIKE         DEFINE    CGCGLB        WDFCLB
+     C     *LIKE         DEFINE    CGCGLB        WDWGLB
+     C     *LIKE         DEFINE    CGCGAM        WDSLAM
+     C     *LIKE         DEFINE    CGCGAM        WDGRAM
+     C     *LIKE         DEFINE    CGCGAM        WDDAAM
+     C     *LIKE         DEFINE    CGCGAM        WDNTAM
+     C     *LIKE         DEFINE    CGCGAM        WDPDAM
+      *
+      * ACCUMULATORS FOR FARM TOTAL LINE  (15,5)
+      *
+     C     *LIKE         DEFINE    WKLBS         WFMOHD
+     C     *LIKE         DEFINE    WKLBS         WFDDHD
+     C     *LIKE         DEFINE    WKLBS         WFLNLB
+     C     *LIKE         DEFINE    WKLBS         WFOULB
+     C     *LIKE         DEFINE    WKLBS         WFSLLB
+     C     *LIKE         DEFINE    WKLBS         WFCYLB
+     C     *LIKE         DEFINE    WKLBS         WFWGLB
+     C     *LIKE         DEFINE    WKLBS         WFFCLB
+     C     *LIKE         DEFINE    WKLBS         WFAJTIHD
+     C     *LIKE         DEFINE    WKLBS         WFAJTILB
+      *
+      * CARCASS POUNDS
+      *
+     C     *LIKE         DEFINE    WKLBS         WFBFCR
+     C     *LIKE         DEFINE    WKLBS         WFCYCR
+     C     *LIKE         DEFINE    WKLBS         WFLNCR
+      *
+     C     *LIKE         DEFINE    WKLBS         WFBFIN
+     C     *LIKE         DEFINE    WKLBS         WFPDAY
+     C     *LIKE         DEFINE    WKLBS         WFPDAM
+     C     *LIKE         DEFINE    WKLBS         WFDAAM
+     C     *LIKE         DEFINE    WKLBS         WFSLAM
+     C     *LIKE         DEFINE    WKLBS         WFGRAM
+      *
+      * ACCUMULATORS FOR PRODUCTION PHASE TOTAL LINE (15,5)
+      *
+     C     *LIKE         DEFINE    WKLBS         WPMOHD
+     C     *LIKE         DEFINE    WKLBS         WPDDHD
+     C     *LIKE         DEFINE    WKLBS         WPFCLB
+     C     *LIKE         DEFINE    WKLBS         WPLNLB
+     C     *LIKE         DEFINE    WKLBS         WPCYLB
+     C     *LIKE         DEFINE    WKLBS         WPWGLB
+     C     *LIKE         DEFINE    WKLBS         WPOULB
+     C     *LIKE         DEFINE    WKLBS         WPSLLB
+     C     *LIKE         DEFINE    WKLBS         WPAJTIHD
+     C     *LIKE         DEFINE    WKLBS         WPAJTILB
+      *
+      * CARCASS POUNDS
+      *
+     C     *LIKE         DEFINE    WKLBS         WPBFCR
+     C     *LIKE         DEFINE    WKLBS         WPLNCR
+     C     *LIKE         DEFINE    WKLBS         WPCYCR
+      *
+     C     *LIKE         DEFINE    WKLBS         WPBFIN
+     C     *LIKE         DEFINE    WKLBS         WPPDAY
+     C     *LIKE         DEFINE    WKLBS         WPPDAM
+     C     *LIKE         DEFINE    WKLBS         WPDAAM
+     C     *LIKE         DEFINE    WKLBS         WPSLAM
+     C     *LIKE         DEFINE    WKLBS         WPGRAM
+      *
+      *----------------------------------------------------------------
+      * SET UP REPORT HEADINGS
+      *
+     C     LDFSBO        IFEQ      *BLANK
+     C                   MOVEL(P)  'ALL'         LDFSBO
+     C                   ENDIF
+      *
+     C     LDPTCD        IFEQ      *BLANK
+     C                   MOVEL(P)  'ALL'         LDPTCD
+     C                   ENDIF
+      *
+     C     LDPPCD        IFEQ      *BLANK
+     C                   MOVEL(P)  'ALL'         LDPPCD
+     C                   ENDIF
+      *
+     C     LDCELL        IFEQ      0
+     C                   SETON                                        87
+     C                   ENDIF
+      *
+     C     LDFSCD        IFEQ      0
+     C                   SETON                                        89
+     C                   ENDIF
+      *
+      *  GROUP TYPE
+      *
+     C     LDGTCD        IFNE      *BLANK                                       IF ENTERED
+     C     LDGTCD        CHAIN     HSP025                             92
+     C                   MOVEL(P)  LDGTCD        HRGTCD
+     C     *IN92         IFEQ      *OFF                                         IF FOUND
+     C                   MOVEL     GTGTDS        HRGTDS
+     C                   ELSE
+     C                   MOVEL     'UNKNOWN'     HRGTDS
+     C                   ENDIF                                                  IF FOUND
+     C                   ELSE
+     C                   MOVEL(P)  'ALL'         HRGTCD
+     C                   ENDIF                                                  IF ENTERED
+      *
+      * HOG GROUP
+      *
+     C     LDHGCD        IFEQ      *BLANK
+     C                   MOVEL(P)  'ALL'         LDHGCD
+     C                   ENDIF
+      *
+      * RETRIEVE TIME FOR REPORT HEADING
+      * SET UP A FIRST TIME FLAG
+      * SET UP A DASHED LINE FOR UNDERLINING THE HEADING
+      *
+     C                   TIME                    RTIME             6 0
+     C                   MOVEL     YES           FIRST             1
+     C                   MOVEL     *ALL'-'       DASH            198
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------
+      * REPORT HEADING LINES
+      *-------------------------------------------------------------
+      *
+     OQPRINT    E            HRHDR          1 01
+     O                       SDPGM               10
+     O                                          110 'HOG PRODUCTION SYSTEM'
+     O                                          188 'DATE'
+     O                       UDATE         Y    198
+      *
+     O          E            HRHDR          1
+     O                       SDUSR               10
+     O                                           97 'DISPOSED GROUP'
+     O                                         +  1 'PERFORMANCE REPORT'
+     O                                          188 'TIME'
+     O                       RTIME              198 '  :  :  '
+      *
+     O          E            HRHDR          1
+     O                                          188 'PAGE'
+     O                       PAGE          Z    198
+      *
+     O          E            HRHDR          1
+     O                                           16 'BUSINESS OFFICE '
+     O                                           22 '.....'
+     O                       LDFSBO              29
+     O                       LDBODS              63
+      *
+     O          E            HRHDR          1
+     O                                           22 'FROM DISPOSED DATE ...'
+     O                       LDFMDY        Y     32
+      *
+     O          E            HRHDR          1
+     O                                           22 'TO DISPOSED DATE .....'
+     O                       LDTMDY        Y     32
+      *
+      *
+     O          E            HRHDR          1
+     O                                           22 'PRODUCTION TYPE ......'
+     O                       LDPTCD              29
+     O                       LDPTDS              43
+      *
+     O          E            HRHDR          1
+     O                                           22 'PRODUCTION PHASE .....'
+     O                       LDPPCD              29
+     O                       LDPPDS              63
+      *
+     O          E            HRHDR          1
+     O                                           22 'CELL .................'
+     O              N87      LDCELL        K     27
+     O               87                          27 'ALL'
+      *
+      *
+     O          E            HRHDR          1
+     O                                           22 'FARM SITE ............'
+     O              N89      LDFSCD        M     30
+     O               89                          27 'ALL'
+     O                       LDFSNM              58
+      *
+     O          E            HRHDR          1
+     O                                           22 'GROUP TYPE ...........'
+     O                       HRGTCD              27
+     O                       HRGTDS              48
+      *
+     O          E            HRHDR          2
+     O                                           22 'GROUP ................'
+     O                       LDHGCD              31
+      *
+     O          E            HRHDR          1
+     O                                           24 'AVG'
+     O                                           32 'ORIG'
+     O                                           89 'AVG'
+     O                                           97 'AVG'
+     O                                          114 'PER HEAD MOVED'
+     O                                          130 'AVG'
+     O                                          140 'GROSS'
+     O                                          149 'DEDUCT/'
+     O                                          158 'NET'
+      *
+     O          E            HRHDR          1
+     O                                            5 'GROUP'
+     O                                           15 'DATE'
+     O                                           25 'WK-DAY'
+     O                                           32 'BGF'
+     O                                           43 'TRANI'
+     O                                           53 'HEAD'
+     O                                           63 'CULLS'
+     O                                           73 'TRANO'
+     O                                           81 'MORT'
+     O                                           89 'LBS'
+     O                                           97 'LBS'
+     O                                          106 'AVG'
+     O                                          113 'FEED'
+     O                                          122 'FEED'
+     O                                          130 'DAILY'
+     O                                          140 '$'
+     O                                          149 'ADDON $'
+     O                                          158 'SALES $'
+     O                                          170 'NET'
+     O                                          179 'LEAN'
+     O                                          188 'BACKFAT'
+     O                                          198 'CARCASS'
+      *
+     O          E            HRHDR          1
+     O                                            6 'NUMBER'
+     O                                           17 'DISPOSED'
+     O                                           25 'IN PHS'
+     O                                           32 'FARM'
+     O                                           43 'HEAD'
+     O                                           53 'SOLD'
+     O                                           63 'SOLD'
+     O                                           73 'HEAD'
+     O                                           79 '%'
+     O                                           89 'PLACED'
+     O                                           97 'SOLD'
+     O                                          106 'LBS'
+     O                                          113 'LBS'
+     O                                          122 'CONVS'
+     O                                          130 'GAIN'
+     O                                          140 'PER CWT'
+     O                                          149 'PER CWT'
+     O                                          158 'PER CWT'
+     O                                          170 'SALES'
+     O                                          177 '%'
+     O                                          188 'INCHES'
+     O                                          197 'YIELD'
+      *
+     O          E            HRHDR          2
+     O                       DASH               198
+      *
+      *-------------------------------------------------------------
+      * PRODUCTION PHASE HEADING
+      *-------------------------------------------------------------
+      *
+     O          E            HPHDR          0
+     O                       PPPPDS              30
+      *
+     O          E            HPHDR          2
+     O                       PPPPDS              30
+      *
+      *-------------------------------------------------------------
+      * FARM SITE HEADING
+      *-------------------------------------------------------------
+      *
+     O          E            HFHDR          0
+     O                       FSFSNM              30
+      *
+     O          E            HFHDR          1
+     O                       FSFSNM              30
+      *
+      *-------------------------------------------------------------
+      * DETAIL LINE
+      *-------------------------------------------------------------
+      *
+     O          E            DTL            1
+     O                       HGHGCD         B     7
+     O                       DTDSDT        YB    17
+     O                       DTWKDAY        B    24
+     O                       DTOBFS        zB    32
+     O                       DTTIHD        KB    44
+     O                       DTSLHD        KB    54
+     O                       DTCLHD        KB    64
+     O                       DTOUHD        KB    74
+     O                       DTDLPR        KB    82
+     O                       DTAPLB        KB    90
+     O                       DTASLB        KB    98
+     O                       DTAMLB        KB   107
+     O                       DTFHLB        KB   115
+     O                       DTFDCV        KB   123
+     O                       DTADGN        KB   131
+     O                       DTGCWT        KB   140
+     O                       DTDCWT        KB   149
+     O                       DTNCWT        KB   158
+     O                       DTNTAM        KB   171
+     O                       DTLNPR        MB   180
+     O                       DTBFIN        MB   189
+     O                       DTCYPR        MB   198
+      *
+      *-------------------------------------------------------------
+      * FARM SITE TOTAL LINE
+      *-------------------------------------------------------------
+      *
+     O          E            TFTOT          0
+     O                                           24 'Total for Farm:'
+     O                       SVFSCD        z     30
+      *
+     O          E            TFTOT          2
+     O                                           24 'Total for Farm:'
+     O                       SVFSCD        zb    30
+     O                       TFTIHD        KB    44
+     O                       TFSLHD        KB    54
+     O                       TFCLHD        KB    64
+     O                       TFOUHD        KB    74
+     O                       TFDLPR        KB    82
+     O                       TFAPLB        KB    90
+     O                       TFASLB        KB    98
+     O                       TFAMLB        KB   107
+     O                       TFFHLB        KB   115
+     O                       TFFDCV        KB   123
+     O                       TFADGN        KB   131
+     O                       TFGCWT        KB   140
+     O                       TFDCWT        KB   149
+     O                       TFNCWT        KB   158
+     O                       TFNTAM        KB   171
+     O                       TFLNPR        MB   180
+     O                       TFBFIN        MB   189
+     O                       TFCYPR        MB   198
+      *
+      *-------------------------------------------------------------
+      * PRODUCTION PHASE TOTAL LINE
+      *-------------------------------------------------------------
+      *
+     O          E            TPTOT       1  1
+      *
+     O                                           10 'Total for '
+     O                       PPPPCD         B    15
+     O                       TPTIHD        KB    44
+     O                       TPSLHD        KB    54
+     O                       TPCLHD        KB    64
+     O                       TPOUHD        KB    74
+     O                       TPDLPR        KB    82
+     O                       TPAPLB        KB    90
+     O                       TPASLB        KB    98
+     O                       TPAMLB        KB   107
+     O                       TPFHLB        KB   115
+     O                       TPFDCV        KB   123
+     O                       TPADGN        KB   131
+     O                       TPGCWT        KB   140
+     O                       TPDCWT        KB   149
+     O                       TPNCWT        KB   157
+     O                       TPNTAM        KB   171
+     O                       TPLNPR        MB   180
+     O                       TPBFIN        MB   189
+     O                       TPCYPR        MB   198
+      *
+      *-------------------------------------------------------------
+      * NO DATA MESSAGE LINE
+      *-------------------------------------------------------------
+     O          E            NODATA         1
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'

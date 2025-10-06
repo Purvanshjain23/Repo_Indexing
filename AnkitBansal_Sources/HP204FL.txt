@@ -1,0 +1,500 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP204FL- Build JDE Upload file: HPS Feed Pounds
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     11/07/01
+      *
+      * FUNCTION: This program builds an upload file of current period feed ticket
+      *           pounds that will be interfaced to JDE. The upload includes both
+      *           delivery and pick-up records....even though Randy Rolf wanted the
+      *           description on entries to read 'Feed Pounds Delivered'.
+      *
+      *           Only "Produced" feed tickets are uploaded in this process.
+      *
+      *           This program is called from HP204CLFL which is called
+      *           from the upload driver CL HP404CL..which is submitted from
+      *           HP404.
+      *
+      * For the HPS Feed Pounds upload to JDE, we will ultimately:
+      *    1) create 2 JDE batches: 1 for BGF feed and 1 for Finisher feed
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 04/19/05  LeAnne Fedor
+      *           Added logic to limit processing to "Produced" feed tickets.
+      *
+      * 04/23/09  LeAnne Ramsey
+      *           Recompile only. Costed Time/User added to Feed Ticket Header.
+      *
+      * 05/12/09  LeAnne Ramsey
+      *           Recompile only. PickUp Ticket Type added to Feed Ticket Header.
+      *
+      * 09/21/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Upload Date' to Feed Ticket Header.
+      *
+      * 01/17/13  LeAnne Ramsey (E2405)
+      *           MTech wants to push all EOP Upload data into a single upload...using
+      *           our file HSP204 and program HP204. To make this work, I needed to
+      *           change the value in the Explanation field...by adding Sow or No Sow
+      *           to the end ...like the Description does. John Davison approved this.
+      *
+      * 10/16/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      * 02/28/16  Barb Gutierrez(E5290)
+      *           Added logic to handle new company Iowa Farms.
+      * 03/09/16  Barb Gutierrez(E5290)
+      *           Fixed problem of not zeroing out the batch total when company changes.
+      *
+      * 10/17/18  Danny Nguyen  (S13682)
+      *           Removed control break by Company since OPNQRYF logic on
+      *           hsl018i is now selecting by Company.
+      *
+      *  4/15/19  Brad Baden    (E14835)
+      *           Accumulate for each farm by Company Owned Mill and Toll Mill.
+      *           Company Owned feed will be written to file HSP204 with object
+      *           equal to 6021.  Toll Mill feed will be written with object
+      *           equal to 6021 and sub code equal to 001.  Feed pounds for both
+      *           Company Owned and Toll Mill are accumulated into the batch total.
+      *           Added file HSP089 to retrieve the Mill Type.
+      *
+      * 10/30/19  Brad Baden   E15736 - Upload Toll Mill Receipts
+      *           Recompiled only for new field is HSP089 file.
+      *
+      * 05/19/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsl018i   if   e           k disk
+      *    Farm site
+      *    (records selected in open query; farms with no cost center are omitted)
+      *
+      *
+     Fhsp037    if   e           k disk
+      *    Feed ticket header
+      *
+      *
+     Fhsl038b   if   e           k disk
+      *    Feed ticket detail
+      *    (records selected in open query)
+      *
+      *
+     Fhsp089    if   e           k disk
+      *    Mill Alias
+      *
+      *
+     Fhsp204    uf a e           k disk
+      *    HPS to JDE upload file
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D CompanyOwned    c                   'CO'
+     D TollMill        c                   'TM'
+      *
+      *
+      *---------------------------------------------------------------
+      * STANDALONE FIELDS
+      *---------------------------------------------------------------
+      *
+      * Control fields
+      *
+     D svcocd          s                   like(fscocd)
+     D svmcu           s                   like(fscjd)
+     D svfmbo          s                   like(fdfmbo)
+     D first           s              1    inz('Y')
+     D newco           s              1
+      *
+      * Work fields
+      *
+     D wkmcu           s                   like(hjmcu)
+      *
+      *
+      * Workfields for accumulating
+      *
+     D wkexa           s                   like(hjexa)
+     D wkdesc          s                   like(hjdesc)
+     D wkfdlb          s                   like(hjhpsval)
+     D wkbatval        s                   like(hjbatval)
+     D wkmltcd         s                   like(mamltcd)
+     D wktmfdlb        s                   like(fdfdlb)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldacyr                 1      4  0
+     D  ldacpe                 5      6  0
+     D  ldbpdt                 7     14  0
+     D  ldepdt                15     22  0
+     D  ldhucd                23     24
+      *
+     D  ldhuds               100    129
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Perform BGF processing
+      *
+     C                   exsr      $bgf
+      *
+      *
+      * Perform Finisher processing (Nursery and Grow Finish)
+      *
+     C                   exsr      $fin
+      *
+     C                   seton                                        lr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process all BGF farms
+      *--------------------------------------------------------------------------------------
+      *
+     C     $bgf          begsr
+      *
+     C                   eval      wkexa  = 'HPS Feed Pounds - SOW'
+     C                   eval      wkdesc = 'Feed Pounds Delivered - SOW'
+     C                   move      yes           first
+      *
+     C     *loval        setll     hsl018i
+      *
+     C                   dou       *in90 = *on                                  Do BGF farms
+     C                   read      hsl018i                                90
+     C                   if        *in90 = *off and fsppcd = 'BGF  '            If not EOF
+      *
+     C                   if        first = yes
+     C                   exsr      $first
+     C                   endif
+      *
+      *
+      * Control break on company number
+      *   a) write last BGF records to interface file
+      *   b) Write offsetting entries for company
+      *   c) clear accumulators and save cost center
+      *   d) Set new batch number and new document flags
+      *
+     C                   select
+      * S13682-Removed Control Break on Company Number. Open Query File Logic will now select
+      *        by Company Number.
+13682C**                 when      svcocd <> fscocd
+  |  C**                 exsr      $write204
+  |  C**                 exsr      $writeoff
+  |  C**                 exsr      $clear
+  |  C**                 z-add     0             wkbatval
+  |  C**                 move      fscocd        svcocd
+13682C**                 move      yes           newco
+      *
+      * Control break on cost center
+      *   a) write debit BGF record to interface file
+      *   b) clear accumulators and save cost center
+      *
+     C                   when      svmcu <> fscjd
+     C                   exsr      $write204
+     C                   exsr      $clear
+     C                   endsl
+      *
+      * Detail processing: Accumulate feed pounds for the farm.
+      *
+     C                   exsr      $feed
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do BGF farms
+      *
+      * Last record processing for BGF farms
+      *
+     C                   exsr      $write204
+     C                   exsr      $clear
+      *
+      * Now, write your offsetting credit entry for BGF feed pounds.
+      *
+     C                   exsr      $writeoff
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process each Nursery and Grow Finish Farm
+      *--------------------------------------------------------------------------------------
+      *
+     C     $fin          begsr
+      *
+     C                   eval      wkexa  = 'HPS Feed Pounds - No Sow'
+     C                   eval      wkdesc = 'Feed Pounds Delivered - No Sow'
+     C                   move      yes           first
+      *
+     C     *loval        setll     hsl018i
+      *
+     C                   dou       *in90 = *on                                  Do nur/gf farms
+     C                   read      hsl018i                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             (fsppcd = 'NUR  ' or fsppcd = 'GF   ')
+      *
+     C                   if        first = yes
+     C                   exsr      $first
+     C                   endif
+      *
+      *
+      * Control break on company number
+      *   a) write last finisher records to interface file
+      *   b) Write offsetting entries for company
+      *   c) clear accumulators and save cost center
+      *   d) Set new batch number and new document flags
+      *
+     C                   select
+     C                   when      svcocd <> fscocd
+     C                   exsr      $write204
+     C                   exsr      $writeoff
+     C                   exsr      $clear
+     C                   z-add     0             wkbatval
+     C                   move      fscocd        svcocd
+     C                   move      yes           newco
+      *
+      * Control break on cost center
+      *   a) write Finisher record to interface file
+      *   b) clear accumulators and save cost center
+      *
+     C                   when      svmcu <> fscjd
+     C                   exsr      $write204
+     C                   exsr      $clear
+     C                   endsl
+      *
+      * Accumulate feed ticket pounds for the farm.
+      *
+     C                   exsr      $feed
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do nur/gf farms
+      *
+      * Last record processing for Finisher farms
+      *
+     C                   exsr      $write204
+     C                   exsr      $clear
+      *
+      *
+      * Now, write your offsetting entry for Finisher feed pounds.
+      *
+     C                   exsr      $writeoff
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Accumulate all feed ticket pounds (produced feed only) for a farm
+      *--------------------------------------------------------------------------------------
+      *
+     C     $feed         begsr
+      *
+     C     fsfscd        setll     hsl038b
+      *
+     C                   dou       *in91 = *on                                  Do feed
+     C     fsfscd        reade     hsl038b                                91
+     C                   if        *in91 = *off                                 If EOF
+      *
+      * Check the Feed Ticket Header record to see if this Feed Detail
+      * Record is for "Produced" feed. If so, continue.
+      *
+     C     key01         chain     hsp037                             92
+     C                   if        *in92 = *off and fhprfl = yes                If produced
+      *
+      * 4/15/19 E14835 - Toll Mill vs Company Owned Feed Allocation
+      * If Feed Mill Business Office changes, get Mill Type
+      *
+     C                   if        fdfmbo <> svfmbo
+     C     fdfmbo        chain     hsp089
+     C                   if        %found(hsp089)
+     C                   eval      wkmltcd = mamltcd
+     C                   endif
+      *
+     C                   eval      svfmbo = fdfmbo
+     C                   endif
+      *
+     C                   select                                                 Select
+      *  Accumulate Company Owned
+     C                   when      wkmltcd = CompanyOwned
+     C                   add       fdfdlb        wkfdlb
+     C                   add       fdfdlb        wkbatval
+
+      *  Accumulate Toll Mill
+     C                   when      wkmltcd = TollMill
+     C                   add       fdfdlb        wktmfdlb
+     C                   add       fdfdlb        wkbatval
+     C                   endsl                                                  End Selectd
+     C                   endif                                                  If produced
+      *
+     C                   endif                                                  If EOF
+     C                   enddo                                                  Do feed
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write record to interface file
+      *--------------------------------------------------------------------------------------
+      *
+     C     $write204     begsr
+      *
+     C                   if        wkfdlb <> 0
+      *
+     C                   z-add     wkfdlb        hjhpsval
+     C     100           mult      wkfdlb        hjjdeval
+     C                   move      wkexa         hjexa
+     C                   move      wkdesc        hjdesc
+     C                   eval      hjobj = '6021'
+     C                   eval      hjsub = *blanks
+      *
+     C                   move      'AU'          hjtype
+     C                   move      no            hjoffset
+     C                   z-add     0             hjbatval
+     C                   move      svmcu         hjmcu
+     C                   move      *blank        hjsub
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+     C                   move      svcocd        hjcocd
+      *
+      * If the company number changed, we want to write a new batch and document number.
+      *
+     C                   if        newco = yes
+     C                   move      yes           hjnewbat
+     C                   move      yes           hjnewdoc
+     C                   move      no            newco
+     C                   endif
+      *
+     C                   write     hjrec
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+     C                   endif
+      *
+      *
+      * 4/15/19 E14835 - Write Toll Mill record
+      *
+     C                   if        wktmfdlb <> 0
+      *
+     C                   z-add     wktmfdlb      hjhpsval
+     C     100           mult      wktmfdlb      hjjdeval
+     C                   move      wkexa         hjexa
+     C                   move      wkdesc        hjdesc
+     C                   eval      hjobj = '6021'
+     C                   eval      hjsub = '001'
+      *
+     C                   move      'AU'          hjtype
+     C                   move      no            hjoffset
+     C                   z-add     0             hjbatval
+     C                   move      svmcu         hjmcu
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+     C                   move      svcocd        hjcocd
+      *
+     C                   write     hjrec
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Clear accumulators
+      *--------------------------------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   z-add     0             wkfdlb
+     C                   z-add     0             wktmfdlb
+     C                   move      fscjd         svmcu
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write offset records to interface file
+      *--------------------------------------------------------------------------------------
+      *
+     C     $writeoff     begsr
+      *
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+     C                   move      'AU'          hjtype
+     C                   move      svcocd        wkmcu
+     C                   eval      hjmcu = wkmcu
+     C                   eval      hjobj = '6020'
+     C                   move      *blank        hjsub
+     C                   move      yes           hjoffset
+      *
+     C     -1            mult      wkbatval      hjhpsval
+     C     -100          mult      wkbatval      hjjdeval
+      *
+      * Populate the 'batch header value' field with the 'offset' value. Force the
+      * number to be positive.
+      *
+     C                   select
+     C                   when      hjjdeval >= 0
+     C                   z-add     hjjdeval      hjbatval
+     C                   other
+     C     -1            mult      hjjdeval      hjbatval
+     C                   endsl
+      *
+     C                   write     hjrec
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Subroutine for first time for BGF and first time for Finisher logic
+      *--------------------------------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+     C                   move      yes           hjnewbat
+     C                   move      yes           hjnewdoc
+     C                   move      fscjd         svmcu
+     C                   move      fscocd        svcocd
+     C                   move      no            first
+     C                   z-add     0             wkbatval
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Initialization subroutine
+      *--------------------------------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    fdfmbo
+     C                   kfld                    fdtkno
+     C                   kfld                    fdtrcd
+      *
+     C                   endsr
+      /EJECT

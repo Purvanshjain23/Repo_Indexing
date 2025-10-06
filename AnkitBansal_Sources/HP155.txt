@@ -1,0 +1,1042 @@
+      *****************  RPG PROGRAM HEADING  ***********************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP155
+      * TITLE:       MAINTAIN BINS
+      * PROGRAMMER:  ROSE CENTONZE
+      * CREATED:     04/07/94
+      *
+      * FUNCTION: THIS PROGRAM USES A SUBFILE TO MAINTAIN RECORDS
+      *           IN THE BINS MASTER FILE.
+      *
+      *           THE PROGRAM WILL CREATE, DELETE AND UPDATE RECORDS
+      *           FOR A FARM SITE.
+      *
+      *           THIS PROGRAM IS CALLED FROM HP154-MAINTAIN BIN SETS.
+      *
+      *           IT DOES NOT HAVE SELECTORS OR POSITIONERS.
+      *           IT DOES NOT HAVE F4-PROMPT LOGIC.
+      *           IT LOADS THE SUBFILE A PAGE AT A TIME.
+      *           IT USES THE STANDARD MESSAGE HANDLING PROGRAM.
+      *           IT HAS STANDARD SUBFILE OPTION EDITING.
+      *
+      *
+      *           NOTE: A record is deleted by blanking out the entry fields
+      *                 on the subfile line.
+      *
+      *                 When creating/revising no file updates are made until the
+      *                 user takes F9-Accept to accept his entries.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      * 11/02/94  LEANNE FEDOR
+      *           REMOVED THE EMPTY "IF STATEMENT" THAT WAS LEFT IN FOR
+      *           DELETION INTEGRITY CHECKS.  THIS PROGRAM WILL NOT
+      *           HAVE ANY DELETION CHECKS.
+      *
+      * 04/19/95  LEANNE FEDOR
+      *           CHANGED FARM SITE CODE FROM ALPHA TO NUMERIC
+      *
+      * 04/13/98  LeAnne Fedor
+      *           Recompile only. New field 'state' added to farm site file.
+      *
+      * 04/17/01  LeAnne Fedor
+      *           Rewritten. We needed to be able to change existing bins instead of
+      *           deleting and recreating.
+      *
+      * 07/10/01  LeAnne Fedor
+      *           Bin set is now an input field on the subfile along with bin...instead
+      *           of a restrictor in the control record.
+      *
+      * 09/04/01  LeAnne Fedor
+      *           Recompile only. New 'square feet' fields added to Farm Site file.
+      *
+      * 01/16/06  LeAnne Fedor
+      *           We have removed "Bin Set" from HSP020-Building/Rooms and put it in our new
+      *           HSP113-Rooms/Bin Sets file.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 04/06/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *           Changed array 'bncd' & variables 'xxbncd*' from 5A to 6A.
+      *           Changed work fields 'oldnew', 'wkoldnew' & 'wknewold' from 10A to 12A
+      *           to support before & after Bin Code 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhpd155    cf   e             workstn
+     F                                     sfile(hp155S1:hdrrn1)
+     F                                     infds(iofeed)
+      *
+      *
+     Fhsp018    if   e           k disk
+      *    Farm site
+      *
+      *
+     Fhsl113a   if   e           k disk
+      *    Rooms/Bin sets
+      *
+      *
+     Fhsl036b   uf a e           k disk
+      *    Bins
+      *
+      *
+     Fhsl038y   uf   e           k disk
+      *    Feed ticket detail
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D create          c                   'CREATE'
+     D revise          c                   'REVISE'
+     D delete          c                   'DELETE'
+     D view            c                   'VIEW  '
+     D select          c                   'SELECT'
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D set1            c                   'SET1  '
+     D edit1           c                   'EDIT1 '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+     D update          c                   'UPDATE'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      * Define array holding bin sets.
+      * This array contains all unique bin sets in the subfile.
+      *
+      *
+     D                 ds
+     D bicd                           5    dim(500)
+      *
+      * Define array holding bin.
+      * This array is used to edit that a specific bin is entered only
+      * one time in the subfile.
+      *
+      * P405-Bin Code changed from 5A to 6A.
+     D                 ds
+P405 D*bncd                           5    dim(500)
+P405 D bncd                           6    dim(500)
+      *
+      * Define array holding old bin/new bin.
+      * This array is used to keep user from flip-flopping existing bins.
+      * P405-Bin Code changed from 5A to 6A.
+     D                 ds
+P405 D*oldnew                        10    dim(500)
+P405 D oldnew                        12    dim(500)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D mode            s              6
+     D pgm             s             10
+     D msgfl           s             10
+     D maxmsg          s              2  0  inz(20)
+     D routne          s              6
+     D maxrrn          s              4  0
+     D reset           s              1    inz('N')
+     D count           s              3  0
+     D wkflow          s                   like(idflow)
+     D rtncd           s              2
+      *
+      *
+      * Workfields required for subfile paging--see initialization
+      * subroutine.
+      *
+     D wkplin          s              3  0
+     D wkrlin          s              3  0
+     D wkdiff          s              3  0
+     D wkfld           s                   like(count)
+     D wkrmdr          s                   like(count)
+     D editfl          s              1    inz('N')
+     D wkedit          s              1    inz('N')
+     D notfl           s              1    inz('N')
+      *
+      *
+      * Workfields
+      *
+      * P405-Bin Code changed from 5A to 6A.
+P405 D*wkoldnew        s             10
+  |  D wkoldnew        s             12
+  |  D*wknewold        s             10
+P405 D wknewold        s             12
+      *
+      *
+      * Parms
+      *
+P405 D*xxbncd1         s              5
+P405 D xxbncd1         s                   like(bnbncd)
+P405 D*xxbncd2         s              5
+P405 D xxbncd2         s                   like(bnbncd)
+P405 D*xxbncd3         s              5
+P405 D xxbncd3         s                   like(bnbncd)
+P405 D*xxbncd4         s              5
+P405 D xxbncd4         s                   like(bnbncd)
+      *
+      *
+      * Array indexes
+      *
+     D a               s              3  0
+     D b               s              3  0
+     D c               s              3  0
+      *
+     D x               s              3  0
+     D y               s              3  0
+     D z               s              3  0
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard subfile option conversion
+      *---------------------------------------------------------------
+      *   None
+      *
+      *---------------------------------------------------------------
+      * Data areas
+      *---------------------------------------------------------------
+      * None
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+     C
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off                                         Main do loop
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     edit1         $edit1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo                                                  Main do loop
+      /EJECT
+      *----------------------------------------------------------------
+      * $set1 - set environment for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $set1         begsr
+      *
+      * Verify that the farm site the user selected still exists. If it
+      * exists, clear and fill the subfile with the associated bins.
+      *
+     C     c1fscd        chain     hsp018                             92
+     C                   if        *in92 = *off                                 If found
+     C                   exsr      $clr1
+     C                   exsr      $frsh1
+     C                   else
+      *
+      * The record has been deleted out from under the user.
+      *
+     C                   move      yes           notfl
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09008'
+     C                   endif
+     C                   endif                                                  If found
+      *
+      * Set routine to display screen
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * $scrn1 - perform operator I/O for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $scrn1        begsr
+      *
+      * Set the page of the subfile to display
+      *
+     C                   select
+     C                   when      wkflow = 0 and error = 0
+     C                   eval      hdpag1 = 1
+      *
+     C                   when      reset = yes and wkflow <= hdrrn1
+     C                   eval      hdpag1 = wkflow
+     C                   endsl
+      *
+      * Set the indicators to control screen fields
+      *
+     C                   exsr      $ind
+      *
+      * If the user has edited the data, then issue the 'accept changes'
+      * message. (Don't issue the message if the user is in create mode but
+      * has not entered anything in the subfile.)
+      *
+     C                   select
+     C                   when      mode = create and wkedit = no
+      *
+     C                   when      error = 0 and editfl = yes
+     C                   eval      error = 1
+     C                   eval      mgid(e) = 'HS09026'
+     C                   endsl
+      *
+      *
+      * Write the error messages from the error arrays to the
+      * error message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * Write screen 1 to crt
+      *
+     C                   write     hp155k1
+     C                   write     hp155ec
+     C                   exfmt     hp155c1
+      *
+      *
+      * Save the value of the lowest subfile rrn on the screen for
+      * later repositioning of the subfile
+      *
+     C                   eval      wkflow = idflow
+     C                   eval      reset = no
+     C                   eval      editfl = no
+      *
+      *
+      * Clear the messages from the message data structures and
+      * program message queue
+      *
+     C                   exsr      $clmsg
+      *
+      * Get user's entry and set next routine
+      *
+     C                   select
+     C                   when      *in03 = *on                                  F3-exit
+     C                   eval      rtncd = '03'
+     C                   eval      routne = exit
+      *
+     C                   when      notfl = yes
+     C                   eval      routne = set1
+      *
+     C                   when      *in05 = *on                                  F5-refresh
+     C                   eval      reset = yes
+     C                   eval      routne = set1
+      *
+     C                   when      *in12 = *on                                  F12=previous
+     C                   eval      rtncd = '12'
+     C                   eval      routne = exit
+      *
+     C                   when      *in09 = *on                                  F9-accept
+     C                   exsr      $edit1
+     C                   if        error <> 0                                   If error
+     C                   eval      routne = scrn1
+     C                   else
+      *
+     C                   select
+     C                   when      mode = revise
+     C                   exsr      $dlt036
+     C                   exsr      $crt036
+     C                   when      mode = create
+     C                   exsr      $crt036
+     C                   endsl
+      *
+     C                   eval      rtncd = '00'
+     C                   eval      routne = exit
+     C                   endif                                                  If error
+      *
+     C                   when      *in25 = *on                                  F25-rollup
+     C                   eval      wkdiff = idflow + wkplin
+     C                   if        hdrrn1 >= wkdiff                             If something
+     C                   else
+     C                   eval      hdrrn1 = count
+     C                   exsr      $setof
+     C                   exsr      $clrln
+     C                   do        wkplin                                       Do fill
+     C                   exsr      $blank
+     C                   enddo                                                  Do fill
+     C                   endif                                                  If something
+     C                   eval      routne = scrn1
+     C                   other
+      *
+      * User pressed ENTER
+      *
+     C                   exsr      $edit1
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $edit1 - edit input fields for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $edit1        begsr
+      *
+     C                   eval      editfl = yes
+      *
+      * Edit the subfile
+      *
+     C                   exsr      $eds1
+      *
+     C                   if        error = 0
+     C                   eval      hdpag1 = 1
+     C                   endif
+      *
+      * Check that each bin set already assigned to a farm/room still exists.
+      *
+     C                   exsr      $binset
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $clr1  - clear subfile for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $clr1         begsr
+      *
+     C                   eval      hdrrn1 = 0
+     C                   eval      count = 0
+      *
+     C                   clear                   hp155s1
+     C                   seton                                        83        sflclr
+     C                   write     hp155c1
+     C                   setoff                                       818283
+      *                                                    81=sfldsp
+      *                                                    82=sflend
+      *                                                    83=sflclr
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $frsh1 - refresh/fill the subfile for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $frsh1        begsr
+      *
+      * Loading the sbufile in this program is different than subfiles in
+      * Work With programs and depends on the 'MODE'.
+      * For CREATE mode, load a page of blank lines.
+      * For REVISE mode, load a page of database records and, if you hit EOF,
+      *                  finish loading the page with blank lines.
+      *
+     C                   select
+     C                   when      mode = create
+     C                   exsr      $setof
+     C                   exsr      $clrln
+     C                   do        wkplin
+     C                   exsr      $blank
+     C                   enddo
+      *
+     C                   when      mode = revise
+     C     c1fscd        setll     hsl036b
+     C                   dou       *in82 = *on
+     C                   exsr      $load1
+     C                   enddo
+      *
+      * Fill up the subfile page with blank lines if necessary
+      *
+     C                   if        wkplin <> 0 and wkplin <> count
+     C     count         div       wkplin        wkfld
+     C                   mvr                     wkrmdr
+     C                   eval      wkdiff = wkplin - wkrmdr
+     C                   exsr      $setof
+     C                   exsr      $clrln
+     C                   do        wkdiff
+     C                   exsr      $blank
+     C                   enddo
+     C                   endif
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $load1 - load subfile on screen 1
+      *---------------------------------------------------------------
+      *
+     C     $load1        begsr
+      *
+      * Retrieve bins associated with farm site.
+      *
+     C     c1fscd        reade(n)  hsl036b                                82
+     C                   if        *in82 = *off                                 If not EOF
+     C                   seton                                        85
+      *
+      * Clear fields in subfile line
+      *
+     C                   exsr      $clrln
+      *
+      * Set up subfile line fields
+      *
+     C                   move      bnbicd        d1bicd
+     C                   move      bnbncd        d1bncd
+     C                   move      bnbncd        hdbncd
+      *
+     C                   add       1             count
+     C                   add       1             hdrrn1
+      *
+     C                   write     hp155s1
+     C                   seton                                        81
+     C                   eval      hdpag1 = hdrrn1
+     C                   endif                                                  If not EOF
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $blank - load blank subfile records for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $blank        begsr
+      *
+     C                   add       1             count
+     C                   add       1             hdrrn1
+      *
+     C                   write     hp155s1
+     C                   seton                                        81
+     C                   eval      hdpag1 = hdrrn1
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $clrln - clear subfile line
+      *---------------------------------------------------------------
+      *
+     C     $clrln        begsr
+      *
+     C                   move      *blank        d1bicd
+     C                   move      *blank        d1bncd
+     C                   move      *blank        hdbncd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Read and edit changed subfile records on screen 1
+      *---------------------------------------------------------------
+      *
+     C     $eds1         begsr
+      *
+      * Initialize arrays and indexes
+      *
+     C                   z-add     0             x
+     C                   z-add     0             y
+     C                   move      *blank        bncd
+      *
+     C                   z-add     0             a
+     C                   z-add     0             b
+     C                   move      *blank        bicd
+      *
+      * Set the field that indicates whether the user entered/changed data.
+      *
+     C                   eval      wkedit = no
+      *
+      * Read/process all changed subfile records
+      *
+     C                   setoff                                       80
+     C                   dou       *in80 = *on                                  Do process
+     C                   readc     hp155s1                                80
+     C                   if        *in80 = *off                                 If rec read
+      *
+      * Set on MDT
+     C                   seton                                        85
+      *
+      * Set off error indicators in the subfile
+      *
+     C                   exsr      $setof
+      *
+      * If there are any user entries:
+      *  a) set the flag indicating you have edited at least once
+      *  b) validate fields
+      *
+     C                   if        d1bncd  <> *blank or                         If entry
+     C                             hdbncd  <> *blank
+     C                   eval      wkedit = yes
+     C                   exsr      $bncd
+     C                   exsr      $bicd
+     C                   endif                                                  If entry
+      *
+      * Reset indicators
+     C                   update    hp155s1
+     C                   exsr      $setof
+     C                   endif                                                  If rec read
+     C                   enddo                                                  Do process
+      * Set MDT
+     C                   setoff                                       85
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Validate bin code
+      *----------------------------------------------------------------
+      *
+     C     $bncd         begsr
+      *
+     C                   eval      d1bncd = %triml(d1bncd)
+      *
+     C                   select
+     C                   when      d1bncd = *blank and d1bicd = *blank and
+     C                             hdbncd <> *blank
+     C                   exsr      $dltck
+     C                   endsl
+      *
+      *
+      * If bin is valid, check that it is in the subfile only one time.
+      *
+     C                   if        *in31 = *off and d1bncd <> *blank            If OK
+     C                   eval      x = 1
+     C     d1bncd        lookup    bncd(x)                                92
+     C                   if        *in92 = *on                                  If dup
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00900'
+     C                   movea     d1bncd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If dup
+      *
+      *
+      * If not a duplicate, load the bin into its array.
+      *
+     C                   if        *in31 = *off
+     C                   add       1             y
+     C                   move      d1bncd        bncd(y)
+     C                   endif
+     C                   endif                                                  If OK
+      *
+      * If the bin is still valid, then check for any old/new bin flip-flops.
+      *
+     C                   if        d1bncd <> *blank and
+     C                             d1bncd <> hdbncd and
+     C                             *in31 = *off
+     C                   exsr      $flipflop
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Validate bin set
+      *----------------------------------------------------------------
+      *
+     C     $bicd         begsr
+      *
+     C                   select
+     C                   when      d1bicd = *blank and d1bncd <> *blank
+     C                   seton                                        32
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00144'
+     C                   endif
+      *
+     C                   when      d1bicd <> *blank and d1bncd = *blank
+     C                   seton                                        32
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00146'
+     C                   endif
+     C                   endsl
+      *
+      *  If there were no errors on bin set, move it to the bin set array.
+      *
+     C                   eval      a = 1
+     C     d1bicd        lookup    bicd(a)                                92
+     C                   if        *in92 = *off                                 If not found
+     C                   add       1             b
+     C                   move      d1bicd        bicd(b)
+     C                   endif                                                  If not found
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Check for flip-flops of bins
+      *----------------------------------------------------------------
+      *
+     C     $flipflop     begsr
+      *
+     C                   move      d1bncd        xxbncd1
+     C                   move      hdbncd        xxbncd2
+      *
+     C                   eval      wknewold = d1bncd + hdbncd
+     C                   eval      x = 1
+      *
+     C     wknewold      lookup    oldnew(x)                              92
+     C                   if        *in92 = *on                                  If flop
+     C                   movel     oldnew(x)     xxbncd3
+     C                   move      oldnew(x)     xxbncd4
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   exsr      $err1
+     C                   eval      mgid(e) = 'HS00902'
+     C                   clear                   mgw
+     C                   movea     xxbncd2       mgw(1)
+      ** P405-Changed beginning positions of each parms to support Bin Code 6A.
+P405 C**                 movea     xxbncd1       mgw(6)
+  |  C                   movea     xxbncd1       mgw(7)
+  |  C**                 movea     xxbncd3       mgw(11)
+  |  C                   movea     xxbncd3       mgw(13)
+  |  C**                 movea     xxbncd4       mgw(16)
+P405 C                   movea     xxbncd4       mgw(19)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If flop
+      *
+      *
+      * If not a duplicate, load the bin into its array.
+      *
+     C                   if        *in31 = *off
+     C                   eval      wkoldnew = hdbncd + d1bncd
+     C                   add       1             z
+     C                   move      wkoldnew      oldnew(z)
+     C                   endif                                                  If OK
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Check that all Bin Sets already assigned to Rooms on the Farm still exist
+      *----------------------------------------------------------------------------------
+      *
+     C     $binset       begsr
+      *
+     C     c1fscd        setll     hsl113a
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     c1fscd        reade     hsl113a                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * If the user blanked out every record, your array will be empty.
+      * So, don't do a look up.
+      *
+     C                   if        b > 0
+     C     rbbicd        lookup    bicd                                   92
+     C                   endif
+      *
+      * If you did a) a look up and it failed or b) you had no array entries,
+      * issue a message.
+     C                   if        (b > 0 and *in92 = *off) or                  If not found
+     C                              b = 0
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS00164'
+     C                   clear                   mgw
+     C                   movea     rbbicd        mgw(1)
+     C                   movea     rbblcd        mgw(6)
+     C                   movea     rbrmcd        mgw(11)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If not found
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Deletion integrity check on bins
+      *----------------------------------------------------------------
+      *
+      * How do you know the user is deleting an existing record? The hidden bin in the
+      * subfile will be populated while the entry bin will be blank.
+      * When this occurs, check for any 'unallocated' feed ticket detail records for
+      * this farm/bin. If records exist, the user can 'change' the bin code...but he
+      * cannot delete it.
+      *
+     C     $dltck        begsr
+      *
+     C     key01         chain(n)  hsl038y                            92
+     C                   if        *in92 = *off                                 If found
+     C                   move      hdbncd        d1bncd
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00901'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     d1bncd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   endif                                                  If found
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * $ind - reset indicators
+      *----------------------------------------------------------------
+      *
+     C     $ind          begsr
+      *
+      * If the bank was deleted out from under the user, then
+      * set *IN90 back on to control available function keys and input
+      * fields.
+      *
+     C                   if        notfl = yes                                  If out from under
+     C                   seton                                        90
+     C                   endif                                                  If out from under
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * $setof - set off the indicators on the subfile
+      *----------------------------------------------------------------
+      *
+     C     $setof        begsr
+      *
+     C                   setoff                                       3132
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Delete bins
+      *----------------------------------------------------------------
+      *
+     C     $dlt036       begsr
+      *
+     C     c1fscd        setll     hsl036b
+     C                   setoff                                       92
+     C                   dou       *in92 = *on                                  Do deletes
+     C     c1fscd        reade     hsl036b                                92
+     C                   if        *in92 = *off                                 If found
+     C                   delete    bnrec
+     C                   endif                                                  If found
+     C                   enddo                                                  Do deletes
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Create bins
+      *----------------------------------------------------------------
+      *
+     C     $crt036       begsr
+      *
+     C                   z-add     c1fscd        bnfscd
+      *
+     C                   setoff                                       80
+     C                   dou       *in80 = *on                                  Do writes
+     C                   readc     hp155s1                                80
+     C                   if        *in80 = *off and d1bncd <> *blank            If rec read
+     C                   move      d1bncd        bnbncd
+     C                   move      d1bicd        bnbicd
+     C                   write     bnrec
+      *
+     C                   if        hdbncd <> *blank and
+     C                             hdbncd <> d1bncd
+     C                   exsr      $upd038
+     C                   endif
+      *
+     C                   endif                                                  If rec read
+     C                   enddo                                                  Do writes
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Update the bins in the unallocated feed ticket detail records.
+      *---------------------------------------------------------------
+      *
+     C     $upd038       begsr
+      *
+     C     key01         setll     hsl038y
+     C                   dou       *in92 = *on
+     C     key01         reade     hsl038y                                92
+     C                   if        *in92 = *off
+     C                   move      d1bncd        fdbncd
+     C                   update    fdrec
+     C                   endif
+     C                   enddo
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $err1  - set the subfile to redisplay at the first page that
+      *          has errors for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $err1         begsr
+      *
+     C                   if        error = 1
+     C                   eval      hdpag1 = hdrrn1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *---------------------------------------------------------------
+      * $exit - seton last record and end job
+      *---------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        LR
+     C                   endsr
+      *
+      *---------------------------------------------------------------
+      * $wrmsg - write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------
+      * $clmsg - clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * *inzsr - initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    c1fscd
+     C                   kfld                    hdbncd
+      *
+      * Parm Lists
+      *
+     C     *entry        plist
+     C                   parm                    c1fscd
+     C                   parm                    c1fsnm
+     C                   parm                    rtncd
+      *
+      *
+      *
+      * To determine the 'mode', check to see if any records already
+      * exist for farm
+      *
+     C     c1fscd        chain(n)  hsl036b                            92
+     C                   if        *in92 = *off                                 If found
+     C                   eval      c1mode = revise
+     C                   eval      mode = revise
+     C                   else
+     C                   eval      c1mode = create
+     C                   eval      mode = create
+     C                   endif                                                  If found
+      *
+      * To support F5-Refresh, logic requires the number of lines on
+      * the subfile page and also the number of lines less 1.  By
+      * setting these values up as constant work fields, the processing
+      * logic can be standardized between programs.
+      *
+     C                   eval      wkplin = 13                                  sflpag
+     C                   eval      wkrlin = wkplin - 1
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+     C                   endsr
+      /EJECT

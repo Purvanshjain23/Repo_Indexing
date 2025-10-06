@@ -1,0 +1,719 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP698
+      * TITLE:       CLOSED GROUP RATION REPORT
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     09/18/95
+      *
+      *  FUNCTION:   THIS PROGRAM PRINTS COLUMNS OF RATION USAGE FOR
+      *              CLOSED GROUPS.  IT PRINTS THE DATA FROM
+      *              THE WORKFILES THAT ARE CREATED IN HP398:
+      *
+      *                    HSP307 - WORKFILE OF GROUP RATIONS
+      *                    HSP308 - WORKFILE OF COLUMNS
+      *
+      *              THE REPORT WILL PRINT A DETAIL LINE FOR
+      *              EACH CLOSED GROUP. THE REPORT COLUMNS SHOW RATION
+      *              DATA PER RATION WITH THE 'RATION' CODE APPEARING
+      *              AS THE COLUMN HEADING. THE REPORT IS LIMITED TO
+      *              16 UNIQUE RATIONS. IF MORE THAN 16 RATIONS ARE
+      *              CONSUMED IN THE PRODUCTION PHASE/TYPE, THEN THE
+      *              LAST COLUMN WITH BE 'OTHER' AND INCLUDE SUMMARIZED
+      *              DATA FOR ALL RATIONS EXCEEDING 16.
+      *
+      *              WORK PROGRAM HP398 RETRIEVES ALL RATIONS EATEN BY
+      *              A GROUP AND DETERMINES WHICH 16 RATIONS WILL
+      *              BE USED FOR UNIQUE COLUMN HEADINGS FOR THE
+      *              PRODUCTION PHASE/TYPE.  IF SOME RATIONS MUST BE
+      *              LUMPED INTO THE 'OTHER' CATEGORY, THE RATIONS WITH
+      *              THE LEAST TOTAL POUNDS OF FEED CONSUMED FOR THE
+      *              PRODUCTION PHASE/TYPE WILL BE LUMPED TOGETHER.
+      *
+      *              THE DATA IS SORTED/KEYED IN BY PRODUCTION PHASE,
+      *              PRODUCTION TYPE, FARM, GROUP. TOTALS ARE PRINTED
+      *              FOR EACH FARM. PAGE BREAKS ARE ON PHASE/TYPE.
+      *
+      *              REPORT SELECTIONS ARE PASSED IN THE LDA.
+      *              THIS PROGRAM IS SUBMITTED WITH QCMDEXC FROM HP498
+      *              USING CLP HP498CL.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 09/27/01  LeAnne Fedor
+      *           'Group type' added as a new report option.
+      *
+      * 05/31/07  LeAnne Ramsey
+      *           Some users are having printing problems. So, we are switching
+      *           from QPRINT to PRINT198 for the printer file and replacing
+      *           John Erikson's customized printer override command in the CL with
+      *           the standard override.
+      *
+      * 10/16/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSP010    IF   E           K DISK
+      *    PRODUCTION TYPE
+      *
+     FHSP011    IF   E           K DISK
+      *    PRODUCTION PHASE
+      *
+     FHSP018    IF   E           K DISK
+      *    FARM SITE
+      *
+     FHSP307    IF   E           K DISK
+      *    WORKFILE OF GROUP RATIONS
+      *
+     FHSP308    IF   E           K DISK
+      *    WORKFILE OF COLUMNS
+      *
+      *
+     FHSP387    IF   E           K DISK
+      *    WORKFILE FOR GROUPS
+      *    (KEYED IN OPNQRY)
+      *
+     FHSP388    IF   E           K DISK
+      *    WORKFILE OF FARM TOTALS
+      *
+     Fprint198  O    F  198        PRINTER OFLIND(*INOF)
+      *
+      /EJECT
+      ****************************************************************
+      * TABLE AND ARRAY SPECIFICATIONS
+      ****************************************************************
+      *
+      * COLUMN HEADINGS
+      *
+     D COL             S              5    DIM(17)                              COL HEADING
+      *
+      * FEED POUNDS PER HEAD MOVED FOR THE DETAIL LINE
+      *
+     D GRP             S              5  2 DIM(17)                              GROUP RATIONS
+      *
+      * TOTAL POUNDS OF RATION PER COLUMN FOR FARM TOTALS
+      *
+     D LBS             S             15  0 DIM(17)                              TOTAL POUNDS
+      *
+      * HEAD MOVED PER RATION FOR FARM TOTAL CALCULATIONS
+      *
+     D HD              S             15  0 DIM(17)                              TOTAL HEAD
+      *
+      * POUNDS PER HEAD MOVED FOR FARM TOTAL LINE
+      *
+     D FRM             S              5  2 DIM(17)                              FARM LBS/HEAD
+      *
+      /EJECT
+      ****************************************************************
+      * INPUT SPECS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *---------------------------------------------------------------
+      *  LDA -  WITH THE REQUESTED PRINT SELECTIONS
+      *---------------------------------------------------------------
+      *
+     D                UDS
+     D  LDFSBO                 1      5
+     D  LDFYMD                 6     13  0
+     D  LDTYMD                14     21  0
+     D  LDPTCD                22     26
+     D  LDPPCD                27     31
+     D  LDFSCD                32     36  0
+     D  LDGTCD                47     47
+     D  LDCELL                50     51  0
+      *
+     D  LDFMDY                60     65  0
+     D  LDTMDY                66     71  0
+      *
+     D  LDBODS                82    111
+     D  LDPTDS               112    121
+     D  LDPPDS               122    151
+     D  LDFSNM               152    176
+     D  LDGTDS               177    190
+      *
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+     D ALL             C                   CONST('ALL')
+     D OTHER           C                   CONST('OTHER')
+      /EJECT
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+      *
+      * READ EACH HOG GROUP RECORD SELECTED BY THE OPEN QUERY.
+      *
+     C     *IN90         DOUEQ     *ON                                          MAIN DO
+     C                   READ      HSP387                                 90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+      *
+      * IF THIS IS THE FIRST TIME THROUGH,
+      *     SAVE CONTROL FIELDS
+      *     LOAD TABLE OF RATION COLUMN HEADINGS
+      *     RETRIEVE PHASE, TYPE AND FARM DESCRIPTIONS
+      *     PRINT HEADINGS
+      *
+     C     FIRST         IFEQ      YES
+     C                   MOVEL     NO            FIRST
+     C                   MOVEL     WGPPCD        SVPPCD
+     C                   MOVEL     WGPTCD        SVPTCD
+     C                   Z-ADD     WGFSCD        SVFSCD
+     C                   EXSR      $COLHD
+     C                   EXSR      $PPDS
+     C                   EXSR      $PTDS
+     C                   EXSR      $FARM
+     C                   EXSR      $OFLOW
+     C                   ENDIF
+      *
+      * IF THERE IS A CHANGE IN THE PRODUCTION PHASE/TYPE
+      *    PRINT FARM SITE TOTALS
+      *    SET UP THE RATION COLUMN HEADING TABLE
+      *    RETRIEVE NEW FARM/PHASE/TYPE DESCRIPTIONS
+      *    FORCE A BREAK TO A NEW PAGE AND PRINT HEADINGS
+      *    SAVE CONTROL FIELDS
+      *
+     C     WGPPCD        IFNE      SVPPCD                                       IF BREAK
+     C     WGPTCD        ORNE      SVPTCD
+     C                   EXSR      $FSTOT
+      *
+     C                   EXSR      $COLHD
+     C                   EXSR      $FARM
+     C                   EXSR      $PPDS
+     C                   EXSR      $PTDS
+     C                   EXSR      $OFLOW
+      *
+     C                   MOVEL     WGPPCD        SVPPCD
+     C                   MOVEL     WGPTCD        SVPTCD
+     C                   Z-ADD     WGFSCD        SVFSCD
+     C                   ENDIF                                                  IF BREAK
+      *
+      * IF THERE IS A CHANGE IN THE FARM SITE,
+      *    PRINT FARM SITE TOTAL
+      *    RETRIEVE AND PRINT NEW FARM SITE HEADING
+      *
+     C     WGFSCD        IFNE      SVFSCD                                       IF FS BREAK
+     C                   EXSR      $FSTOT
+     C                   Z-ADD     WGFSCD        SVFSCD
+     C                   EXSR      $FARM
+      *
+     C     *INOF         IFEQ      *ON
+     C                   EXSR      $OFLOW
+     C                   ELSE
+     C                   EXCEPT    HFHDR
+     C                   ENDIF
+     C                   ENDIF                                                  IF FS BREAK
+      *
+      *-----------------------------------------------------
+      * DETAIL PROCESSING
+      *-----------------------------------------------------
+      * READ EACH RATION RECORD FOR THE GROUP AND DETERMINE
+      * WHICH COLUMN TO PRINT IT IN. AFTER ALL RATIONS RECORDS
+      * FOR THE GROUP ARE PROCESSED, PRINT THE DETAIL LINE.
+      *
+      * CLEAR THE GROUP ARRAY WHICH IS USED AS THE PRINT
+      * FIELDS FOR THE DETAIL LINE.
+      *
+     C                   Z-ADD     0             GRP
+     C     WGHGSN        SETLL     HSP307
+      *
+     C     *IN91         DOUEQ     *ON                                          DO RATION
+     C     WGHGSN        READE     HSP307                                 91
+     C     *IN91         IFEQ      *OFF                                         IF RATIONS
+     C                   EXSR      $COLDT
+     C                   ENDIF                                                  IF RATIONS
+     C                   ENDDO                                                  DO RATION
+      *
+     C     *INOF         IFEQ      *ON
+     C                   EXSR      $OFLOW
+     C                   ENDIF
+     C                   EXCEPT    DTLINE
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  MAIN DO
+      *
+      *--------------------------------------------------------------
+      * EOF PROCESSING
+      *--------------------------------------------------------------
+      *  IF NO DETAIL RECORDS MATCHED THE SELECTION CRITERIA, THEN
+      *  PRINT THE STANDARD 'NO DATA...' ERROR MESSAGE
+      *
+     C     FIRST         IFEQ      YES
+     C                   EXCEPT    HRHDR
+     C                   EXCEPT    NODATA
+     C                   ELSE
+      * PRINT TOTALS
+     C                   EXSR      $FSTOT
+     C                   ENDIF
+      *
+     C                   SETON                                        LR
+      /EJECT
+      *----------------------------------------------------------------
+      * $COLDT - DETERMINE THE COLUMNS TO PRINT GROUP RATIONS DATA IN
+      *----------------------------------------------------------------
+      *
+     C     $COLDT        BEGSR
+      *
+      * DETERMINE WHICH COLUMN TO PRINT THIS RATION IN. CHECK FIRST
+      * USING THE SPECIFIC RATION AND, THEN, IF THAT COLUMN IS NOT
+      * FOUND, CHECK FOR THE CATCH-ALL COLUMN CALLED 'OTHER'.
+      *
+     C                   Z-ADD     1             X
+     C     WRRNCD        LOOKUP    COL(X)                                 92
+     C     *IN92         IFEQ      *ON                                          IF RAT FOUND
+     C                   ELSE
+      *
+     C                   Z-ADD     1             X
+     C     OTHER         LOOKUP    COL(X)                                 92
+     C                   ENDIF                                                  IF RAT FOUND
+      *
+      * IF YOU FOUND THE COLUMN AND THERE IS MOVED HEAD
+      *
+     C     *IN92         IFEQ      *ON                                          IF FOUND
+     C     WGMVHD        ANDNE     0
+      *
+      * ACCUMULATE THE HEAD MOVED AND THE POUNDS FOR LATER
+      * CALCULATION OF THE FARM TOTAL LINE
+      *
+     C                   ADD       WRFDLB        LBS(X)
+     C                   ADD       WGMVHD        HD(X)
+      *
+      * CALCULATE THE POUNDS EATEN PER HEAD MOVED FOR THE
+      * DETAIL LINE AND STORE IN THE GROUP ARRAY.
+      *
+     C     WRFDLB        DIV(H)    WGMVHD        GRP(X)
+     C                   ENDIF                                                  IF FOUND
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $FSTOT - PRINT FARM SITE TOTAL LINE
+      *----------------------------------------------------------------
+      *
+     C     $FSTOT        BEGSR
+      *
+      * RETRIEVE FARM TOTAL RECORD FROM WORKFILE TO GET THE
+      * STANDARD FARM TOTAL FIELDS TO PRINT AND ALOS
+      * CALCULATE THE RATION TOTALS FOR THE 17 COLUMNS.
+      *
+     C     KEY01         CHAIN     HSP388                             92
+     C     *IN92         IFEQ      *OFF                                          IF FOUND
+      *
+     C                   Z-ADD     0             X
+      *
+     C                   DO        17            X
+     C     HD(X)         IFNE      0
+     C     LBS(X)        DIV(H)    HD(X)         FRM(X)
+     C                   ENDIF
+     C                   ENDDO
+      *
+      * PRINT FARM TOTAL LINE
+      *
+     C     *INOF         IFEQ      *ON
+     C                   EXSR      $OFLOW
+     C                   ENDIF
+     C                   EXCEPT    TFTOT
+     C                   ENDIF                                                    IF FOUND
+      *
+      *  CLEAR THE FARM ARRAYS
+      *
+     C                   Z-ADD     0             LBS
+     C                   Z-ADD     0             FRM
+     C                   Z-ADD     0             HD
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $OFLOW - OVERFLOW
+      *----------------------------------------------------------------
+      *
+     C     $OFLOW        BEGSR
+      *
+     C                   EXCEPT    HRHDR
+     C                   EXCEPT    HPHDR
+     C                   EXCEPT    HFHDR
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $COLHD - LOAD THE TABLE WITH THE RATION COLUMN HEADINGS
+      *----------------------------------------------------------------
+      *
+      * THIS SUBROUTINE IS PERFORMED FOR EACH UNIQUE PRODUCTION PHASE/
+      * TYPE. (THE REPORT PAGE BREAKS ON PHASE/TYPE.)
+      *
+      * ALWAYS FORCE THE 'OTHER' COLUMN TO BE THE LAST COLUMN.
+      *
+     C     $COLHD        BEGSR
+      *
+      * CLEAR COLUMN HEADING ARRAY
+      *
+     C                   MOVE      *BLANK        COL
+      *
+      *  PROCESS EACH WORFILE RECORD OF PHASE/TYPE/RATION
+      *
+     C     K1L308        SETLL     HSP308
+     C                   Z-ADD     0             X
+      *
+     C     *IN93         DOUEQ     *ON                                          DO COLUMNS
+     C     K1L308        READE     HSP308                                 93
+     C     *IN93         IFEQ      *OFF                                         IF NOT EOF
+     C     WCRNCD        ANDNE     'OTHER'
+     C                   ADD       1             X
+     C                   MOVEL     WCRNCD        COL(X)
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO COLUMNS
+      *
+      * NOW, DETERMINE IF THERE WAS AN 'OTHER' CATEGORY FOR
+      * THIS PRODUCTION PHASE/TYPE AND MAKE IT THE LAST TABLE
+      * ENTRY.
+      *
+     C     K2L308        CHAIN     HSP308                             92
+     C     *IN92         IFEQ      *OFF
+     C                   ADD       1             X
+     C                   MOVEL     OTHER         COL(X)
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $PPDS - RETRIEVE PRODUCTION PHASE DESCRIPTION
+      *----------------------------------------------------------------
+      *
+     C     $PPDS         BEGSR
+      *
+     C                   MOVE      *BLANK        HPPPDS
+     C     WGPPCD        CHAIN     HSP011                             92
+     C     *IN92         IFEQ      *OFF                                         IF FOUND
+     C                   MOVEL(P)  PPPPDS        HPPPDS
+     C                   ELSE
+     C                   MOVEL(P)  'UNKNOWN'     HPPPDS
+     C                   ENDIF                                                  IF FOUND
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $PTDS - RETRIEVE PRODUCTION TYPE DESCRIPTION
+      *----------------------------------------------------------------
+      *
+     C     $PTDS         BEGSR
+      *
+     C                   MOVE      *BLANK        HPPTDS
+     C     WGPTCD        CHAIN     HSP010                             92
+     C     *IN92         IFEQ      *OFF                                         IF FOUND
+     C                   MOVEL(P)  PTPTDS        HPPTDS
+     C                   ELSE
+     C                   MOVEL(P)  'UNKNOWN'     HPPTDS
+     C                   ENDIF                                                  IF FOUND
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $FARM - RETRIEVE FARM SITE NAME
+      *----------------------------------------------------------------
+      *
+     C     $FARM         BEGSR
+      *
+     C                   MOVE      *BLANK        HFFSNM
+     C     WGFSCD        CHAIN     HSP018                             92
+     C     *IN92         IFEQ      *ON
+     C                   MOVEL     'UNKNOWN'     HFFSNM
+     C                   ELSE
+     C                   MOVEL     FSFSNM        HFFSNM
+     C                   ENDIF
+      *
+      * IF ALL BUSINESS OFFICES WERE SELECTED, MOVE THE FARM'S
+      * B/O TO THE PRINT FIELD IN THE FARM HEADING.
+      *
+     C     LDFSBO        IFEQ      'ALL  '
+     C                   MOVEL     WGFSBO        HFFSBO
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * *INZSR - INITIALIZATION SUBROUTINE
+      *----------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      *
+      *
+     C     key01         klist
+     C                   kfld                    svppcd
+     C                   kfld                    svfscd
+      *
+      *
+     C     K1L308        KLIST
+     C                   KFLD                    WGPPCD
+     C                   KFLD                    WGPTCD
+      *
+     C     K2L308        KLIST
+     C                   KFLD                    WGPPCD
+     C                   KFLD                    WGPTCD
+     C                   KFLD                    WKRNCD
+      *
+     C     *LIKE         DEFINE    WCRNCD        WKRNCD
+     C                   MOVEL     OTHER         WKRNCD
+      *
+      * DEFINE SAVE FIELDS
+      *
+     C     *LIKE         DEFINE    WGPPCD        SVPPCD
+     C     *LIKE         DEFINE    WGPTCD        SVPTCD
+     C     *LIKE         DEFINE    WGFSCD        SVFSCD
+      *
+      * PRINT FIELDS FOR PRODUCTION PHASE/TYPE HEADING
+      *
+     C                   MOVE      *BLANK        HPPPDS           11
+     C                   MOVE      *BLANK        HPPTDS           10
+      *
+      * PRINT FIELDS FOR FARM SITE HEADING
+      *
+     C     *LIKE         DEFINE    FSFSNM        HFFSNM
+     C     *LIKE         DEFINE    FSFSBO        HFFSBO
+      *
+      * ARRAY INDEX
+     C                   Z-ADD     0             X                 3 0
+      *
+      * SETUP THE USER SELECTIONS IN THE REPORT HEADINGS.
+      *
+     C     LDFSBO        IFEQ      *BLANK
+     C                   MOVEL     'ALL'         LDFSBO
+     C                   ENDIF
+      *
+     C     LDPPCD        IFEQ      *BLANK
+     C                   MOVEL     'ALL'         LDPPCD
+     C                   ENDIF
+      *
+     C     LDPTCD        IFEQ      *BLANK
+     C                   MOVEL     'ALL'         LDPTCD
+     C                   ENDIF
+      *
+     C     LDCELL        IFEQ      0
+     C                   SETON                                        88
+     C                   ENDIF
+      *
+     C     LDFSCD        IFEQ      0
+     C                   SETON                                        89
+     C                   ENDIF
+      *
+      * Group type
+      *
+     C                   if        ldgtcd = *blank
+     C                   seton                                        82
+     C                   endif
+      *
+      * RETRIEVE TIME FOR REPORT HEADING
+      * SET UP A FIRST TIME FLAG
+      * SET UP A DASHED LINE FOR UNDERLINING THE HEADING
+      *
+     C                   TIME                    RTIME             6 0
+     C                   MOVEL     YES           FIRST             1
+     C                   MOVEL     *ALL'-'       DASH            198
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------
+      * REPORT HEADING LINES
+      *-------------------------------------------------------------
+      *
+     Oprint198  E            HRHDR          1 01
+     O                       SDPGM               10
+     O                                          112 'HOG PRODUCTION SYSTEM'
+     O                                          189 'DATE'
+     O                       UDATE         Y    198
+      *
+     O          E            HRHDR          1
+     O                       SDUSR               10
+     O                                          108 'CLOSED GROUP RATION'
+     O                                          115 'REPORT'
+     O                                          189 'TIME'
+     O                       RTIME              198 '  :  :  '
+      *
+     O          E            HRHDR          1
+     O                                          189 'PAGE'
+     O                       PAGE          Z    198
+      *
+     O          E            HRHDR          1
+     O                                           16 'BUSINESS OFFICE '
+     O                                           22 '.....'
+     O                       LDFSBO              29
+     O                       LDBODS            +  4
+      *
+     O          E            HRHDR          1
+     O                                           13 'FROM CLOSED D'
+     O                                           22 'ATE .....'
+     O                       LDFMDY        Y     32
+      *
+     O          E            HRHDR          1
+     O                                           13 'TO CLOSED DAT'
+     O                                           22 'E .......'
+     O                       LDTMDY        Y     32
+      *
+      *
+     O          E            HRHDR          1
+     O                                           22 'PRODUCTION TYPE ......'
+     O                       LDPTCD              29
+     O                       LDPTDS              43
+      *
+     O          E            HRHDR          1
+     O                                           22 'PRODUCTION PHASE .....'
+     O                       LDPPCD              29
+     O                       LDPPDS              63
+      *
+      *
+     O          e            hrhdr          1
+     O                                           22 'GROUP TYPE ...........'
+     O              n82      ldgtcd              25
+     O               82                          27 'ALL'
+     O                       ldgtds              47
+      *
+      *
+     O          E            HRHDR          1
+     O                                           22 'CELL .................'
+     O              N88      LDCELL        K     27
+     O               88                          27 'ALL'
+      *
+     O          E            HRHDR          2
+     O                                           22 'FARM SITE ............'
+     O              N89      LDFSCD        M     30
+     O              N89      LDFSNM              58
+     O               89                          27 'ALL'
+      *
+     O          E            HRHDR          1
+     O                                           21 'AVG'
+     O                                           35 '-- COST/LB--'
+     O                                           60 '*** POUNDS OF FEED PER'
+     O                                           75 ' HEAD MOVED PER'
+     O                                           86 ' RATION ***'
+      *
+     O          E            HRHDR          1
+     O                                           14 'FEED'
+     O                                           21 'DAILY'
+     O                                           35 '--OF GAIN --'
+      *
+     O          E            HRHDR          1
+     O                                            5 'GROUP'
+     O                                           14 'CONVS'
+     O                                           21 'GAIN'
+     O                                           28 'PHASE'
+     O                                           35 'FEED'
+     O                                           44 'TOTAL'
+     O                       COL(1)              53
+     O                       COL(2)              62
+     O                       COL(3)              71
+     O                       COL(4)              80
+     O                       COL(5)              89
+     O                       COL(6)              98
+     O                       COL(7)             107
+     O                       COL(8)             116
+     O                       COL(9)             126
+     O                       COL(10)            134
+     O                       COL(11)            143
+     O                       COL(12)            152
+     O                       COL(13)            161
+     O                       COL(14)            170
+     O                       COL(15)            179
+     O                       COL(16)            188
+     O                       COL(17)            197
+      *
+     O          E            HRHDR          2
+     O                       DASH               198
+      *
+      *-------------------------------------------------------------
+      * PRODUCTION PHASE/TYPE HEADINGS
+      *-------------------------------------------------------------
+      *
+     O          E            HPHDR          1
+     O                       HPPPDS              11
+     O                       HPPTDS              23
+      *
+      *-------------------------------------------------------------
+      * FARM SITE HEADING
+      *-------------------------------------------------------------
+      *
+     O          E            HFHDR       1  1
+     O                       HFFSNM              31
+     O                       HFFSBO              37
+      *
+      *-------------------------------------------------------------
+      * DETAIL LINE
+      *-------------------------------------------------------------
+      *
+     O          E            DTLINE         1
+     O                       WGHGCD         B     7
+     O                       WGFDCV        KB    15
+     O                       WGAGLB        KB    22
+     O                       WGP$GN        KB    29
+     O                       WGF$GN        KB    36
+     O                       WGAFLB        KB    45
+      *
+     O                       GRP(1)        K     54
+     O                       GRP(2)        K     63
+     O                       GRP(3)        K     72
+     O                       GRP(4)        K     81
+     O                       GRP(5)        K     90
+     O                       GRP(6)        K     99
+     O                       GRP(7)        K    108
+     O                       GRP(8)        K    117
+     O                       GRP(9)        K    127
+     O                       GRP(10)       K    135
+     O                       GRP(11)       K    144
+     O                       GRP(12)       K    153
+     O                       GRP(13)       K    162
+     O                       GRP(14)       K    171
+     O                       GRP(15)       K    180
+     O                       GRP(16)       K    189
+     O                       GRP(17)       K    198
+      *
+      *-------------------------------------------------------------
+      * FARM SITE TOTAL LINE
+      *-------------------------------------------------------------
+      *
+     O          E            TFTOT       1  1
+     O                       SVFSCD        MB     6
+     O                                            7 '*'
+     O                       WFFDCV        KB    15
+     O                       WFAGLB        KB    22
+     O                       WFP$GN        KB    29
+     O                       WFF$GN        KB    36
+     O                       WFAFLB        KB    45
+      *
+     O                       FRM(1)        K     54
+     O                       FRM(2)        K     63
+     O                       FRM(3)        K     72
+     O                       FRM(4)        K     81
+     O                       FRM(5)        K     90
+     O                       FRM(6)        K     99
+     O                       FRM(7)        K    108
+     O                       FRM(8)        K    117
+     O                       FRM(9)        K    127
+     O                       FRM(10)       K    135
+     O                       FRM(11)       K    144
+     O                       FRM(12)       K    153
+     O                       FRM(13)       K    162
+     O                       FRM(14)       K    171
+     O                       FRM(15)       K    180
+     O                       FRM(16)       K    189
+     O                       FRM(17)       K    198
+      *
+      *-------------------------------------------------------------
+      * NO DATA MESSAGE LINE
+      *-------------------------------------------------------------
+     O          E            NODATA         1
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'

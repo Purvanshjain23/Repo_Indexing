@@ -1,0 +1,473 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF360 - Revenue: Workfile: Build Listing of Adjustments from ARS
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     05/22/08
+      *
+      * Function:    This program builds the workfile for the listing.
+      *
+      *
+      * INVOICE NOTES---Part #2 is Obsolete as of January 2014
+      * In January 2014, the users began using all 7 positions of the Invoice Number...
+      * this made #2 of the "tweaking" logic below obsolete. We have replaced this Rose
+      * Centonze's new logic.
+      *
+      *    We do 2 "tweaking" things with Invoice Numbers to make this work correctly:
+      *
+      *    1) When an Invoice Number is less than 100,000, we retrieve the
+      *       associated AR Header record instead of the associated Sales History
+      *       record to get a "Date".
+      *
+      *       We use 100,000 because we assume that records with Invoice Numbers
+      *       under 100,000 have no corresponding Sales History record. The reason
+      *       for this is that the smaller Invoice Numbers are assigned by the
+      *       AR System for Adjustment Type transactions that don't have a real
+      *       invoice tied to them. If we don't do this, when we chain back to the
+      *       Sales History file, we are finding a hit on invoices for 1997. These
+      *       invoices in Sales History have nothing to do with the transaction we
+      *       are working with today.
+      *
+      *    2) OBSOLETE Drop the last character on Invoice Numbers greater than 1,000,000
+      *       In OMS they sometimes want to reference the same invoice on multiple
+      *       transactions and they get a duplicate key error. So, they add
+      *       a zero to the end of the invoice to get it into the system.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/01/09  LeAnne Ramsey
+      *           Make checks for the user's new selection on the ITC-DTFs (DueTo/DueFrom)
+      *           accounts.
+      *
+      * 03/04/10  LeAnne Ramsey
+      *           Barb G. added a new parm XXPEC (the posting edit code associated with the
+      *           account number) to ARACTRET.
+      *
+      * 01/28/14  LeAnne Ramsey (E2991)
+      *           Since the users have started using all 7 digits of the Invoice Number,
+      *           our "tweaking" logic no longer works. I replaced it with new logic that
+      *           Rose Centonze gave me.
+      *
+      * 09/18/16  Danny Nguyen (E6933)
+      *           Conversion process was created to build the new A/R Header Ext file. Within
+      *           the conversion process, fields 'Orig Inv Actual Ship Date' (new) &
+      *           'AR Ord Ref Actual Ship Dt' (old) will be populated based on the new & old
+      *           logic to get the true Actual Shipped Date (ASD).
+      *           We will populate the true ASD in TFP026 file based on the following:
+      *             If 'AR Ord Ref Actual Ship Dt' exist then use it to populate the ASD in
+      *             the AR Adjustments (TFP026) file.
+      *             Otherwise use 'Orig Inv Actual Ship Date' to populate the ASD in TFP026.
+      *           Commented out existing logic (old) to get Actual Ship Date within subroutine
+      *           $getdt.
+      *
+      * 05/30/17  Danny Nguyen (T9996)
+      *           Added field to TFP360 - AR Adjustments Workfile:
+      *             W1INSF - Invoice Suffix
+      *           Populate W1INSF field from AR Detail file.
+      *
+      * 01/15/18  Rose Centonze (S12308 AR CD Recon investigaion)
+      *           Also Include/Exclude account code OFFARSTF when doing it for 02506611 or 02502562
+      * 1/30/18   exclude OFFARSTF from both selections. dont want them on the Only either
+      *           Also Include/Exclude account code OFFAR440.
+      *
+      * 01/21/21  ISE           TSN593
+      *           Replaced *loval with *start
+      *
+      * 07/29/21  Rose Centonze (SDN440 E1 LIVE)
+      *           also  exclude the new E1 GL ACCT Id 02693654 for OFFARSTF
+      *                                               02694451 for OFFAR440
+      /eject
+      ***********************************************************************************
+      * FILE SPECIFICATIONS
+      ***********************************************************************************
+      *
+     Farbdcpma  if   e           k disk
+      *  AR header
+      *
+      *
+E6933FPBC0CPL1  if   e           k disk
+  |   *   AR Header Ext
+  |   *
+E6933 *
+     Farbecpl1  if   e           k disk
+      *  AR Detail (records selected/keyed with open query)
+      *
+      *
+     Fcabbrel1  if   e           k disk
+      *  Customer
+      *
+      *
+     Fomhstpn0  if   e           k disk
+      *  Sales history
+      *
+      *
+     Ftfp007    if   e           k disk
+      *  Exempt codes
+      *
+      *
+     Ftfp360    o    e           k disk
+      *  Workfile: Adjustments from the A/R System
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     d return          s              7
+      *
+      *
+      * Control fields
+      *
+     D svexcd          s                   like(exexcd)
+     D procfl          s              1
+      *
+      *
+      * Workfields for Date Manipulation
+      *
+     D wkisodate       s               d   datfmt(*iso)
+     D wksyndt         s              7  0
+      *
+      *
+      * Workfields
+      *
+     d wkinno          s                   like(bfconb)
+     D wkrcexfl        s                   like(w1rcexfl)
+      *
+      *
+      * Parms
+      *
+     d xxcc            s             12
+     d xxobj           s              6
+     d xxsub           s              8
+     d xxaid           s              8
+     d xxdesc          s             30
+     d xxco            s              3  0
+     d xxpec           s              1
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Local data area
+      *---------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldfdt                  1      8  0
+     D  ldtdt                  9     16  0
+      *
+     D  ldfmdy                17     22  0
+     D  ldtmdy                23     28  0
+      *
+     D  ldfsyndt              29     35  0
+     D  ldtsyndt              36     42  0
+      *
+     D  ldiecd                43     43
+     D  ldieds                44     69
+      *
+     D  ldcono                70     72  0
+      *
+     D  ldajty                73     75
+     D  ldajact               76     76
+     D  ldajactds             77    106
+      *
+     D  lddtffl              144    144
+     D  lddtfds              145    151
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *************************************************************************************
+      * Mainline
+      *************************************************************************************
+      *
+      * Process all AR Adjustments selected by the Open Query and build the workfile.
+      *
+      * Process each AR Detail record selected by the Open Query. Only "adjustment"
+      * records are selected. Extraction rules:
+      *   1) records with a Payment/Deposit Date in the selected date range
+      *   2) cash/adjustment value of "ADJ"
+      *   3) AR Processing Status = (P)osted
+      *   3) exclude records for AR account "00443012" (360.1410)
+      *   4) exclude records for AR account "02495224" (960.1410)
+      *
+593  C*    *loval        setll     arbecpl1
+593  C     *start        setll     arbecpl1
+      *
+     C                   dou       *in90 = *on                                  Main do loop
+     C                   read      arbecpl1                               90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * To determine whether you want to process this record, you must
+      * make the check on the user's ITC DueTo/DueFrom selection.
+      *
+     C                   exsr      $dtf
+      *
+     C                   if        procfl = yes                                 If process
+      *
+      * When Exempt Code changes, retrieve its associated Exempt Flag.
+      *
+     C                   if        bfw3sx <> svexcd                             If different
+     C                   move      bfw3sx        svexcd
+     C     svexcd        chain     tfp007                             92
+     C                   if        *in92 = *off
+     C                   move      exrcexfl      wkrcexfl
+     C                   else
+     C                   move      no            wkrcexfl
+     C                   endif
+     C                   endif                                                  If different
+      *
+      * Continue based on the user's Exempt/Non-Exempt/Both Report Selection
+      *
+     C                   if        ldiecd = 'B' or                              If continue
+     C                             (ldiecd = 'E' and wkrcexfl = yes) or
+     C                             (ldiecd = 'N' and wkrcexfl = no)
+      *
+     C                   clear                   w1rec
+      *
+      * Retrieve a Transaction or Actual Ship Date
+      *
+     C                   exsr      $rtvdate
+      *
+      * Write a record to the Workfile
+      *
+     C                   exsr      $wrt360
+      *
+     C                   endif                                                  If continue
+     C                   endif                                                  If process
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do loop
+      *
+      * EOF processing
+     C                   seton                                        lr
+      /eject
+      *-----------------------------------------------------------------------
+      * Determine if this record meets the user's ITC DueTo/DueFrom selection
+      *-----------------------------------------------------------------------
+      *
+      * The DueTo/DueFrom Accounts that we are checking for here are:
+      *  362.3830.101 (ID: 02506611)
+      *  960.1830.101 (ID: 02502562)
+      *  362.3830.105 (ID: OFFARSTF)  S12308  NOW E1: 02693654
+      *  440.1830.105 (ID: OFFAR440)  S12308  NOW E1: 02693727
+      *
+     C     $dtf          begsr
+      *
+     C                   move      no            procfl
+      *
+     C                   select
+     C                   when      lddtffl = 'I'
+     C                   move      yes           procfl
+      *
+     C                   when      lddtffl = 'O' and bfuhcd = 'ITC' and
+12308C                             (bfiztx = '02506611' or
+  |  C                              bfiztx = '02502562' or
+  |  C                              bfiztx = 'OFFARSTF' or
+12308C                              bfiztx = 'OFFAR440' or                      excl 1830
+  |  C                              bfiztx = '02693654' or                      m3  OFFARSTF
+12308C                              bfiztx = '02693727')                        m3  OFFAR440
+     C                   move      yes           procfl
+      *
+     C                   when      lddtffl = 'E' and bfuhcd = 'ITC' and
+12308C                             (bfiztx = '02506611' or
+  |  C                              bfiztx = '02502562' or
+  |  C                              bfiztx = 'OFFARSTF' or
+12308C                              bfiztx = 'OFFAR440' or                      excl 1830
+  |  C                              bfiztx = '02693654' or                      m3  OFFARSTF
+12308C                              bfiztx = '02693727')                        m3  OFFAR440
+     C                   other
+      *
+     C                   move      yes           procfl
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve a Transaction/Actual Ship Date
+      *---------------------------------------------------------------
+      *
+     C     $rtvdate      begsr
+      *
+      * Initialize work date field.
+      *
+     C                   z-add     0             wksyndt
+      *
+      * Retrieve either:
+      *  1) AR Header record to get a Transaction Date or
+      *  2) Sales History record to get an Actual Ship Date
+      * Use Rose's new Original Invoice field (BFQIDT) if it is valued;
+      * otherwise, use the old Invoice Number for retrievals.
+      *
+     C                   select
+      * Use Rose new fld
+     C                   when      bfqidt <> 0
+     C                   z-add     bfqidt        wkinno
+     C     wkinno        chain     omhstpn0                           92
+     C                   if        *in92 = *off
+E6933 ** Commented out existing logic for Actual Ship Date.
+E6933C**                 z-add     f4gndt        wksyndt
+     C                   z-add     f4anc7        w1arcuno
+     C                   endif
+     C                   other
+      * Use old field
+     C                   z-add     bfconb        wkinno
+      *
+     C                   if        bfconb < 100000                              If < 100000
+     C     key01         chain     arbdcpma                           92
+     C                   if        *in92 = *off
+E6933 ** Commented out existing logic for Actual Ship Date.
+E6933C**                 z-add     bdb4dt        wksyndt
+     C                   z-add     bdanc7        w1arcuno
+     C                   endif
+     C                   else
+      *
+     C     wkinno        chain     omhstpn0                           92
+     C                   if        *in92 = *off
+E6933 ** Commented out existing logic for Actual Ship Date.
+E6933C**                 z-add     f4gndt        wksyndt
+     C                   z-add     f4anc7        w1arcuno
+     C                   endif
+     C                   endif                                                  If < 100000
+     C                   endsl
+E6933 *
+  |   ** Use 'Orig Inv Actual Ship Date' (new) or 'AR Ord Ref Actual Ship Dt' (old) to set ASD.
+  |   ** The 'AR Ord Ref Actual Ship Dt' will take prcedence if it exist.
+  |  C     key02         chain     PBC0CPL1                           92
+  |  C                   if        *in92 = *off
+  |  C                   if        C0V8DT <> 0
+  |  C                   z-add     C0V8DT        wksyndt                        Actual Ship Date
+  |  C                   else
+  |  C                   z-add     C0V7DT        wksyndt                        Actual Ship Date
+  |  C                   endif
+  |  C                   endif
+E6933 *
+      *
+      * Get Synon Date into CCYYMMDD and MMDDYY formats
+      *
+     C                   if        wksyndt <> 0
+     C     *cymd         test(d)                 wksyndt                92
+     C                   if        *in92 = *off                                 If OK date
+     C     *cymd         move      wksyndt       wkisodate
+     C     *iso          move      wkisodate     w1asdt
+     C                   endif                                                  If OK date
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a record to the workfile
+      *---------------------------------------------------------------
+      *
+     C     $wrt360       begsr
+      *
+      * Populate fields with data from the AR Detail record
+      *
+     C                   z-add     bfaic3        w1cono
+     C                   move      bfuhcd        w1ajty
+     C                   move      bfw3sx        w1excd
+     C                   move      wkrcexfl      w1rcexfl
+     C                   z-add     bfbsva        w1tram
+     C                   z-add     wkinno        w1inno
+T9996 ** Populate Invoice Suffix.
+T9996C                   move      bfcest        w1insf
+     C                   move      bfiztx        w1aid
+     C                   move      bfngna        w1explan
+      *
+      * Retrieve Customer Name
+      *
+     C     w1arcuno      chain     cabbrel1                           92
+     C                   if        *in92 = *off
+     C                   move      bbaytx        w1arcunm
+     C                   endif
+      *
+      * Retrieve GL Cost Center/Object/Subsidiary for this Account ID
+      *
+     C                   exsr      $rtvact
+      *
+      * Get Synon Deposit Date into CCYYMMDD format
+      *
+     C     *cymd         test(d)                 bfdvdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C     *cymd         move      bfdvdt        wkisodate
+     C     *iso          move      wkisodate     w1dpdt
+     C                   endif                                                  If OK date
+      *
+      * Get Synon "TFS Adj Week-Ending Date" into CCYYMMDD format
+      *
+     C     *cymd         test(d)                 bfqhdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C     *cymd         move      bfqhdt        wkisodate
+     C     *iso          move      wkisodate     w1tfsdt
+     C                   endif                                                  If OK date
+      *
+     C                   write     w1rec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve GL Cost Center/Object/Subsidiary for this Account ID
+      *---------------------------------------------------------------
+      *
+     C     $rtvact       begsr
+      *
+     c                   move      *blanks       xxcc
+     C                   call      'ARACTRET'
+     C                   parm      bfiztx        xxaid
+     C     w1cc          parm                    xxcc
+     C     w1obj         parm                    xxobj
+     C     w1sub         parm                    xxsub
+     C                   parm                    xxdesc
+     C                   parm                    xxco
+     C                   parm                    xxpec
+     C                   parm                    return
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    bfconb
+     C                   kfld                    bfcest
+      *
+E6933C     key02         klist
+  |  C                   kfld                    BFAIC3
+  |  C                   kfld                    BFCONB
+  |  C                   kfld                    BFCEST
+E6933 *
+     C                   endsr
+      /eject

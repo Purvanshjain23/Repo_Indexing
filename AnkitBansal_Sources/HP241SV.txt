@@ -1,0 +1,335 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HPS - JDE
+      * PROGRAM:     HP241
+      *
+      * PROGRAMMER:  Barb Gutierrez
+      * CREATED:     09/03/2003
+      *
+      * FUNCTION:    This program reads the account balances file in JDE and
+      *              creates expense records to be used in the cost detail
+      *              cube in cognos.
+      *
+      *              It is called from HPBLDCD$ where an open query is performed to
+      *              only get records from the jde acct balances file for the year
+      *              and period being processed, actual amounts, and expense accounts.
+      *              (accts > 5999 and <= 9999).
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      * 10/03/03  Barb Gutierrez
+      *           Added the process to delete any records for the period
+      *           being processed in the INZSR routine.
+      *
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Ff0902CC   IF   E           K DISK
+      *  JDE Acct Balances File Key:gbco,gbctry,gbfy,gblt,gbmcu,gbobj,gbsub
+      *
+     Ff0006     IF   E           K DISK
+      *  JDE Cost Center Master File (Key:  mcmcu)
+      *
+     Ff0901la   IF   E           K DISK
+      *  JDE Account Master File (Key:  gmaid)
+      *
+     Ff0008     IF   E           K DISK
+      *  JDE Date File (Key:  cddtpn, cddfyj, cdfq)
+      *
+     Fhppa039   IF   E           K DISK
+      *  Cost Category Master (Key:  ccexcd)
+      *
+     Fhpla100a  uf A E           K DISK
+      *    HPS JDE Expense File
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      *  Definition for external data area 'DALPER' which holds the last
+      *  period that was closed in HPS.
+      *---------------------------------------------------------------
+     D                 DS
+     D  DALPER                 1     24
+     D  DACC                   1      2  0
+     D  DAYY                   3      4  0
+     D  DAPER                  5      6  0
+     D  DABPDT                 7     14  0
+     D  DAEPDT                15     22  0
+     D  DAPPFL                24     24
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+      *---------------------------------------------------------------
+      *  WORK FIELDS
+      *---------------------------------------------------------------
+      *
+     D wkisodate       s               d   datfmt(*iso)
+     D wkepiso         s               d   datfmt(*iso)
+     D wkco            s              5    inz('00350')
+     D wkmdy           s              6  0
+     D wkamt           s                   like(gban01)
+     D wkobj           s                   like(ccexcd)
+     D svmcu           s                   like(gbmcu)
+     D svobj           s                   like(gbobj)
+     D svsub           s                   like(gbsub)
+     D first           s              1
+     D proc            s              1
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+      *
+      * Read the JDE account balances file for expense accounts only and
+      * actual amounts.
+      *
+     C                   dou       *in90 = *on
+     C                   read      i0902                                  90
+     C                   if        *in90 = *off                                 If read
+      *
+      * Do not want to process these accounts.  They are offset accounts.  This
+      * is temporary until we find a way to omit them in the account master (9/17/03)
+      *
+     C                   if        gbobj <> '9630' and gbobj <> '9642'          9630 / 9642
+      *
+      *  Save the cost center, object and sub first time.......
+     C*
+     C                   if        first = yes
+     C                   move      gbmcu         svmcu
+     C                   move      gbobj         svobj
+     C                   move      gbsub         svsub
+     C*
+     C* Determine if this is a posting costcenter or not and if the category code
+     C* is within range to process.
+     C*
+     C                   exsr      $mcu
+     C*
+     C                   move      no            first
+     C                   endif
+      *
+      * When the cost center or object changes or last record, write it.
+      *
+     C                   if        gbmcu <> svmcu                               mcu/obj changed?
+     C                              or gbobj <> svobj or *in90 = *on
+      *
+     C                   move      wkamt         jdamt
+      *
+     C                   if        proc = yes                                   want to process
+     C                   write     jdrec
+     C                   endif                                                  want to process
+      *
+     C                   move      gbmcu         svmcu
+     C                   move      gbobj         svobj
+     C                   move      gbsub         svsub
+     C                   z-add     0             wkamt
+      *
+     C                   endif                                                  mcu/object change?
+     C*
+     C* Determine if this is a posting costcenter or not and if the category code
+     C* is within range to process for the new record
+     C*
+     C                   exsr      $mcu
+      *
+      * If this is a cost center to be processed.....
+      *
+     C                   if        proc = yes                                   want to process
+      *
+      * excute the routine to retrieve the category/account codes and descriptions
+      *
+     C                   exsr      $codes
+      *
+      *  select which period we're processing by what's in the data area to determine
+      *  which value to move in.
+      *
+     C                   exsr      $selper
+      *
+     C                   endif                                                  want to process
+      *
+     C                   endif                                                  9630 / 9642
+     C                   endif                                                  If found
+     C                   enddo                                                  dou
+      *
+     C                   seton                                        LR
+      *
+      /EJECT
+      *----------------------------------------------------------------
+      * Setup the new category/account codes and descriptions
+      *----------------------------------------------------------------
+      *
+     C     $codes        begsr
+      *
+      * Retreive expense category code and description
+      *
+     C                   movel(p)  svobj         wkobj
+     C     wkobj         chain     hppa039                            92
+     C                   if        *in92 = *off                                 have record
+     C                   movel     ccexclcd      jdcacode                       expense class code
+     C                   movel(p)  ccexclds      jdcadesc                       expense class descr
+     C                   else                                                   no record found
+     C                   movel(p)  '99'          jdcacode                       expense class code
+     C                   movel(p)  'Unknown'     jdcadesc                       expense class descr
+     C                   endif                                                  have record
+      *
+      * Retreive jde account description
+      *
+     C     gbaid         chain     i0901                              94        Co/Cust
+     C                   if        *in94 = *off                                 If found
+     C                   move(p)   gmdl01        jdobjdesc
+     C                   else                                                   If found
+     C                   move      *blanks       jdobjdesc
+     C                   endif                                                  If found
+      *
+     C                   move      svobj         jdobjno
+     C                   move      svsub         jdsubno
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Process cost center
+      *----------------------------------------------------------------
+      *
+     C     $mcu          begsr
+      *
+      * Only process posting accounts and accounts with category code 10
+      * between 01 and 21...
+      *
+     C     svmcu         chain     i0006                              91
+     C                   if        *in91 = *off                                 If found
+     C                   if        mcpecc <> 'N' and mcrp10 >= '01 '            posting acct
+     C                                   and mcrp10 <= '21 '
+      *
+      *  setup static information
+      *
+     C                   move      '01 '         jdbucode
+     C                   moveL(p)  'Farm'        jdbudesc
+     C                   move      svmcu         jdcccode
+     C                   move      mcdl01        jdccdesc
+     C                   move      svmcu         wkfscd            3 0
+     C                   z-add     wkfscd        jdfscd
+      *
+     C                   move      yes           proc
+      *
+     C                   else                                                   non posting mcu
+     C                   move      no            proc
+     C                   endif                                                  posting acct
+      *
+     C                   else                                                   not found
+     C                   move      no            proc
+     C                   endif                                                  If found
+      *
+     C                   endsr
+      *
+      /EJECT
+      *----------------------------------------------------------------
+      * select period
+      *----------------------------------------------------------------
+      *
+     C     $selper       begsr
+      *
+      *  select which period we're processing by what's in the data area to determine
+      *  which value to move in.
+      *
+      * period 1
+     C                   select
+      *
+     C                   when      daper = 01
+     C                   add       gban01        wkamt
+      * period 2
+     C                   when      daper = 02
+     C                   add       gban02        wkamt
+      * period 3
+     C                   when      daper = 03
+     C                   add       gban03        wkamt
+      * period 4
+     C                   when      daper = 04
+     C                   add       gban04        wkamt
+      * period 5
+     C                   when      daper = 05
+     C                   add       gban05        wkamt
+      * period 6
+     C                   when      daper = 06
+     C                   add       gban06        wkamt
+      * period 7
+     C                   when      daper = 07
+     C                   add       gban07        wkamt
+      * period 8
+     C                   when      daper = 08
+     C                   add       gban08        wkamt
+      * period 9
+     C                   when      daper = 09
+     C                   add       gban09        wkamt
+      * period 10
+     C                   when      daper = 10
+     C                   add       gban10        wkamt
+      * period 11
+     C                   when      daper = 11
+     C                   add       gban11        wkamt
+      * period 12
+     C                   when      daper = 12
+     C                   add       gban12        wkamt
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Bring in the data area that contains the last Period posted
+      * in hps.
+      *
+     C     *dtaara       define                  dalper
+     C                   in        dalper
+      *
+     C     *ymd          move      daepdt        wkepiso
+      *
+      * Always delete any existing period records from the Datamart file.
+      *
+     C     wkepiso       setll     hpla100a
+     C                   dou       *in91 = *on                                  Do deletes
+     C     wkepiso       reade     hpla100a                               91
+     C                   if        *in91 = *off                                 If read
+     C                   delete    jdrec
+     C                   endif                                                  If read
+     C                   enddo                                                  Do deletes
+      *
+      * Retrieve JDE period end date
+      *
+     C                   call      'X09031'
+     C                   parm      '3'           #calc             1
+     C                   parm      wkco          #co               5
+     C     wkmdy         parm                    #dg               6 0
+     C     jdperiod      parm      daper         #pn               2 0
+     C                   parm      dayy          #fy               2 0
+     C                   parm      dacc          #ctry             2 0
+     C                   parm                    #edt              1
+     C                   parm                    #dgsy             1
+      *
+      * Setup Date from jde (mmddyy) to Data Mart *ISO (CCYY-MM-DD)
+      *
+     C     *mdy          move      wkmdy         wkisodate                      Invoice Date
+     C                   move      wkisodate     jdpedte                        Invoice Date
+      *
+     C                   move      dayy          jdyear
+     C                   movel     dacc          jdyear
+      *
+     C                   endsr

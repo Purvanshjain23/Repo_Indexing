@@ -1,0 +1,390 @@
+/***************************************************************** */
+/*                                                                 */
+/*  SYSTEM:          TRIUMPH FOODS                                 */
+/*  PROGRAM NUMBER:  TF405CL                                       */
+/*  PROGRAM NAME:    WORK WITH CASH DISTRIBUTION HEADER            */
+/*  PROGRAMMER:      LEANNE FEDOR                                  */
+/*  CREATE DATE:     10/25/04                                      */
+/*                                                                 */
+/*  SUBMITTED FUNCTIONS/LISTINGS FROM WORK WITH:                   */
+/*         PRINT CASH DISTRIBUTION BATCH REPORT                    */
+/*         POST A CASH DISTRIBUTION HEADER                         */
+/*         CASH DISTRIBUTION BALANCE REPORT                        */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFIED:                                                       */
+/*                                                                 */
+/* 05/21/07  LEANNE RAMSEY                                         */
+/*           ADDED A NEW DATA AREA (DATSTPRD) TO CONTROL E-MAILS.  */
+/*                                                                 */
+/* 11/27/07  LEANNE RAMSEY                                         */
+/*           TF204-CASH DISTRIBUTION REPORT WAS NO LONGER GETTING  */
+/*           EMAILED. CHANGED PRINT132 TO PRINT198 IN THE ESNDMAIL */
+/*           AND DUPSPLF COMMANDS.                                 */
+/*                                                                 */
+/* 05/11/09  LeAnne Ramsey                                         */
+/*           Make Print logic match Meat Costing.                  */
+/*                                                                 */
+/* 01/23/17  Brad Baden                                            */
+/*           Add parameter fields for M3 Go Live for companies     */
+/*           300, 360, 362, 368, and 960 to be used when calling   */
+/*           programs TFJDE270, TFJDE271, and TFJDE272.            */
+/*                                                                 */
+/* 03/22/17  Brad Baden  R9717/E9718                               */
+/*           Only process companies 360 and 960 on call to TF605   */
+/*           and TF204.                                            */
+/*                                                                 */
+/* 06/29/17  R CENTONZE               R10999                       */
+/*           EMAIL PWA3PFR TO DIST LIST                           */
+/*                                                                 */
+/* 04/28/21  R CENTONZE               SDN440 M3 -> WHEN LIVE WITH E1 -- */
+/*           1. added Creating Run Log Workfile E1B9CPP to qtemp,   */
+/*              and in tfjde271; call pgm to copy to  */
+/*              E1IFLIB  tables                                       */
+/* 07/29/21  2. CHANGE COMPANY 362 TO 320 EVERYPLACE.                  */
+/* 04/29/24 PIO REPLACE OPNQRYF WITH OPNSQLF FOR ARBDCPL1 FILE         */
+/*              ADDED NEEDED OVRDBF AROUND THE COMMAND                 */
+/*              CHANGE *AND TO AND, *EQ TO =, *GE TO >=, *LE TO <=     */
+/*              *GT TO > IN &QDATA                                     */
+/* 04/29/24 PIO REPLACE OPNQRYF WITH OPNSQLF FOR ARBECPL4 FILE         */
+/*              ADDED NEEDED OVRDBF AROUND THE COMMAND                 */
+/*              CHANGE *AND TO AND, *EQ TO =, *GE TO >=, *LE TO <=     */
+/*              *GT TO > IN &QDATA                                     */
+/*                                                                     */
+/*******************************************************************/
+
+             PGM
+
+             DCL        VAR(&EMAIL) TYPE(*CHAR) LEN(38)
+
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&HOLD) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&SAVE) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&COPY) TYPE(*DEC)  LEN(1)
+
+             DCL        VAR(&LDBTSN) TYPE(*DEC) LEN(7)
+             DCL        VAR(&LDTASK) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&TSTPRDFL) TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&M3LV320) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&M3LV960) TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&CO320) TYPE(*DEC) LEN(3 0)
+             DCL        VAR(&CO960) TYPE(*DEC) LEN(3 0)
+
+             DCL        VAR(&RETRN) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&DATAS) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&OMSSYSVAL) TYPE(*CHAR) LEN(40)
+
+             DCL        VAR(&QDATA) TYPE(*CHAR) LEN(40)
+
+  /* sdn440  */
+             DCL        VAR(&E1LV960) TYPE(*CHAR) LEN(1)     /* sdn440 */
+             DCL        VAR(&SOURCE) TYPE(*CHAR) LEN(25) VALUE('TFS')
+             DCL        VAR(&BCHDSC)  TYPE(*CHAR) LEN(25) +
+                          VALUE('G/L Journal Entry')
+             DCL        VAR(&RECIP)   TYPE(*CHAR) LEN(25)
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(40) VALUE('TFS +
+                          Journal Entries to JDE')
+             DCL        VAR(&USER) TYPE(*CHAR) LEN(10)
+  /* end sdn440  */
+
+             CHGVAR     VAR(&LDBTSN) VALUE(%SST(*LDA 1 7))
+             CHGVAR     VAR(&LDTASK) VALUE(%SST(*LDA 8 13))
+
+/*----------------------------------------------------------------*/
+/* FOR SENDING EMAILS:                                            */
+/* RETRIEVE DATA AREA THAT LETS US KNOW WHETHER WE ARE IN TEST    */
+/* OR PRODUCTION (ALWAYS DEFAULT TO THE "TEST" DISTRIBUTION LIST.)*/
+/*----------------------------------------------------------------*/
+
+             CHGVAR     VAR(&EMAIL) VALUE('TF Test')
+             RTVDTAARA  DTAARA(DATSTPRD (1 1)) RTNVAR(&TSTPRDFL)
+             RTVJOBA    USER(&USER)
+
+/*----------------------------------------------------------------*/
+/* SET PARAMETERS FROM LDA FOR LISTINGS                           */
+/*----------------------------------------------------------------*/
+
+ OUTQ:       CHGVAR     VAR(&OUTQ) VALUE(%SST(*LDA 401 10))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(*JOB))
+
+ HOLD:       CHGVAR     VAR(&HOLD) VALUE(%SST(*LDA 411 4))
+             IF         COND(&HOLD *NE '*YES' *AND &HOLD *NE '*NO ') +
+                          THEN(CHGVAR VAR(&HOLD) VALUE(*NO))
+
+ SAVE:       CHGVAR     VAR(&SAVE) VALUE(%SST(*LDA 415 4))
+             IF         COND(&SAVE *NE '*YES' *AND &SAVE *NE '*NO ') +
+                          THEN(CHGVAR VAR(&SAVE) VALUE(*NO))
+
+ COPY:       CHGVAR     VAR(&COPY) VALUE(%SST(*LDA 419 1))
+             IF         COND(&COPY = 0) THEN(CHGVAR VAR(&COPY) +
+                          VALUE(1))
+
+/***********************************************************************/
+/* Call OMS program POMTXFR for each of the companies to populate      */
+/* the M3 Live flags.                                                  */
+/***********************************************************************/
+
+             CHGVAR     VAR(&CO320) VALUE(320)
+             CHGVAR     VAR(&CO960) VALUE(960)
+
+             CHGVAR     VAR(&RETRN) VALUE('       ')
+             CALL       PGM(POMTXFR) PARM(&RETRN &CO320 'M3TFSGL' +
+                          &M3LV320)
+
+             CHGVAR     VAR(&RETRN) VALUE('       ')
+             CALL       PGM(POMTXFR) PARM(&RETRN &CO960 'M3TFSGL' +
+                          &M3LV960)
+
+  SDN440:    CHGVAR     VAR(&RETRN) VALUE('       ')
+             CALL       PGM(POMTXFR) PARM(&RETRN &CO960 'E1LIVE    ' +
+                          &E1LV960)
+             CHGVAR     VAR(&RETRN) VALUE('       ')
+             CALL       PGM(PBSHXFR) PARM(&RETRN &DATAS)
+
+/***********************************************************************/
+/* POST A CASH DISTRIBUTION HEADER                                     */
+/* (If you are in the "production" environment),                       */
+/*    e-mail the report to a distribution list                         */
+/*    dup the report to another spool file                             */
+/***********************************************************************/
+
+             IF         COND(&LDTASK *EQ 'POST  ') THEN(DO)       /* If Post */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+  /*PIO      CHGVAR     VAR(%SST(&QDATA 1 33)) VALUE('BDAIC3 *EQ + +
+                          360 *OR BDAIC3 *EQ 960')                */
+  /*PIO*/    CHGVAR     VAR(%SST(&QDATA 1 33)) VALUE('BDAIC3  =  +
+                          360  OR BDAIC3  =  960')
+
+    /*PIO    OVRDBF     FILE(ARBDCPL1) SHARE(*YES)   +
+             OPNQRYF    FILE((ARBDCPL1)) QRYSLT(&QDATA) +  +
+                          KEYFLD((BDAIC3) (BDCONB) (BDCEST)) +  +
+                          SEQONLY(*YES)                     */
+
+   /*PIO*/    OVRDBF     FILE(ARBDCPP) TOFILE(ARBDCPP) LVLCHK(*NO)
+             OPNSQLF    SQL('Select * from ARBDCPP Where  ' *BCAT +
+                          &QDATA  *BCAT ' Order by BDAIC3 asc, +
+                          BDCONB asc, BDCEST asc') +
+                          OPNID(ARBDCPL1) OPTION(*ALL) SEQONLY(*NO) +
+                          RCDFMT(@BDCPFH) ALWCPY(*IFRQD) /*PIO*/
+      /*PIO*/  OVRDBF     FILE(ARBDCPL1) TOFILE(ARBDCPP) LVLCHK(*NO) +
+                          OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+             OVRPRTF    FILE(PRINT198) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(*YES)  SAVE(*YES)
+
+             CALL       PGM(TF204)
+
+             CLOF       OPNID(ARBDCPL1)
+  /*PIO      DLTOVR     FILE(*ALL)   */
+             DLTOVR     FILE(*ALL) LVL(*JOB) /*PIO*/
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('TF Cash Distribution +
+                          Post'))
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT('Cash Post +
+                          Report') MSG('Distribution List: TF Cash +
+                          Distribution Post') ATTLIST((* *PDF *N +
+                          PRINT198 *))
+             MONMSG     MSGID(CPF0000)
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(DO)
+             DUPSPLF    FILE(PRINT198) OUTQ(TFPRTDUP) SPLNBR(*LAST) +
+                          HOLD(*NO)
+             MONMSG     MSGID(CPF0000)
+             ENDDO
+
+             OVRPRTF    FILE(PRINT132) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(*YES) SAVE(*YES)
+
+/***********************************************************************/
+/* Duplicate M3 files into QTEMP                                       */
+/***********************************************************************/
+
+/* Duplicate the M3 GL Interface Head PF, Upd Index, and Rtv Index to QTEMP */
+             CRTDUPOBJ  OBJ(PLB9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJ  OBJ(PLB9CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJ  OBJ(PLB9CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJ  OBJ(PLB9CPL2) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/* Duplicate the M3 GL Interface Line PF, Upd Index, and Rtv Index to QTEMP */
+             CRTDUPOBJ  OBJ(PLCACPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJ  OBJ(PLCACPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJ  OBJ(PLCACPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/***********************************************************************/
+/* Duplicate E1 file  into QTEMP - SDN440                              */
+/***********************************************************************/
+
+/*  CREATE E1 RUN LOG WORKFILE - TO USER LATER TO PUSH BATCHES TO E1   */
+
+             CRTDUPOBJ  OBJ(E1B9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+/***********************************************************************/
+/* Call TF Upload Cash Disbursements program                               */
+/***********************************************************************/
+
+             CALL       PGM(TFJDE271) PARM(&M3LV320 &M3LV960)
+
+/***********************************************************************/
+/* Print TF Revenue Close report                                       */
+/***********************************************************************/
+
+ LIVEM3P:    IF         COND(&M3LV960 *EQ 'Y' *OR &M3LV960 *EQ 'P') +
+                          THEN(DO)
+             OVRPRTF    FILE(PWA3PFR$) OUTQ(&OUTQ) COPIES(1) +
+                          HOLD(*YES) SAVE(*YES)
+             CHGVAR     VAR(&OMSSYSVAL) VALUE('TFS Cash Distribution')
+
+             CALL       PGM(PWA3PFR) PARM(&RETRN &OMSSYSVAL)
+R10999:      IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('M3TFDIST'))
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT('Cash Dist +
+                          Report--M3 Journal Entries') +
+                          MSG('Distribution List: M3TFDIST') +
+                          ATTLIST((* *PDF *N PWA3PFR$ *))
+             MONMSG     MSGID(CPF0000)
+
+/***********************************************************************/
+/* Copy M3 file records from QTEMP to M3 library and then delete       */
+/***********************************************************************/
+
+/* Duplicate the M3 GL Interface Head PF, Upd Index, and Rtv Index to QTEMP */
+             CPYF       FROMFILE(QTEMP/PLB9CPP) +
+                          TOFILE(&DATAS/PLB9CPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+
+/* Duplicate the M3 GL Interface Head PF, Upd Index, and Rtv Index to QTEMP */
+             CPYF       FROMFILE(QTEMP/PLCACPP) +
+                          TOFILE(&DATAS/PLCACPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+             ENDDO                                  /*   END LIVEM3P */
+
+/***********************************************************************/
+/* Delete files from QTEMP                                             */
+/***********************************************************************/
+
+             DLTF       FILE(QTEMP/PLB9CPL*)
+             DLTF       FILE(QTEMP/PLB9CPP*)
+
+             DLTF       FILE(QTEMP/PLCACPL*)
+             DLTF       FILE(QTEMP/PLCACPP*)
+
+/*********************************************************************/
+/* Push the Run Log Header records and push the batches to E1-SDN440 */
+/*                                                                   */
+/* ----------------------------------------------------------------- */
+/*********************************************************************/
+
+ LIVEE1P:    IF         COND(&E1LV960 *EQ 'Y' *OR &E1LV960 *EQ 'P') +
+                          THEN(DO)
+
+/*  EXECUTE THE PROGRAM TO READ THE QTEMP RUN LOG HEADER             */
+/*      E1B9CPP AND PUSH THE BATCHES TO E1                           */
+
+             CALL       PGM(E1LDXFR) PARM(&RETRN)
+
+             /* Send message with all batch numbers created */
+             CHGVAR     VAR(&RECIP) VALUE(&USER)
+
+             CALL       PGM(E1LRXFR) PARM(&RETRN &SOURCE &BCHDSC +
+                          &RECIP &SUBJECT)
+
+             DLTF       FILE(QTEMP/E1B9CPL*)
+             DLTF       FILE(QTEMP/E1B9CPP*)
+
+             ENDDO                                  /*   END LIVEE1P */
+/***********************************************************************/
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('TF Cash Distribution +
+                          Post'))
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT('Cash Post +
+                          Report--Journal Entries') +
+                          MSG('Distribution List: TF Cash +
+                          Distribution Post') ATTLIST((* *PDF *N +
+                          PRINT132 *))
+             MONMSG     MSGID(CPF0000)
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(DO)
+             DUPSPLF    FILE(PRINT132) OUTQ(TFPRTDUP) SPLNBR(*LAST) +
+                          HOLD(*NO)
+             MONMSG     MSGID(CPF0000)
+             ENDDO
+
+             ENDDO                                                /* If Post */
+
+
+/***********************************************************************/
+/* PRINT CASH DISTRIBTUION BATCH REPORT                                */
+/***********************************************************************/
+
+             IF         COND(&LDTASK *EQ 'BATCH ') THEN(DO)
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+   /*PIO     CHGVAR     VAR(%SST(&QDATA 1 33)) VALUE('BFAIC3 *EQ +  +
+                          360 *OR BFAIC3 *EQ 960')                 */
+   /*PIO*/   CHGVAR     VAR(%SST(&QDATA 1 33)) VALUE('BFAIC3  =  +
+                          360  OR BFAIC3  =  960')
+
+  /*PIO      OVRDBF     FILE(ARBECPL4) SHARE(*YES)     */
+ /* R9717    OPNQRYF    FILE((ARBECPL4)) KEYFLD((BFG4CD) (BFDVDT) +
+                          (BFYXNX) (BFW3SX) (BFAIC3)) SEQONLY(*YES) */
+ /* PIO      OPNQRYF    FILE((ARBECPL4)) QRYSLT(&QDATA) +     +
+                          KEYFLD((BFG4CD) (BFDVDT) (BFYXNX) +  +
+                          (BFW3SX) (BFAIC3)) SEQONLY(*YES)  */
+
+   /*PIO*/    OVRDBF     FILE(ARBECPP) TOFILE(ARBECPP) LVLCHK(*NO)
+             OPNSQLF    SQL('Select * from ARBECPP Where ' *BCAT +
+                          &QDATA   *BCAT ' Order by BFG4CD asc, +
+                          BFDVDT asc, BFYXNX asc') +
+                          OPNID(ARBECPL4) OPTION(*ALL) SEQONLY(*NO) +
+                          RCDFMT(@BECPYW) ALWCPY(*IFRQD) /*PIO*/
+   /*PIO*/  OVRDBF     FILE(ARBECPL4) TOFILE(ARBECPP) LVLCHK(*NO) +
+                       OVRSCOPE(*JOB) SHARE(*YES) OPNSCOPE(*JOB)
+
+
+             CRTDUPOBJ  OBJ(TFP305) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CRTDUPOBJ  OBJ(TFP306) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(TFL306A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             OVRPRTF    FILE(PRINT198) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(TF605)
+
+             CLOF       OPNID(ARBECPL4)
+   /*PIO     DLTOVR     FILE(*ALL)    */
+             DLTOVR     FILE(*ALL) LVL(*JOB) /*PIO*/
+             ENDDO
+
+/* END PROGRAM LOGIC                                                   */
+
+             DLTOVR     FILE(*ALL)
+
+             ENDPGM

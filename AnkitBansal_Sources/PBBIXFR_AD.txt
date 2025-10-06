@@ -1,0 +1,1073 @@
+// ?------------------------------------------------------------------------------------------------
+// ?Synon action diagram for PBBIXFR
+// ?Date: 14.08.2025 Time: 03:47:18
+// ?------------------------------------------------------------------------------------------------
+
+//?Execute user function
+
+// WRK.Error Status = CND.no
+WRK.Error_Status = 'N';
+
+// PAR.Order Requires Review = CND.No
+PAR.Order_Requires_Review = *BLANK;
+
+//?** Test start and end contract dates against the Scheduled Ship Date
+EXECUTE FUNCTION(Rtv Price Code        RT) TYPE(RTVOBJ) FILE(OPBGWKP)           AC2033268;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(1);
+PARAMETER(1);
+PARAMETER(WRK.Price_Code);
+{
+ //?USER: Processing if Data record not found
+
+ MOVE *ALL (To: PAR From: CON);
+
+ // PGM.*Return code = CND.*Record does not exist
+ PGM.*Return_code = 'Y2U0005';
+
+ //?USER: Process Data record
+
+ MOVE *ALL (To: PAR From: DB1);
+
+ // PGM.*Return code = CND.*Normal
+ PGM.*Return_code = *BLANK;
+
+}
+
+
+// Call program Rtv Cust Prc Str/End  XF.
+CALL PROGRAM(Rtv Cust Prc Str/End  XF) ('PNTAXFR');
+PARAMETER(PAR.Ship_To_Customer);
+PARAMETER(WRK.Price_Code);
+PARAMETER(LCL.Price_Start_Date);
+PARAMETER(LCL.Price_End_Date);
+
+//?test contract start and end dates
+CASE;
+
+// IF PAR.Scheduled Ship Date LT LCL.Price Start Date
+IF PAR.Scheduled_Ship_Date < LCL.Price_Start_Date;
+
+// OR PAR.Scheduled Ship Date GT LCL.Price End Date
+OR PAR.Scheduled_Ship_Date > LCL.Price_End_Date;
+
+// WRK.Error Status = CND.yes
+WRK.Error_Status = 'Y';
+
+// PAR.Order Line Error Type = CND.Start/End Date
+PAR.Order_Line_Error_Type = 'DT';
+
+ENDIF;
+
+//?** Calc slots assigned for the SSD/Whse. If slots available is
+//?** exceeded, flag order header and detail with the errror and
+//?** continue with the next load
+//?** Test Slotting only if Load ID is entered           P001251
+CASE;
+
+// IF PAR.Load ID is GT Zero
+IF PAR.Load_ID > *ZERO;
+
+//?** Only check slotting limits if Seaboard
+CASE;
+
+// IF PAR.Company Organization is Seaboard
+IF PAR.Company_Organization = 'S';
+
+//?** Retrieve number of loads slotted for SSD/Whse
+EXECUTE FUNCTION(RTV Limit Loads f/Slot RT) TYPE(RTVOBJ) FILE(OMFJCPP)          AC1619257;
+PARAMETER(PAR.Warehouse_Code);
+PARAMETER(PAR.Scheduled_Ship_Date);
+PARAMETER(PAR.Load_ID);
+PARAMETER(WRK.Export_Load_Limit);
+PARAMETER(WRK.Combo_Load_Limit);
+PARAMETER(WRK.Box_Load_Limit_USR);
+PARAMETER(WRK.Record_Found_OrdDtlUSR);
+{
+ //?USER: Initialize routine
+
+ // PAR.Export Load Limit = CON.*ZERO
+ PAR.Export_Load_Limit = *ZERO;
+
+ // PAR.Combo Load Limit = CON.*ZERO
+ PAR.Combo_Load_Limit = *ZERO;
+
+ // PAR.Box Load Limit        USR = CON.*ZERO
+ PAR.Box_Load_Limit_USR = *ZERO;
+
+ // PAR.Record Found -OrdDtlUSR = CND.Record Not Found
+ PAR.Record_Found_OrdDtlUSR = 'N';
+
+ EXECUTE FUNCTION(RTV Shipping Co        RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1695057;
+ PARAMETER(PAR.Ship_From_Warehouse);
+ PARAMETER(LCL.Shipping_Company);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?** Retrieve needed values from System Values file     E000233
+ // Call program Rtv Company Ctl Vals  XF.
+ CALL PROGRAM(Rtv Company Ctl Vals  XF) ('PNOQXFR');
+ PARAMETER(LCL.Shipping_Company);
+ PARAMETER(LCL.Box_Load_Min_Box_Qty_USR);
+ PARAMETER(LCL.Partial_Load_Max_Lbs_USR);
+
+ //?change log
+ DO;
+
+ //?02/03/2010 LJB E000233
+ //?   Retrieve needed values from System Values file
+ //?08/03/07 RMC dly029 Count Load as Export if export order whse
+ //?   matches ShipFrom Whse on the load   -- per jim n, steve b
+ //?05/11/04 SLM PKTR01 Multi-Company - Order Header TRG Remove Co
+ //?   from Logical View
+ //?05/17/04 RMC PKTR01 Multi-Company - Use Shipping Co from Whse
+ ENDDO;
+
+ //?USER: Processing if Data record not found
+
+ // PGM.*Return code = CND.*Normal
+ PGM.*Return_code = *BLANK;
+
+ //?USER: Process Data record
+
+ //?RMC 9/11/13 E2709
+ //?Check for Mixed having box qty>BOXLOAD qty, if yes, then BX, else CB
+ //?Change Priority 3/14/01    RMC
+ //?Check for Mixed having a box qty > 60 to stay BX   6/12/01    RMC
+ //?Per Steve Burke - 6/27/01
+ //?Dont check just for Prepaid Trucks.  Collect and Prepaid trucks included
+ //?If Partial Load (<= 20000 lbs) dont count.
+ //?Priority :  Combo , Export, Box
+ CASE;
+
+ // IF DB1.Load Type is Regular
+ IF DB1.Load_Type = 'R';
+
+ // AND DB1.Total Load Order Weight GT LCL.Partial Load Max Lbs USR
+ AND DB1.Total_Load_Order_Weight > LCL.Partial_Load_Max_Lbs_USR;
+
+ // AND DB1.Shipping Method is Not Rail
+ AND DB1.Shipping_Method = 'CT'/'PT';
+
+ //?Update load found so this load wont be counted again in the calling pgm.
+ CASE;
+
+ // IF DB1.Load ID EQ PAR.Load ID
+ IF DB1.Load_ID = PAR.Load_ID;
+
+ // PAR.Record Found -OrdDtlUSR = CND.Record Found
+ PAR.Record_Found_OrdDtlUSR = 'Y';
+
+ ENDIF;
+
+ // LCL.Boxes Total Quantity = CON.*ZERO
+ LCL.Boxes_Total_Quantity = *ZERO;
+
+ //?05/11/04 SLM PKTR01 Multi-Company - Function chgd-remove Company RST/Pos
+ EXECUTE FUNCTION(RTV UM/Whs Code,BX Qty RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1625242;
+ PARAMETER(*ZERO);
+ PARAMETER(DB1.Load_ID);
+ PARAMETER(LCL.U_M_Ordered);
+ PARAMETER(LCL.Boxes_Total_Quantity);
+ {
+  //?USER: Initialize routine
+
+  //?05/13/04 SLM PKTR01 Multi-Company - Funt chg to rmv Co RST or Pos
+  // PAR.USR Unit of Measure = CON.*BLANK
+  PAR.USR_Unit_of_Measure = *BLANK;
+
+  // WRK.First Time Flag = CND.Yes
+  WRK.First_Time_Flag = 'Y';
+
+  //?USER: Processing if Data record not found
+
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+  //?USER: Process Data record
+
+  EXECUTE FUNCTION(RTV UM/Whs Code,BX Qty RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC1625244;
+  PARAMETER(DB1.Company_Number);
+  PARAMETER(DB1.Order_Number);
+  PARAMETER(1);
+  PARAMETER(PAR.USR_Unit_of_Measure);
+  PARAMETER(PAR.Boxes_Total_Quantity);
+  {
+   //?USER: Initialize routine
+
+   // WRK.First Time Flag = CND.Yes
+   WRK.First_Time_Flag = 'Y';
+
+   //?USER: Processing if Data record not found
+
+   MOVE *ALL (To: PAR From: CON);
+
+   // PGM.*Return code = CND.*Normal
+   PGM.*Return_code = *BLANK;
+
+   QUIT;
+
+   //?USER: Process Data record
+
+   CASE;
+
+   // IF DB1.Detail Line Status is Cancelled
+   IF DB1.Detail_Line_Status = 'X';
+
+   // IF *OTHERWISE
+   IF *OTHERWISE;
+
+   //?S17054 DN 04/08/21-Beyond this point, changed all 'U/M - Ordered'
+   //?  to reference LCL Context instead of DB1.
+   //?S17054 DN 04/08/21-Count Type 'Cases' (CS) as 'Boxes' (BX).
+   CASE;
+
+   // IF *OTHERWISE
+   IF *OTHERWISE;
+
+   // LCL.U/M - Ordered = DB1.U/M - Ordered
+   LCL.U_M_Ordered = DB1.U_M_Ordered;
+
+   CASE;
+
+   // IF LCL.U/M - Ordered is Cases
+   IF LCL.U_M_Ordered = 'CS';
+
+   // LCL.U/M - Ordered = CND.EQ Boxes
+   LCL.U_M_Ordered = 'BX';
+
+   ENDIF;
+
+   ENDIF;
+
+   //?Accumulate the Box Quantity for slotting consideration  6/12/01
+   CASE;
+
+   // IF LCL.U/M - Ordered is EQ Boxes
+   IF LCL.U_M_Ordered = 'BX';
+
+   // PAR.Boxes Total Quantity = PAR.Boxes Total Quantity + DB1.Quantity Ordered
+   PAR.Boxes_Total_Quantity = PAR.Boxes_Total_Quantity + DB1.Quantity_Ordered;
+
+   ENDIF;
+
+   CASE;
+
+   // IF PAR.USR Unit of Measure is *Blank
+   IF PAR.USR_Unit_of_Measure = *BLANK;
+
+   // PAR.USR Unit of Measure = LCL.U/M - Ordered
+   PAR.USR_Unit_of_Measure = LCL.U_M_Ordered;
+
+   // IF *OTHERWISE
+   IF *OTHERWISE;
+
+   CASE;
+
+   // IF LCL.U/M - Ordered EQ PAR.USR Unit of Measure
+   IF LCL.U_M_Ordered = PAR.USR_Unit_of_Measure;
+
+   // IF *OTHERWISE
+   IF *OTHERWISE;
+
+   // PAR.USR Unit of Measure = CND.Mixed
+   PAR.USR_Unit_of_Measure = 'MX';
+
+   ENDIF;
+
+   ENDIF;
+
+   ENDIF;
+
+  }
+
+  //?USER: Exit processing
+
+  //?RMC E2709 added here so it wont need to be in every calling pgm
+  CASE;
+
+  // IF PAR.USR Unit of Measure is Mixed
+  IF PAR.USR_Unit_of_Measure = 'MX';
+
+  EXECUTE FUNCTION(RTV Numeric Value      RT) TYPE(RTVOBJ) FILE(PDKMREP)          AC1394480;
+  PARAMETER(DB1.Company_Number);
+  PARAMETER('BOXLOAD');
+  PARAMETER(LCL.Box_Load_Min_Box_Qty_USR);
+  {
+   //?USER: Processing if Data record not found
+
+   // PGM.*Return code = CND.*Record does not exist
+   PGM.*Return_code = 'Y2U0005';
+
+   //?USER: Process Data record
+
+   MOVE *ALL (To: PAR From: DB1);
+
+  }
+
+  CASE;
+
+  // IF PAR.Boxes Total Quantity LT LCL.Box Load Min Box Qty USR
+  IF PAR.Boxes_Total_Quantity < LCL.Box_Load_Min_Box_Qty_USR;
+
+  // PAR.USR Unit of Measure = CND.Combos
+  PAR.USR_Unit_of_Measure = 'CB';
+
+  // IF *OTHERWISE
+  IF *OTHERWISE;
+
+  // PAR.USR Unit of Measure = CND.Boxed
+  PAR.USR_Unit_of_Measure = 'BX';
+
+  ENDIF;
+
+  ENDIF;
+
+ }
+
+ CASE;
+
+ // IF LCL.U/M - Ordered is Combos
+ IF LCL.U_M_Ordered = 'CB';
+
+ // PAR.Combo Load Limit = PAR.Combo Load Limit + CON.1
+ PAR.Combo_Load_Limit = PAR.Combo_Load_Limit + 1;
+
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ // LCL.Export Status Dft = DB1.Export Status
+ LCL.Export_Status_Dft = DB1.Export_Status;
+
+ //?Count Load as Export if order whse = Ship-From-Whse & Export 8/3/07
+ CASE;
+
+ // IF DB1.Export Status is yes
+ IF DB1.Export_Status = 'Y';
+
+ //?See if export order whse matches load Shipfrom whse  08/03/07 RMC
+ //?For example a load could be export sts=Y and ship from whse is GP1, but
+ //?there are multiple orders, and the one that is export is out of CF1
+ //? in that case, dont count the load as export- per Steve B and Jim Norris
+ // Call program RTV ExpOrd Whse for LD XF.
+ CALL PROGRAM(RTV ExpOrd Whse for LD XF) ('PMK2XFR');
+ PARAMETER(DB1.Load_ID);
+ PARAMETER(DB1.Ship_From_Warehouse);
+ PARAMETER(LCL.Export_Status_Dft);
+
+ ENDIF;
+
+ CASE;
+
+ // IF LCL.Export Status Dft is yes
+ IF LCL.Export_Status_Dft = 'Y';
+
+ // PAR.Export Load Limit = PAR.Export Load Limit + CON.1
+ PAR.Export_Load_Limit = PAR.Export_Load_Limit + 1;
+
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ // PAR.Box Load Limit        USR = PAR.Box Load Limit        USR + CON.1
+ PAR.Box_Load_Limit_USR = PAR.Box_Load_Limit_USR + 1;
+
+ ENDIF;
+
+ ENDIF;
+
+ ENDIF;
+
+}
+
+
+EXECUTE FUNCTION(RTV Day and Week No.   RT) TYPE(RTVOBJ) FILE(CAAFREP)          AC1235065;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Scheduled_Ship_Date);
+PARAMETER(NLL.Accounting_Period_Code);
+PARAMETER(WRK.Day_of_Week);
+PARAMETER(NLL.Week_Number);
+{
+ //?USER: Process Data record
+
+ // PGM.*Return code = CND.*Normal
+ PGM.*Return_code = *BLANK;
+
+ MOVE *ALL (To: PAR From: DB1);
+
+}
+
+
+EXECUTE FUNCTION(Rtv Load Slotting Sch RT) TYPE(RTVOBJ) FILE(POA3REP)           AC1619252;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Warehouse_Code);
+PARAMETER(WRK.Day_of_Week);
+PARAMETER(WRK.Slot_Limit_for_Export);
+PARAMETER(LCL.Slot_Limit_for_Combo);
+PARAMETER(LCL.Slot_Limit_for_Box_Other);
+PARAMETER(LCL.Weight_Limit_for_Export);
+PARAMETER(LCL.Weight_Limit_for_Combo);
+PARAMETER(LCL.Weight_Limit_for_Box_Othr);
+{
+ //?USER: Processing if Data record not found
+
+ MOVE *ALL (To: PAR From: CON);
+
+ //?USER: Process Data record
+
+ MOVE *ALL (To: PAR From: DB1);
+
+ QUIT;
+
+}
+
+
+CASE;
+
+// IF WRK.Export Load Limit GT WRK.Slot Limit for Export
+IF WRK.Export_Load_Limit > WRK.Slot_Limit_for_Export;
+
+// PAR.Order Line Error Type = CND.Slotting Issues
+PAR.Order_Line_Error_Type = 'SL';
+
+// WRK.Detail Line Status = CND.Entered
+WRK.Detail_Line_Status = 'E';
+
+// WRK.Error Status = CND.yes
+WRK.Error_Status = 'Y';
+
+ENDIF;
+
+ENDIF;
+
+ENDIF;
+
+//?** Test and update Order Detail lines
+// LCL.Error Status = CND.no
+LCL.Error_Status = 'N';
+
+EXECUTE FUNCTION(RTV EOA Upl Err Valid RT) TYPE(RTVOBJ) FILE(OPBGWKP)           AC2033258;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(PAR.Requested_Delivery_Date);
+PARAMETER(PAR.Warehouse_Code);
+PARAMETER(PAR.Ship_To_Customer);
+PARAMETER(PAR.Scheduled_Ship_Date);
+PARAMETER(WRK.Price_Code);
+PARAMETER(PAR.Order_Line_Error_Type);
+PARAMETER(LCL.Error_Status);
+{
+ //?USER: Process Data record
+
+ // PAR.Error Status = CND.no
+ PAR.Error_Status = 'N';
+
+ //?** Test contracted Price Code Item maximum allowed weight
+ // LCL.Error Status = CND.no
+ LCL.Error_Status = 'N';
+
+ // Call program Rtv Max Wt and price  XF.
+ CALL PROGRAM(Rtv Max Wt and price  XF) ('PNTBXFR');
+ PARAMETER(PGM.*Return_code);
+ PARAMETER(PAR.Ship_To_Customer);
+ PARAMETER(PAR.Price_Code);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(LCL.Maximum_Contract_Units);
+ PARAMETER(LCL.Customer_Price_UM_Prc);
+ PARAMETER(LCL.Commodity_Market_Code);
+ PARAMETER(LCL.Price_Method_Code);
+ PARAMETER(LCL.Date_Method_Code);
+ PARAMETER(LCL.Contract_Unit_Type);
+
+ EXECUTE FUNCTION(Clc Sum Ship/Ord Unit IF) TYPE(EXCINTFUN)                      AC1829994;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Order_Number);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(PAR.Ship_To_Customer);
+ PARAMETER(LCL.Commodity_Market_Code);
+ PARAMETER(LCL.Date_Method_Code);
+ PARAMETER(LCL.Price_Method_Code);
+ PARAMETER(LCL.Price_Overage_Override);
+ PARAMETER(DB1.U_M_Base_Price);
+ PARAMETER(DB1.Quantity_Ordered);
+ PARAMETER(DB1.Unit_Weight_Ordered_U_M);
+ PARAMETER(PAR.Price_Code);
+ PARAMETER(LCL.OD_Ceiling_Price);
+ PARAMETER(LCL.Error_Status);
+ PARAMETER(LCL.Price_Method_Type);
+ PARAMETER(LCL.PMH_Price_Type);
+ {
+  //?Execute internal function
+
+  // PAR.Error Status = CND.no
+  PAR.Error_Status = 'N';
+
+  // LCL.Weight Ordered = PAR.Quantity Ordered * PAR.Unit Weight Ordered U/M *
+  LCL.Weight_Ordered = PAR.Quantity_Ordered * PAR.Unit_Weight_Ordered_U_M;
+
+  // Call program CLC Sum Ship/Ord Unit XF.
+  CALL PROGRAM(CLC Sum Ship/Ord Unit XF) ('PPA6XFR');
+  PARAMETER(PAR.Ship_To_Customer);
+  PARAMETER(PAR.Price_Code);
+  PARAMETER(PAR.Item_Code);
+  PARAMETER(PAR.Total_Weight_Ordered_USR);
+  PARAMETER(PAR.Order_Number);
+  PARAMETER(PAR.Total_Quantity_Ordered);
+
+  // PAR.Total Weight Ordered USR = PAR.Total Weight Ordered USR + LCL.Weight Ordered
+  PAR.Total_Weight_Ordered_USR = PAR.Total_Weight_Ordered_USR + LCL.Weight_Ordered;
+
+  // PAR.Total Quantity Ordered = PAR.Total Quantity Ordered + PAR.Quantity Ordered
+  PAR.Total_Quantity_Ordered = PAR.Total_Quantity_Ordered + PAR.Quantity_Ordered;
+
+  //?5/13/10 SAZ P205-Add parm for Max Unit Type;rtv Contract Unit Type
+  // Call program Rtv Cust Prc hdr/dtl  XF.
+  CALL PROGRAM(Rtv Cust Prc hdr/dtl  XF) ('PPA7XFR');
+  PARAMETER(PAR.Ship_To_Customer);
+  PARAMETER(PAR.Price_Code);
+  PARAMETER(WRK.Price_Start_Date);
+  PARAMETER(WRK.Price_End_Date);
+  PARAMETER(PAR.Item_Code);
+  PARAMETER(PAR.Maximum_Contract_Units);
+  PARAMETER(PAR.Customer_Price_UM_Prc);
+  PARAMETER(PAR.Commodity_Market_Code);
+  PARAMETER(LCL.Price_Method_Code);
+  PARAMETER(PAR.Date_Method_Code);
+  PARAMETER(PAR.Contract_Unit_Type);
+
+  // PAR.Price Method Code = LCL.Price Method Code
+  PAR.Price_Method_Code = LCL.Price_Method_Code;
+
+  EXECUTE FUNCTION(RTV PrcMthTyp/PrcTyp  RT) TYPE(RTVOBJ) FILE(PDIHREP)           AC1997170;
+  PARAMETER(PAR.Company_Number);
+  PARAMETER(LCL.Price_Method_Code);
+  PARAMETER(PAR.Price_Method_Type);
+  PARAMETER(PAR.PMH_Price_Type);
+  {
+   //?USER: Processing if Data record not found
+
+   MOVE *ALL (To: PAR From: CON);
+
+   //?USER: Process Data record
+
+   MOVE *ALL (To: PAR From: DB1);
+
+  }
+
+  //?5/13/10 SAZ P205-Use Contract Unit Type to check Qty or Weight-Lbs
+  //?Use Contract Unit Type to check Qty or Weight-Lbs
+  //?VAL: Total Weight and Quantity w/Maximum
+  CASE;
+
+  // IF PAR.Contract Unit Type is Weight-LB
+  IF PAR.Contract_Unit_Type = 'W';
+
+  CASE;
+
+  // IF PAR.Total Weight Ordered USR GT PAR.Maximum Contract Units
+  IF PAR.Total_Weight_Ordered_USR > PAR.Maximum_Contract_Units;
+
+  // PAR.Error Status = CND.yes
+  PAR.Error_Status = 'Y';
+
+  // LCL.Weight Allocated USR = PAR.Total Weight Ordered USR - PAR.Maximum Contract Units
+  LCL.Weight_Allocated_USR = PAR.Total_Weight_Ordered_USR - PAR.Maximum_Contract_Units;
+
+  // Send error message - 'Max Units &3 for Item &4/Price Code &1 exceeded by &2.'
+  ERROR(USR3320);
+  MSGPARM(PAR.Price_Code);
+  MSGPARM(LCL.Weight_Allocated_USR);
+  MSGPARM(PAR.Maximum_Contract_Units);
+  MSGPARM(PAR.Item_Code);
+
+  ENDIF;
+
+  //?VAL: Total Weight and Quantity w/Maximum
+  // IF *OTHERWISE
+  IF *OTHERWISE;
+
+  //?If Contract Unit type = Quantity
+  CASE;
+
+  // IF PAR.Total Quantity Ordered GT PAR.Maximum Contract Units
+  IF PAR.Total_Quantity_Ordered > PAR.Maximum_Contract_Units;
+
+  // PAR.Error Status = CND.yes
+  PAR.Error_Status = 'Y';
+
+  // LCL.Weight Allocated USR = PAR.Total Quantity Ordered - PAR.Maximum Contract Units
+  LCL.Weight_Allocated_USR = PAR.Total_Quantity_Ordered - PAR.Maximum_Contract_Units;
+
+  // Send error message - 'Max Units &3 for Item &4/Price Code &1 exceeded by &2.'
+  ERROR(USR3320);
+  MSGPARM(PAR.Price_Code);
+  MSGPARM(LCL.Weight_Allocated_USR);
+  MSGPARM(PAR.Maximum_Contract_Units);
+  MSGPARM(PAR.Item_Code);
+
+  ENDIF;
+
+  ENDIF;
+
+  //?Original code
+  //?OUT: No Errors
+  CASE;
+
+  // IF PAR.Error Status is no
+  IF PAR.Error_Status = 'N';
+
+  // PAR.Price Overage Override = PAR.Customer Price /UM Prc
+  PAR.Price_Overage_Override = PAR.Customer_Price_UM_Prc;
+
+  CASE;
+
+  // IF PAR.PMH Price Type is Invoice Price
+  IF PAR.PMH_Price_Type = 'I';
+
+  // PAR.Price Overage Override = PAR.Customer Price /UM Prc
+  PAR.Price_Overage_Override = PAR.Customer_Price_UM_Prc;
+
+  // PAR.OD Ceiling Price = CON.*ZERO
+  PAR.OD_Ceiling_Price = *ZERO;
+
+  // IF PAR.PMH Price Type is Ceiling Price
+  IF PAR.PMH_Price_Type = 'C';
+
+  // PAR.Price Overage Override = CON.*ZERO
+  PAR.Price_Overage_Override = *ZERO;
+
+  // PAR.OD Ceiling Price = PAR.Customer Price /UM Prc
+  PAR.OD_Ceiling_Price = PAR.Customer_Price_UM_Prc;
+
+  ENDIF;
+
+  ENDIF;
+
+ }
+
+ //?contract weight exceeded
+ CASE;
+
+ // IF LCL.Error Status is yes
+ IF LCL.Error_Status = 'Y';
+
+ // PAR.Error Status = CND.yes
+ PAR.Error_Status = 'Y';
+
+ // PAR.Order Line Error Type = CND.Price Code Wgt Exceeded
+ PAR.Order_Line_Error_Type = 'WT';
+
+ EXECUTE FUNCTION(CHG Ord Line Error Typ CH) TYPE(CHGOBJ) FILE(OPBGWKP)          AC2029048;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Order_Sequence_Number);
+ PARAMETER(DB1.Order_Secondary_Line_Seq);
+ PARAMETER(PAR.Order_Line_Error_Type);
+ {
+  //?USER: Processing before Data read
+
+  //?** This routine does NOT update the change audit fields  P001251
+ }
+
+ ENDIF;
+
+ //?** Test for valid Item Age Code
+ // LCL.Error Status = CND.no
+ LCL.Error_Status = 'N';
+
+ EXECUTE FUNCTION(Val Age Information   IF) TYPE(EXCINTFUN)                      AC1984951;
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(DB1.Warehouse_Code);
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Scheduled_Ship_Date);
+ PARAMETER(PAR.Requested_Delivery_Date);
+ PARAMETER(DB1.Item_Age_Days);
+ PARAMETER(DB1.Production_Ovr_AgeDte_Fr);
+ PARAMETER(DB1.Production_Ovr_AgeDte_To);
+ PARAMETER(LCL.Production_AgeDte_Fr);
+ PARAMETER(LCL.Production_AgeDte_To);
+ PARAMETER(LCL.Error_Status);
+ PARAMETER('S');
+ PARAMETER('V');
+ {
+  //?Execute internal function
+
+  // WRK.Error Flag            USR = CND.Blank
+  WRK.Error_Flag_USR = *BLANK;
+
+  // PAR.Error Status = CND.blank
+  PAR.Error_Status = *BLANK;
+
+  // WRK.Error Reason Descript 1 = CON.*BLANK
+  WRK.Error_Reason_Descript_1 = *BLANK;
+
+  // WRK.Error Reason Descript 2 = CON.*BLANK
+  WRK.Error_Reason_Descript_2 = *BLANK;
+
+  // WRK.Error Reason Descript 3 = CON.*BLANK
+  WRK.Error_Reason_Descript_3 = *BLANK;
+
+  // WRK.Error Reason Descript 4 = CON.*BLANK
+  WRK.Error_Reason_Descript_4 = *BLANK;
+
+  // WRK.Error Reason Descript 5 = CON.*BLANK
+  WRK.Error_Reason_Descript_5 = *BLANK;
+
+  CASE;
+
+  // IF PAR.Company Organization is Seaboard
+  IF PAR.Company_Organization = 'S';
+
+  CASE;
+
+  // IF PAR.Requested Delivery Date is not entered
+  IF PAR.Requested_Delivery_Date = *ZERO;
+
+  // Send error message - 'Requested Delv Date is required'
+  ERROR(USR4329);
+  MSGPARM(PAR.Requested_Delivery_Date);
+
+  // IF PAR.Scheduled Ship Date is not entered
+  IF PAR.Scheduled_Ship_Date = *ZERO;
+
+  // Send error message - 'Scheduled Ship Date is required when orders are assigned to load.'
+  ERROR(USR2230);
+  MSGPARM(PAR.Scheduled_Ship_Date);
+
+  // IF *OTHERWISE
+  IF *OTHERWISE;
+
+  // Call program Val Age information   XF.
+  CALL PROGRAM(Val Age information   XF) ('PNQNXFR');
+  PARAMETER(PAR.Item_Code);
+  PARAMETER(PAR.Warehouse_Code);
+  PARAMETER(WRK.Error_Flag_USR);
+  PARAMETER(WRK.Error_Reason_Descript_1);
+  PARAMETER(WRK.Error_Reason_Descript_2);
+  PARAMETER(WRK.Error_Reason_Descript_3);
+  PARAMETER(WRK.Error_Reason_Descript_4);
+  PARAMETER(WRK.Error_Reason_Descript_5);
+  PARAMETER(PAR.Company_Number);
+  PARAMETER(PAR.Scheduled_Ship_Date);
+  PARAMETER(PAR.Requested_Delivery_Date);
+  PARAMETER(PAR.Item_Age_Days);
+  PARAMETER(PAR.Production_Ovr_AgeDte_Fr);
+  PARAMETER(PAR.Production_Ovr_AgeDte_To);
+  PARAMETER(PAR.Production_AgeDte_Fr);
+  PARAMETER(PAR.Production_AgeDte_To);
+
+  //?Verify if message should be sent if validation is required
+  CASE;
+
+  // IF WRK.Error Flag            USR is Yes
+  IF WRK.Error_Flag_USR = 'Y';
+
+  // AND PAR.Production Dates Sts Usr is Validation routine
+  AND PAR.Production_Dates_Sts_Usr = 'V';
+
+  //?message 1 Product is shipped before product is made
+  CASE;
+
+  // IF WRK.Error Reason Descript 1 NE WRK.Blank for 30          USR
+  IF WRK.Error_Reason_Descript_1 <> WRK.Blank_for_30_USR;
+
+  // Send error message - 'Prd Date is invalid for requested delivery date'
+  ERROR(USR4307);
+  MSGPARM(PAR.Production_AgeDte_Fr);
+
+  ENDIF;
+
+  //?message 2 Either Days or override date but not both
+  CASE;
+
+  // IF WRK.Error Reason Descript 2 NE WRK.Blank for 30          USR
+  IF WRK.Error_Reason_Descript_2 <> WRK.Blank_for_30_USR;
+
+  // Send error message - 'Enter Age Days or Dates'
+  ERROR(USR4304);
+  MSGPARM(PAR.Item_Age_Days);
+  MSGPARM(PAR.Production_Ovr_AgeDte_Fr);
+  MSGPARM(PAR.Production_Ovr_AgeDte_To);
+
+  ENDIF;
+
+  //?message 3 With Chill Days Either Days or Override Dates required
+  CASE;
+
+  // IF WRK.Error Reason Descript 3 NE WRK.Blank for 30          USR
+  IF WRK.Error_Reason_Descript_3 <> WRK.Blank_for_30_USR;
+
+  // Send error message - 'Override Dates is after shipped date'
+  ERROR(USR4305);
+  MSGPARM(PAR.Item_Age_Days);
+  MSGPARM(PAR.Production_Ovr_AgeDte_Fr);
+  MSGPARM(PAR.Production_Ovr_AgeDte_To);
+
+  ENDIF;
+
+  //?message 4 From date is > then SHIP DATE
+  CASE;
+
+  // IF WRK.Error Reason Descript 4 NE WRK.Blank for 30          USR
+  IF WRK.Error_Reason_Descript_4 <> WRK.Blank_for_30_USR;
+
+  // Send error message - 'Override Dates is after shipped date'
+  ERROR(USR4305);
+  MSGPARM(PAR.Item_Age_Days);
+  MSGPARM(PAR.Production_Ovr_AgeDte_Fr);
+  MSGPARM(PAR.Production_Ovr_AgeDte_To);
+
+  ENDIF;
+
+  //?message 5 To date is > then SHIP DATE
+  CASE;
+
+  // IF WRK.Error Reason Descript 5 NE WRK.Blank for 30          USR
+  IF WRK.Error_Reason_Descript_5 <> WRK.Blank_for_30_USR;
+
+  // Send error message - 'Override Dates is after shipped date'
+  ERROR(USR4305);
+  MSGPARM(PAR.Item_Age_Days);
+  MSGPARM(PAR.Production_Ovr_AgeDte_Fr);
+  MSGPARM(PAR.Production_Ovr_AgeDte_To);
+
+  ENDIF;
+
+  CASE;
+
+  // IF PAR.Production Ovr AgeDte Fr is not entered
+  IF PAR.Production_Ovr_AgeDte_Fr = *ZERO;
+
+  // Send error message - 'Invalid Item Age Days'
+  ERROR(USR4309);
+  MSGPARM(PAR.Item_Age_Days);
+
+  // IF *OTHERWISE
+  IF *OTHERWISE;
+
+  // Send error message - 'Invalid Production Override Age Frm/To Dates'
+  ERROR(USR4310);
+  MSGPARM(PAR.Production_AgeDte_Fr);
+  MSGPARM(PAR.Production_AgeDte_To);
+
+  ENDIF;
+
+  // PAR.Error Status = CND.yes
+  PAR.Error_Status = 'Y';
+
+  ENDIF;
+
+  ENDIF;
+
+  ENDIF;
+
+ }
+
+ //?item age code
+ CASE;
+
+ // IF LCL.Error Status is yes
+ IF LCL.Error_Status = 'Y';
+
+ // PAR.Error Status = CND.yes
+ PAR.Error_Status = 'Y';
+
+ // PAR.Order Line Error Type = CND.Invalid Item Age Code
+ PAR.Order_Line_Error_Type = 'AC';
+
+ EXECUTE FUNCTION(CHG Ord Line Error Typ CH) TYPE(CHGOBJ) FILE(OPBGWKP)          AC2029048;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Order_Sequence_Number);
+ PARAMETER(DB1.Order_Secondary_Line_Seq);
+ PARAMETER(PAR.Order_Line_Error_Type);
+ {
+  //?USER: Processing before Data read
+
+  //?** This routine does NOT update the change audit fields  P001251
+ }
+
+ ENDIF;
+
+ //?** Check for Weight Scheduled for all items
+ // LCL.Error Status = CND.no
+ LCL.Error_Status = 'N';
+
+ //?no weight scheduled
+ CASE;
+
+ // IF DB1.OD Production Plan Sts is Yes
+ IF DB1.OD_Production_Plan_Sts = *BLANK;
+
+ CASE;
+
+ // IF DB1.Weight Scheduled is Equal to zero
+ IF DB1.Weight_Scheduled = *ZERO;
+
+ // PAR.Error Status = CND.yes
+ PAR.Error_Status = 'Y';
+
+ // PAR.Order Line Error Type = CND.Product Availability
+ PAR.Order_Line_Error_Type = 'PA';
+
+ EXECUTE FUNCTION(CHG Ord Line Error Typ CH) TYPE(CHGOBJ) FILE(OPBGWKP)          AC2029048;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Order_Sequence_Number);
+ PARAMETER(DB1.Order_Secondary_Line_Seq);
+ PARAMETER(PAR.Order_Line_Error_Type);
+ {
+  //?USER: Processing before Data read
+
+  //?** This routine does NOT update the change audit fields  P001251
+ }
+
+ ENDIF;
+
+ ENDIF;
+
+ //?** Test for valid Deadline Departure Dates on orders
+ // LCL.Error Status = CND.no
+ LCL.Error_Status = 'N';
+
+ //?no deadline date/time
+ CASE;
+
+ // IF DB1.Deadline Depart Date LH is not entered
+ IF DB1.Deadline_Depart_Date_LH = *ZERO;
+
+ // PAR.Error Status = CND.yes
+ PAR.Error_Status = 'Y';
+
+ // PAR.Order Line Error Type = CND.Deadline Depart Date/Time
+ PAR.Order_Line_Error_Type = 'DD';
+
+ EXECUTE FUNCTION(CHG Ord Line Error Typ CH) TYPE(CHGOBJ) FILE(OPBGWKP)          AC2029048;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Order_Sequence_Number);
+ PARAMETER(DB1.Order_Secondary_Line_Seq);
+ PARAMETER(PAR.Order_Line_Error_Type);
+ {
+  //?USER: Processing before Data read
+
+  //?** This routine does NOT update the change audit fields  P001251
+ }
+
+ ENDIF;
+
+}
+
+
+CASE;
+
+// IF LCL.Error Status is yes
+IF LCL.Error_Status = 'Y';
+
+// WRK.Error Status = CND.yes
+WRK.Error_Status = 'Y';
+
+ENDIF;
+
+//?** Update Order Header & Detail error flags         P001251
+CASE;
+
+// IF WRK.Error Status is yes
+IF WRK.Error_Status = 'Y';
+
+// PAR.Order Requires Review = CND.Yes
+PAR.Order_Requires_Review = 'Y';
+
+EXECUTE FUNCTION(CHG Ord Req Revw- flg CH) TYPE(CHGOBJ) FILE(OPBFCPP)           AC2036232;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(PAR.Order_Requires_Review);
+{
+ //?USER: Processing before Data update
+
+ //?Does not update the record stamp fields
+}
+
+
+EXECUTE FUNCTION(CHG Ord Line Err       RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC2036250;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(1);
+PARAMETER(1);
+PARAMETER(PAR.Order_Line_Error_Type);
+{
+ //?USER: Process Data record
+
+ //?** Update the upload error flag for all line items    C001956
+ EXECUTE FUNCTION(CHG Ord Line Error Typ CH) TYPE(CHGOBJ) FILE(OPBGWKP)          AC2029048;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Order_Sequence_Number);
+ PARAMETER(DB1.Order_Secondary_Line_Seq);
+ PARAMETER(PAR.Order_Line_Error_Type);
+ {
+  //?USER: Processing before Data read
+
+  //?** This routine does NOT update the change audit fields  P001251
+ }
+
+}
+
+
+//?** Update Order Header & Detail error flags         P001251
+// IF *OTHERWISE
+IF *OTHERWISE;
+
+// PAR.Order Requires Review = CND.No
+PAR.Order_Requires_Review = *BLANK;
+
+// PAR.Order Line Error Type = CND.No Order Upload Errors
+PAR.Order_Line_Error_Type = *BLANK;
+
+//?** Update Header with cleared Order Requires Review if no more errors
+EXECUTE FUNCTION(CHG Ord Req Revw- flg CH) TYPE(CHGOBJ) FILE(OPBFCPP)           AC2036232;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(PAR.Order_Requires_Review);
+{
+ //?USER: Processing before Data update
+
+ //?Does not update the record stamp fields
+}
+
+
+EXECUTE FUNCTION(CHG Ord Line Err       RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC2036250;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(1);
+PARAMETER(1);
+PARAMETER(PAR.Order_Line_Error_Type);
+{
+ //?USER: Process Data record
+
+ //?** Update the upload error flag for all line items    C001956
+ EXECUTE FUNCTION(CHG Ord Line Error Typ CH) TYPE(CHGOBJ) FILE(OPBGWKP)          AC2029048;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Order_Sequence_Number);
+ PARAMETER(DB1.Order_Secondary_Line_Seq);
+ PARAMETER(PAR.Order_Line_Error_Type);
+ {
+  //?USER: Processing before Data read
+
+  //?** This routine does NOT update the change audit fields  P001251
+ }
+
+}
+
+
+ENDIF;
+

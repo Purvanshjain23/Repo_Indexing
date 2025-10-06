@@ -1,0 +1,728 @@
+      *
+      * SYSTEM:      Resource Optimization
+      * PROGRAM:     RO410
+      * TITLE:       Specify Weekly Meat Cost Calculation
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     12/07/06
+      *
+      *
+      * FUNCTION: This Specify uses an edit record format to allow the user
+      *           to specify options for the costing. Incoming parms restrict the
+      *           data to a specific Company/Week.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 01/03/08  LeAnne Ramsey
+      *           Added logic to retrieve user's default output queue.
+      *
+      * 11/20/08  LeAnne Ramsey
+      *           As a prep for synchronizing the TFS and Meat Cost LDAs, we
+      *           removed the unused LDA fields.
+      *
+      * 11/21/08  LeAnne Ramsey
+      *           Synchronized the Margin Adjustment and Meat Cost LDA.
+      *
+      * 01/12/09  LeAnne Ramsey
+      *           For the new Weekly Yield Reporting we will be running
+      *           the Meat Costing and the Margin Close CLs behind-the-scenes.
+      *           So, we added a PARM of blank on the SBMJOB command.
+      *
+      *           And, we have to keep the LDAs in synch for Yields/Meat Costing/
+      *           Margin Close. So, I added the 4 LDA values for the "Yield" reports.
+      *
+      * 02/02/09  LeAnne Ramsey
+      *           Added "program" to the LDA. It is a new selection on the Product
+      *           Exception Listing which is called from the Margin Close. We must
+      *           still keep the LDAs for Yields/Meat Costing/Margin Close in synch.
+      *
+      * 02/09/09  LeAnne Ramsey
+      *           Added another "yield report" field to the LDA. We still have to keep
+      *           to keep the LDAs for Yields/Meat Costing/Margin CLose in synch.
+      *
+      * 03/09/09  LeAnne Ramsey
+      *           Removed the "converting % report" field from the LDA. We are keeping
+      *           the LDAs for Yields/Meat Costing/Margin CLose in synch.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Frod410    cf   e             workstn infds(iofeed)
+      *
+      *
+     Frop003    if   e           k disk
+      *    Preliminary/final
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D set1            c                   'SET1  '
+     D edit1           c                   'EDIT1 '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Compile time array for SBMJOB used in QCMDEXC
+      *---------------------------------------------------------------
+     D cmd             s              1    dim(80) ctdata perrcd(80)
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D pgm             s             10
+     D msgfl           s             10
+     D routne          s              6
+     D maxmsg          s              2  0  inz(20)
+     D rtncd           s              2
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               d   datfmt(*iso)
+     D wkmdydt         s               d   datfmt(*mdy)
+     D wkmdy           s              6  0
+     D wkwedt          s              8  0
+      *
+      *
+      * Parm fields
+      *
+     D xxfzfl          s                   like(d1fzfl)
+     D xxpfcd          s                    like(pfpfcd)
+     D xxpfds          s                    like(pfpfds)
+      *
+     D xxsatdt         s              8  0
+     D xxdt            s              8  0
+     D xxyr            s              4  0
+     D xxpe            s              2  0
+     D xxwk            s              2  0
+     D xxwedt          s              8  0
+      *
+      *  Parms for use with QCMDEXC.  'LENGTH' is the length of the
+      *  command that will be issued with QCMDEXC.  QCMDEXC requires
+      *  the field containing length to be defined as 15 with 5 decimal
+      *  positions.  The field 'CMDSBM' will hold the values of the
+      *  submit job command when passed as a parm on the call to
+      *  QCMDEXC.
+      *
+     D length          s             15  5 inz(80)
+     D cmdsbm          s             80
+      *
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('ROMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Data areas
+      *---------------------------------------------------------------
+      *
+      * In November 2008, we synch'd up the LDAs between TFS Margin Adjustment Close
+      * and Meat Costing because we seemed to be calling reports from both TFS and
+      * Meat Costing in both job streams. SO, be extremely careful with the LDA!!!
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwbdt                 8     15  0
+     D  ldwbsyn               16     22  0
+      *
+      * The Synon Date above was added for the Weekly Yield processing in January 2009.
+      * I added it here just to keep the LDAs in synch between Yield/Meat Costing/Margin
+      * Adjustment Close.
+      *
+     D  ldwedt                29     36  0
+     D  ldwesyn               37     43  0
+     D  ldwemdy               44     49  0
+      *
+     D  ldpe                  51     52  0
+     D  ldpbdt                53     60  0
+     D  ldpbmdy               61     66  0
+      *
+     D  ldpedt                67     74  0
+     D  ldpemdy               75     80  0
+      *
+     D  ldfzfl                81     81
+     D  ldcono                82     84  0
+      *
+     D  ldfwedt               85     92  0
+     D  ldfwemdy              93     98  0
+      *
+     D  ldtwedt               99    106  0
+     D  ldtwemdy             107    112  0
+      *
+     D  ldrpt                113    113
+     D  ldrptds              114    133
+      *
+     D  ldwpfl               134    134
+     D  lddsfl               135    135
+     D  ldmixfl              136    136
+     D  ldvolfl              137    137
+     D  ldsysfl              138    138
+      *
+     D  ldtfcgcd             139    140
+     D  ldtfcgds             141    155
+      *
+     D  ldtfclcd             156    158
+     D  ldtfclds             159    188
+      *
+     D  ldistycd             189    191  0
+     D  ldistyds             192    221
+      *
+     D  lditcd               222    228  0
+     D  lditds               229    258
+      *
+     D  ldpgcd               259    264
+     D  ldpgds               265    294
+      *
+     D  ldcgcd               295    298
+     D  ldplcd               299    304
+      *
+     D  ldpgm                386    395
+      *
+      * The next 4 positions were added for the Weekly Yield reports in January 2009.
+      * They are added here because we have to keep the Yield/Meat Costing/Margin Close
+      * LDAs in synch.
+      *
+     D  lddtl                397    397
+     D  ldsum                398    398
+     D  ldcap                399    399
+     D  ldprimby             400    400
+      *
+     D  ldoutq               401    410
+     D  ldhold               411    414
+     D  ldsave               415    418
+     D  ldcopy               419    419  0
+      *
+      *---------------------------------------------------------------
+      *  Definition for external data area 'DAROCALC'
+      *---------------------------------------------------------------
+     D
+     D darocalc        ds                  dtaara(darocalc)
+     D  dafl                   1      1
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+     C
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off                                         Main do loop
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     edit1         $edit1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo                                                  Main do loop
+      /EJECT
+      *----------------------------------------------------------------
+      * Set environment for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $set1         begsr
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Perform operator I/O for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $scrn1        begsr
+      *
+      * Write the error messages from the error arrays to the error
+      * message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * Write screen 1 to CRT.
+      *
+     C                   write     ro410k1
+     C                   write     ro410ec
+     C                   exfmt     ro410r1
+      *
+      * Clear the messages from the message data structures and
+      * program message queue
+      *
+     C                   exsr      $clmsg
+      *
+      * Get user's entry and set next routine
+      *
+     C                   select
+     C                   when      *in03 = *on                                  F3-exit
+     C                   eval      routne = exit
+      *
+     C                   when      *in04 = *on                                  F4-prompt
+     C                   exsr      $f4s1
+     C                   eval      routne = scrn1
+      *
+      *
+     C                   when      *in20 = *on                                  F20-wrksplf
+     C                   call      'QEZOUTPT'                                       API
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in17 = *on                                  F17-print options
+     C                   call      'RO890'
+     C                   eval      routne = scrn1
+     C                   other
+      *
+     C                   eval      routne = edit1
+     C                   endsl
+      *
+      * Bring in the LDA to pick up any printer changes the user may
+      * have made from called programs
+      *
+     C                   in        lda
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Edit screen 1 input fields
+      *----------------------------------------------------------------
+      *
+     C     $edit1        begsr
+      *
+      * Validate required fields:
+      *   1) preliminary/final flag
+      *   2) include Frozen Product (yes/no flag)
+      *
+     C                   exsr      $pfcd
+     C                   exsr      $fzfl
+      *
+      *
+      * Validate that no "calc" has already been submitted.
+      *
+     C                   in        darocalc
+     C                   if        darocalc <> *blank
+     C                   add       1             error
+     C                   movel     'RO09999'     mgid(e)
+     C                   endif
+      *
+      * If there are no errors, execute the subroutine to submit the report.
+      *
+     C                   if        error = 0 and *in08 = *on                    If no error
+     C                   exsr      $proc1
+     C                   endif                                                  If no error
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate Preliminary/Final
+      *---------------------------------------------------------------
+      *
+      * Validations:
+      *  1) required
+      *
+     C     $pfcd         begsr
+      *
+     C                   move      *blank        d1pfds
+      *
+     C                   select
+     C                   when      d1pfcd = *blank
+     C                   seton                                        32
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'RO09001'     mgid(e)
+     C                   endif
+     C                   other
+      *
+     C     d1pfcd        chain     rop003                             92
+     C                   if        *in92 = *off                                 If ok
+     C                   move      pfpfds        d1pfds
+     C                   else
+      *
+     C                   seton                                        32
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'RO00106'     mgid(e)
+     C                   endif
+     C                   endif                                                  If OK
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Validate "include frozen product" flag
+      *----------------------------------------------------------------
+      *
+     C     $fzfl         begsr
+      *
+     C                   select
+     C                   when      d1fzfl = yes or d1fzfl = no
+     C                   other
+      *
+     C                   seton                                        31
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'RO09106'
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Retrieve Week-ending date
+      *----------------------------------------------------------------
+      *
+     C     $wedt         begsr
+      *
+      * The date being passed into this program will already be a "Saturday" date.
+      * But, just call the generic program to retrieve the Year/Period/Week for
+      * the screen.
+     C                   call      'RO811'
+     C                   parm      xxwedt        xxdt
+     C                   parm      0             xxsatdt
+     C                   parm      0             xxyr
+     C                   parm      0             xxpe
+     C                   parm      0             xxwk
+      *
+     C     *iso          test(d)                 xxsatdt                92
+     C                   if        *in92 = *off                                 If good date
+     C                   z-add     xxsatdt       wkwedt
+     C     *iso          move      xxsatdt       wkmdydt
+     C                   move      wkmdydt       wkmdy
+     C                   z-add     wkmdy         d1wemdy
+     C                   z-add     xxyr          d1yr
+     C                   z-add     xxwk          d1wk
+     C                   z-add     xxpe          d1pe
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * F4 prompt on screen 1
+      *----------------------------------------------------------------
+      *
+     C     $f4s1         begsr
+      *
+     C                   select
+     C                   when      fld = 'D1PFCD'
+     C                   call      'RO500'
+     C                   parm      *blank        xxpfcd
+     C                   parm      *blank        xxpfds
+     C                   seton                                        52
+     C                   if        xxpfcd <> *blank
+     C                   movel     xxpfcd        d1pfcd
+     C                   movel     xxpfds        d1pfds
+     C                   endif
+      *
+     C                   when      fld = 'D1FZFL'
+     C                   call      'HP522'
+     C                   parm      *blank        xxfzfl
+     C                   seton                                        51
+     C                   if        xxfzfl <> *blank
+     C                   movel     xxfzfl        d1fzfl
+     C                   endif
+     C                   other
+      *
+      * F4 not valid for this field, so issue message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'RO09011'
+     C                   endif
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Process user's request
+      *---------------------------------------------------------------
+      *
+      * This subroutine is only executed if the user submits the listing
+      *
+     C     $proc1        begsr
+      *
+      * Bring in the data area that keeps multiple users (or one spacey user) from
+      * making multiple submissions of this "freeze". Update the area to indicate
+      * that there has been submission and put the data area back out.
+      *
+     C     *lock         in        darocalc
+     C                   move      yes           dafl
+     C                   out       darocalc
+      *
+      * Move submission values into LDA
+      *
+     C                   move      d1pfcd        ldpfcd
+     C                   move      d1fzfl        ldfzfl
+     C                   z-add     d1cono        ldcono
+     C                   z-add     d1wemdy       ldwemdy
+     C                   z-add     d1wemdy       ldfwemdy
+     C                   z-add     d1wemdy       ldtwemdy
+     C                   z-add     d1yr          ldyr
+     C                   z-add     d1wk          ldwk
+      *
+      * Get Week-ending date into Synon format.
+      *
+     C                   z-add     wkwedt        ldwedt
+     C                   z-add     wkwedt        ldfwedt
+     C                   z-add     wkwedt        ldtwedt
+     C     *iso          move      ldwedt        wkisodate
+     C     *cymd         move      wkisodate     ldwesyn
+      *
+      * Populate some of the LDA fields that will be used by other programs/reports in
+      * the job stream.
+     C                   move      'S'           lddsfl
+      *
+     C                   out       lda
+      *
+      * Move the 80-character compile time array 'CMD' to an
+      * 80-character field for passing as a parm with QCMDEXC.
+      *
+     C                   movea     cmd           cmdsbm
+     C                   call      'QCMDEXC'
+     C                   parm                    cmdsbm
+     C                   parm                    length
+      *
+      * Issue the standard request submission message
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'RO09003'
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Seton last record and end job
+      *---------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        LR
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *
+     C     *entry        plist
+     C                   parm                    d1cono
+     C                   parm                    d1wemdy
+     C                   parm                    xxwedt
+     C                   parm                    rtncd
+      *
+      * Key lists
+      *    None
+      *
+      * Retrieve/initialize "printer" fields in the LDA
+      *
+     C                   call      'RO891CL'
+     C                   in        lda
+      *
+      * Initialize LDA fields
+      *
+     C                   z-add     0             ldyr
+     C                   z-add     0             ldwk
+     C                   z-add     0             ldwbdt
+     C                   z-add     0             ldwbsyn
+     C                   z-add     0             ldwedt
+     C                   z-add     0             ldwesyn
+     C                   z-add     0             ldwemdy
+     C                   z-add     0             ldpe
+     C                   z-add     0             ldpedt
+     C                   z-add     0             ldpemdy
+     C                   z-add     0             ldpbdt
+     C                   z-add     0             ldpbmdy
+      *
+     C                   move      *blank        ldfzfl
+     C                   z-add     0             ldcono
+      *
+     C                   z-add     0             ldfwedt
+     C                   z-add     0             ldfwemdy
+     C                   z-add     0             ldtwedt
+     C                   z-add     0             ldtwemdy
+      *
+     C                   move      *blank        ldrpt
+     C                   move      *blank        ldrptds
+      *
+     C                   move      *blank        ldwpfl
+     C                   move      *blank        lddsfl
+     C                   move      *blank        ldmixfl
+     C                   move      *blank        ldvolfl
+     C                   move      *blank        ldsysfl
+      *
+     C                   move      *blank        ldtfcgcd
+     C                   move      *blank        ldtfcgds
+     C                   move      *blank        ldtfclcd
+     C                   move      *blank        ldtfclds
+     C                   z-add     0             ldistycd
+     C                   move      *blank        ldistyds
+     C                   z-add     0             lditcd
+     C                   move      *blank        lditds
+      *
+     C                   move      *blank        ldpgcd
+     C                   move      *blank        ldpgds
+      *
+     C                   move      *blank        ldcgcd
+     C                   move      *blank        ldplcd
+     C                   move      *blank        ldpgm
+      *
+     C                   move      *blank        lddtl
+     C                   move      *blank        ldsum
+     C                   move      *blank        ldcap
+     C                   move      *blank        ldprimby
+      *
+     C                   out       lda
+      *
+      * Get Year/Period/Week for the incoming week-ending date
+      *
+     C                   exsr      $wedt
+      *
+      * Set screen defaults.
+      *
+     C                   move      'P'           d1pfcd
+     C                   move      yes           d1fzfl
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+     C                   endsr
+      /EJECT
+      *****************************************************************
+      * COMPILE TIME ARRAY 'CMD' USED IN QCMDEXC
+      *****************************************************************
+** CMD table 'CMD' submits listing when F8 selected
+SBMJOB CMD(CALL PGM(RO410CL) PARM(' ')) JOB(MEATCOST) JOBQ(*JOBD)

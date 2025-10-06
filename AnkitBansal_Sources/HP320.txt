@@ -1,0 +1,1196 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP320 - CLOSING PERIOD ERROR LISTING/MOVEMENT
+      *                      WORKFILE
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     07/15/94
+      *
+      * FUNCTION: CLOSING A PERIOD IS AN "ALL OR NOTHING" ENDEAVOR FOR
+      *           ALL BUSINESS OFFICES. SO, THIS PROGRAM DOES A
+      *           FRONT-END EDIT IN THE FOLLOWING AREAS:
+      *
+      *                    EXPENSE TICKETS
+      *                    FEED TICKETS
+      *                    MOVEMENTS
+      *                    DISPOSED HOG GROUPS (CONDITIONAL)
+      *
+      *           A REPORT OF ERROR MESSAGES IS GENERATED FOR EACH OF
+      *           THESE AREAS.
+      *
+      *           IF THIS PROGRAM FINDS ANY ERRORS, AN LDA ERROR FLAG
+      *           IS SET AND THE PERIOD CLOSED FUNCTION IS TERMINATED.
+      *
+      *           THIS PROGRAM ALSO BUILDS ONE WORKFILE (HSP320)
+      *           CONTAINING THE MOVEMENT NUMBERS OF THE MOVEMENTS THAT
+      *           WILL BE POSTED IN THE PERIOD CLOSE.
+      *
+      *  ERROR MESSAGES
+      *
+      *           ERROR MESSAGES ARE PRINTED FOR EACH RECORD THAT
+      *           WILL PREVENT THE PERIOD FROM BEING CLOSED.
+      *           THE MESSAGES ARE RETRIEVED THROUGH A
+      *           CALL TO CLP UT80046 USING THE SAME USER MESSAGE
+      *           FILE, ARRAYS AND ARRAY LOGIC AS IN THE INTERACTIVE
+      *           PROGRAMS.  HOWEVER, THEY ARE PRINTED FROM THE CL
+      *           USING THE COMMAND 'CLPRINT' THAT WAS CREATED BY
+      *           ERNIE WALLACE.
+      *
+      *           QPRINT IS USED FOR THE OUTPUT FILE SINCE THE
+      *           COMMAND 'CLPRINT' PRINTS TO QPRINT.
+      *           QPRINT IS OVERRIDDEN IN THE SUBMISSION CLP
+      *           TO 'SHARE = YES' TO ALLOW BOTH THIS RPG PROGRAM AND
+      *           CLP UT80046 TO WRITE TO THE SAME PRINT FILE.
+      *
+      *           SINCE THE 'CLPRINT' COMMAND LOGIC IN UT80046 IS NOT
+      *           BEING USED TO PRINT HEADINGS, COUNT LINES OR PAGE
+      *           BREAK, THESE FUNCTIONS ARE CONTROLLED FROM THIS RPG
+      *           PROGRAM BY COUNTING THE LINES.
+      /EJECT
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/15/00  LeAnne Fedor
+      *           Two fields (production phase, group status) were added to the
+      *           period cost field. Added logic to populate fields in file.
+      *
+      * 12/27/00  LeAnne Fedor
+      *           Two new sets of fields were added: transfer costs and costs of sales.
+      *           Added logic to populate fields.
+      *
+      * 07/22/02  LeAnne Fedor
+      *           In preparation for allowing groups on a single farm to have different
+      *           production phases, we changed the logic to populate 'production phase'
+      *           from the group instead of the farm.
+      *
+      * 04/23/03  LeAnne Fedor
+      *           Took out all reference to costing and HSP055 and HSP086. Also, this edit
+      *           is now called twice in the EOP function:
+      *
+      *            a) the first pass is done at the start of the EOP CL. If there are any
+      *               errors, the EOP function is terminated prior to costing movements and
+      *               closing groups. The edits that check for 'disposed' groups are not
+      *               executed during this first pass since the groups are still in a
+      *               'disposed' state....not yet in a 'closed' state.
+      *
+      *            b) the last pass is done after costing and closing groups...just before
+      *               the 'period' close. The 'disposed' groups edits are executed in this pass
+      *               WHEN the period close has been submitted as a FINAL close. (If the
+      *               run is an EDIT run...not a FINAL run...the groups are still in a
+      *               'disposed' state....not yet in a 'closed' state.)
+      *
+      * 05/18/04  LeAnne Fedor
+      *           The users can now generate this report on-demand with a cut-off date.
+      *           For the on-demand version, Alice had us skip all FEED edits.
+      *
+      * 04/23/09  LeAnne Ramsey
+      *           Recompile only. Costed Time/User added to Feed Ticket Header.
+      *
+      * 05/12/09  LeAnne Ramsey
+      *           Recompile only. PickUp Ticket Type added to Feed Ticket Header.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 09/21/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Upload Date' to Feed Ticket Header.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      * 04/01/16  Barb Gutierrez(T5449)
+      *           When reading the transfer movement file (hsp074) we could
+      *           now have the origin farm in one period and the destination
+      *           farm in another period since we have multiple companies.
+      *           Need to verify prior period on both sides before erring out.
+      * 08/09/16  Barb Gutierrez(e5752)
+      *           Recompile only.
+      * 08/21/19  Brad Baden    E14955
+      *           Add logic to check if the Ship Date and the Receive
+      *           Date are zero when processing a Transfer.  If the
+      *           current record has zero dates, then write a Not
+      *           Shipped line to the report.
+      *
+      * 03/26/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 01/21/21  ISE           TSN593
+      *           Replaced *loval with *start
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSP006    IF   E           K DISK
+      *    REPORT CODE
+      *
+      *
+     FHSP018    IF   E           K DISK
+      *    FARM SITE
+      *
+      *
+     FHSP0071   IF   E           K DISK
+      *    Company Control   (key: company)
+      *
+      *
+     FHSL034D   IF   E           K DISK    RENAME(HGREC:HGRECD)
+      *    HOG GROUP
+      *
+      *
+     FHSL034G   IF   E           K DISK
+      *    HOG GROUP  (Records selected/keyed in OPNQRY)
+      *
+      *
+     FHSP037    IF   E           K DISK
+      *    FEED TICKET HEADER  (Records selected/keyed in OPNQRY)
+      *
+      *
+     FHSP038    IF   E           K DISK
+      *    FEED TICKET DETAIL
+      *
+      *
+     FHSP048    IF   E           K DISK
+      *    EXPENSE TICKET  (Records selected/keyed in OPNQRY)
+      *
+      *
+     FHSP052    IF   E           K DISK
+      *    EXPENSE CODES
+      *
+      *
+     FHSP058    IF   E           K DISK
+      *    MOVEMENT EVENT  (Records selected/keyed in OPNQRY)
+      *
+      *
+     FHSP068    IF   E           K DISK
+      *  KILLED/DEAD HOGS
+      *
+      *
+     FHSP069    IF   E           K DISK
+      *  INVENTORY ADJUSTMENTS
+      *
+      *
+     FHSP074    IF   E           K DISK
+      *  TRANSFER HEADER
+      *
+      *
+     FHSP075    IF   E           K DISK
+      *  TRANSFER DETAIL
+      *
+      *
+     FHSP084    IF   E           K DISK
+      *    SALES MOVEMENT HEADER
+      *
+      *
+     FHSP320    O    E           K DISK
+      *    MOVEMENT WORKFILE
+      *
+      *
+     FQPRINT    O    F  132        PRINTER OFLIND(*INOF)
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * STANDARD ERROR MESSAGE HANDLING DATA STRUCTURES
+      *---------------------------------------------------------------
+      *
+      * FOR ERROR MESSAGE HANDLING, A PACKED INDEX (E) IS REQUIRED.
+      * FOR PROGRAM READABILITY, DEFINE A CORRESPONDING ERROR COUNT
+      * FIELD CALLED 'ERROR'
+      *
+     D                 DS                  INZ
+     D  ERROR                  1      2P 0
+     D  E                      1      2P 0
+      *
+      * THIS DATA STRUCTURE SUPPLIES THE NAME OF THE MESSAGE FILE TO
+      * THE MESSAGE HANDLING CL PROGRAM.  THE FIELD NAME MSGFIL MUST BE
+      * CONSTANT. THE VALUE IN QUOTES IS THE NAME OF THE SPECIFIC
+      * MESSAGE FILE CONTAINING THE USER DEFINED MESSAGES.
+      *
+     D                 DS                  INZ
+     D  MSGFIL                 1     10    INZ('HSMSGF    ')
+      *
+      * THE FOLLOWING 3 DATA STRUCTURES ARE USED TO SPEED MESSAGE
+      * HANDLING SINCE IT IS FASTER TO CLEAR DATA STRUCTURES THAN
+      * ARRAYS.  EACH IS ASSOCIATED WITH A STANDARD MESSAGE ARRAY.
+      *
+     D MGI             DS           140    INZ
+     D  MGID                   1    140
+     D                                     DIM(20)                              MSG ID ARRAY
+      *
+     D MGD             DS          1000    INZ
+     D  MGDT                   1   1000
+     D                                     DIM(20)                              MSG PARMS
+      *
+     D MGWK            DS            50    INZ
+     D  MGW                    1     50
+     D                                     DIM(50)                              MSG WORK PARMS
+      *
+      *---------------------------------------------------------------
+      *  LOCAL DATA AREA
+      *---------------------------------------------------------------
+      *
+     D                UDS
+     D  LDBPDT                 1     08  0
+     D  LDEPDT                 9     16  0
+     D  LDPER                 17     18  0
+     D  LDEFFL                19     19
+     D  LDCCYY                20     23  0
+     D  LDBMDY                60     66  0
+     D  LDEMDY                70     76  0
+     D  LDERFL                80     80
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+      *
+     D WKEXP           C                   CONST('EXPENSE TICKETS')
+     D WKFEED          C                   CONST('FEED TICKETS   ')
+     D WKMOVE          C                   CONST('MOVEMENTS      ')
+     D WKHOG           C                   CONST('DISPOSED GROUPS')
+      *
+     D WKDEAD          C                   CONST('DAILY DEAD')
+     D WKADJ           C                   CONST('ADJUSTMENT')
+     D WKSALE          C                   CONST('SALE      ')
+     D WKTRAN          C                   CONST('TRANSFER  ')
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+     D orgpp           s              1
+     D dstpp           s              1
+      *
+      * Print fields
+      *
+     D hdversion       s              9
+     D noerrormsg      s            100
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      *  DATE FORMAT DATA STRUCTURES
+      *---------------------------------------------------------------
+      *
+      * DATE IN MMDDYY FORMAT
+      *
+     D                 DS
+     D  WKMDY                  1      6  0
+     D  WKMM                   1      2  0
+     D  WKDD                   3      4  0
+     D  WKYY                   5      6  0
+      * DATE IN CCYYMMDD FORMAT
+      *
+     D                 DS
+     D  WKCYMD                 1      8  0
+     D  WKCEN                  1      2  0
+     D  WKYER                  3      4  0
+     D  WKMON                  5      6  0
+     D  WKDAY                  7      8  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+      *
+      * EDIT ALL PERIOD DATA IN THE FOLLOWING AREAS:
+      *
+      * EXPENSE TICKETS
+      *
+     C                   MOVEL     YES           FIRST
+     C                   MOVEL     WKEXP         WKCAT
+     C                   EXSR      $EXP
+      *
+      * FEED TICKETS
+     C                   if        ldeffl = 'D'
+     C                   else
+     C                   MOVEL     YES           FIRST
+     C                   MOVEL     WKFEED        WKCAT
+     C                   EXSR      $FEED
+     C                   endif
+      *
+      * MOVEMENTS
+     C                   MOVEL     YES           FIRST
+     C                   MOVEL     WKMOVE        WKCAT
+     C                   EXSR      $MOVES
+      *
+      * DISPOSED HOG GROUPS
+      *   (Only do this when this is the 'last' pass and the run is a 'final' run)
+      *
+     C                   if        xxpass = 'L' and ldeffl = 'F'
+     C                   MOVEL     YES           FIRST
+     C                   MOVEL     WKHOG         WKCAT
+     C                   EXSR      $DSGRP
+     C                   ENDIF
+      *
+      *
+      *----------------------------------------------------------------
+      * EOF PROCESSING
+      *----------------------------------------------------------------
+      *
+      * IF NO ERRORS WERE ENCOUNTERED IN THE DATA, THEN PRINT
+      *     AN INFORMATIONAL MESSAGE THAT NO ERRORS WERE ENCOUNTERED
+      * OTHERWISE, SET UP THE ERROR PARM AND LDA TO SHOW ERRORS.
+      *
+     C     WKERR         IFEQ      NO                                           IF NO ERR
+      *
+     C                   select
+      * First pass
+     C                   when      xxpass = 'F'
+     C                   eval      noerrormsg = 'No errors were found in the +
+     C                             pre-costing/pre-group closing pass.'
+      * Last pass
+     C                   when      xxpass = 'L'
+     C                   eval      noerrormsg = 'No errors were found in the +
+     C                             post-costing/post-group-closing pass.'
+     C                   endsl
+      *
+     C                   EXCEPT    NOERR
+     C                   ELSE
+     C                   MOVEL     YES           XXERROR
+     C                   MOVEL     YES           LDERFL
+     C                   ENDIF                                                  IF NO ERR
+      *
+     C                   SETON                                        LR
+      /EJECT
+      *---------------------------------------------------------------
+      * EDIT EXPENSE TICKETS
+      *---------------------------------------------------------------
+      *
+     C     $EXP          BEGSR
+      *
+593  C*    *LOVAL        SETLL     HSP048
+593  C     *START        SETLL     HSP048
+      *
+     C     *IN90         DOUEQ     *ON                                          DO EXPENSE
+     C                   READ      HSP048                                 90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+      *
+      * CHECK STATUS
+      *
+     C     XTXSCD        IFEQ      *BLANK                                       IF BAD STAT
+     C     XTXSCD        OREQ      'PP'
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00420'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     XTXTSN        XXXTSN
+     C                   MOVEA     XXXTSN        MGW(1)
+     C                   MOVEA     XTBOBO        MGW(8)
+     C                   MOVEA     XTXSCD        MGW(13)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+      *
+     C     ERROR         IFEQ      20
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+     C                   ENDIF                                                  IF BAD STAT
+      *
+      * MAKE SURE THE RECORD DOES NOT NEED "TO BE ALLOCATED"
+      *
+     C     XTALFL        IFEQ      'T'                                          IF ALLOCATE
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00421'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     XTXTSN        XXXTSN
+     C                   MOVEA     XXXTSN        MGW(1)
+     C                   MOVEA     XTBOBO        MGW(8)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+      *
+     C     ERROR         IFEQ      20
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+     C                   ENDIF                                                  IF ALLOCATE
+      *
+      * MAKE SURE THE EXPENSE CODE STILL EXISTS
+      *
+     C     XTEXCD        CHAIN     HSP052                             92
+     C     *IN92         IFEQ      *ON                                          IF BAD EXP
+      *
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00422'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     XTXTSN        XXXTSN
+     C                   MOVEA     XTEXCD        MGW(1)
+     C                   MOVEA     XXXTSN        MGW(6)
+     C                   MOVEA     XTBOBO        MGW(13)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+      *
+     C     ERROR         IFEQ      20
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+     C                   ENDIF                                                  IF BAD EXP
+      *
+      * MAKE SURE THE REPORT CODE STILL EXISTS
+      *
+     C     XTRPCD        CHAIN     HSP006                             92
+     C     *IN92         IFEQ      *ON                                          IF BAD CODE
+      *
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00423'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     XTXTSN        XXXTSN
+     C                   MOVEA     XTRPCD        MGW(1)
+     C                   MOVEA     XXXTSN        MGW(6)
+     C                   MOVEA     XTBOBO        MGW(13)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+      *
+     C     ERROR         IFEQ      20
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+     C                   ENDIF                                                  IF BAD CODE
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO EXPENSE
+      *
+      * PRINT ANY REMAINING ERROR MESSAGES
+      *
+     C     ERROR         IFNE      0
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * EDIT FEED TICKETS
+      *---------------------------------------------------------------
+      *
+     C     $FEED         BEGSR
+      *
+593  C*    *LOVAL        SETLL     HSP037
+593  C     *START        SETLL     HSP037
+      *
+     C     *IN90         DOUEQ     *ON                                          DO FEED
+     C                   READ      HSP037                                 90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+      *
+      * CHECK STATUS
+      *
+     C     FHTSCD        IFEQ      *BLANK                                       IF BAD STAT
+     C     FHTSCD        OREQ      'EN'
+     C     FHTSCD        OREQ      'RC'
+     C     FHTSCD        OREQ      'PP'
+      *
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00306'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     FHTKNO        XXTKNO
+     C                   MOVEA     XXTKNO        MGW(1)
+     C                   MOVEA     FHFMBO        MGW(10)
+     C                   MOVEA     FHTSCD        MGW(15)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+      *
+     C     ERROR         IFEQ      20
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+     C                   ENDIF                                                  IF BAD STAT
+      *
+      * DETERMINE THAT NO DETAIL FEED RECORDS FOR THIS TICKET
+      * NEED TO BE ALLOCATED.
+      *
+     C                   EXSR      $FEEDD
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO FEED
+      *
+      * PRINT ANY REMAINING ERROR MESSAGES
+      *
+     C     ERROR         IFNE      0
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * EDIT FEED DETAIL
+      *---------------------------------------------------------------
+      *
+      * THIS SUBROUTINE CHECKS THAT NO FEED DETAIL RECORD FOR A
+      * FEED TICKET STILL NEEDS TO BE ALLOCATED.
+      *
+     C     $FEEDD        BEGSR
+      *
+     C     key01         SETLL     HSP038
+      *
+     C     *IN91         DOUEQ     *ON                                          DO DETAIL
+     C     key01         READE     HSP038                                 91
+     C     *IN91         IFEQ      *OFF                                         IF TO BE
+     C     FDALFL        ANDEQ     'T'
+      *
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00307'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     FHTKNO        XXTKNO
+     C                   MOVEA     XXTKNO        MGW(1)
+     C                   MOVEA     FHFMBO        MGW(10)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+      *
+     C     ERROR         IFEQ      20
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+      *
+     C                   ENDIF                                                  IF TO BE
+     C                   ENDDO                                                  DO DETAIL
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * CHECK THE STATUS OF ALL MOVEMENTS
+      *---------------------------------------------------------------
+      *
+     C     $MOVES        BEGSR
+      *
+      * PROCESS EACH MOVEMENT IN THE MOVEMENT EVENT FILE. ONLY EDIT
+      * A MOVEMENT ONCE--EVEN THOUGH IT MAY HAVE MULTIPLE ENTRIES IN
+      * THE FILE. (AN OPEN QUERY IS USED TO SELECT RECORDS BY DATE)
+      *
+     C     *IN90         DOUEQ     *ON                                          DO EVENTS
+     C                   READ      HSP058                                 90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C                   MOVEL     NO            WKBAD
+      *
+      * COMPARE THE OPEN DATE OF ALL 'ORIGIN' GROUPS
+      * TO THE MOVEMENT EVENT DATE. ISSUE AN ERROR MESSAGE
+      * IF THE MOVEMENT OCCURRED PRIOR TO THE OPENING OF THE
+      * GROUP.  (THIS IS A CLEAN-UP PROCEDURE REQUIRED BECAUSE
+      * THE TRANSFER FUNCTION LOGIC CHANGES A GROUP'S OPEN
+      * DATE BEHIND THE SCENES.) ONLY ISSUE ONE MESSAGE PER
+      * ORIGIN GROUP PER MOVEMENT.
+      *
+     C     MEODFL        IFEQ      'O'                                          IF ORIGIN
+     C     MEMVSN        IFNE      SVMVSN                                       IF DIFF
+     C     MEHGSN        ORNE      SVHGSN
+     C     MEHGSN        CHAIN     HSL034D                            92
+     C                   Z-ADD     MEHGSN        SVHGSN
+      *
+     C     *IN92         IFEQ      *OFF                                         IF FOUND
+     C     MEMEDT        ANDLT     HGOPDT
+     C                   MOVEL     YES           WKBAD
+      *
+     C                   SELECT
+     C     MEMTCD        WHENEQ    'T'
+     C                   MOVEL     WKTRAN        WKTYPE
+     C     MEMTCD        WHENEQ    'S'
+     C                   MOVEL     WKSALE        WKTYPE
+     C     MEMTCD        WHENEQ    'A'
+     C                   MOVEL     WKADJ         WKTYPE
+     C     MEMTCD        WHENEQ    'D'
+     C                   MOVEL     WKDEAD        WKTYPE
+     C                   ENDSL
+      *
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00699'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     WKTYPE        MGW(1)
+     C                   MOVEL     MEMVSN        XXMVSN
+     C                   MOVEA     XXMVSN        MGW(11)
+     C                   MOVEA     HGHGCD        MGW(18)
+     C                   MOVEL     HGFSCD        XXFSCD
+     C                   MOVEA     XXFSCD        MGW(25)
+      *
+      * FLIP EVENT DATE
+     C                   Z-ADD     MEMEDT        WKCYMD
+     C                   EXSR      $TOMDY
+     C                   MOVEL     WKMDY         XXMDY
+     C                   MOVEA     XXMDY         MGW(30)
+      * FLIP OPEN DATE
+     C                   Z-ADD     HGOPDT        WKCYMD
+     C                   EXSR      $TOMDY
+     C                   MOVEL     WKMDY         XXMDY
+     C                   MOVEA     XXMDY         MGW(36)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF                                                  IF ERROR
+      *
+     C                   ENDIF                                                  IF FOUND
+     C                   ENDIF                                                  IF DIFF
+     C                   ENDIF                                                  IF ORIGIN
+      *
+      *----------------------------------------------------
+      * ONLY EDIT A MOVEMENT ONCE
+      *
+     C     MEMVSN        IFEQ      SVMVSN                                       IF SAME MOVE
+     C                   ELSE
+      *
+     C                   Z-ADD     MEMVSN        SVMVSN
+      *
+      * TRANSFERS
+     C                   SELECT
+     C     MEMTCD        WHENEQ    'T'
+     C     MEMVSN        CHAIN     HSP074                             92
+     C     *IN92         IFEQ      *OFF                                         IF TRAN HDR
+      *
+     C                   SELECT
+      *
+      * When orgin and destination farms are equal and the movement status
+      * status code is blank, SC or PP....Error
+      *
+     C     mhorfs        WHENEQ    mhdnfs                                       orig frm = dest frm
+     C     MHMSCD        IFEQ      *BLANK
+     C     MHMSCD        OREQ      'SC'
+     C     MHMSCD        OREQ      'PP'
+     C                   MOVEL     WKTRAN        WKTYPE
+     C                   MOVEL     YES           WKBAD
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00697'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     MEMVSN        XXMVSN
+     C                   MOVEA     XXMVSN        MGW(1)
+     C                   MOVEA     MHORBO        MGW(8)
+     C                   MOVEA     WKTYPE        MGW(13)
+     C                   MOVEL     MHORFS        XXFSCD
+     C                   MOVEA     XXFSCD        MGW(23)
+     C                   MOVEA     MHMSCD        MGW(28)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF                                                  IF ERROR
+     C                   ENDIF
+      *
+      * When orgin and destination farms are different
+      *
+     C     mhorfs        WHENNE    mhdnfs                                       orig frm <> dest frm
+      *
+      * Determine which company the originating farm belongs to ...
+      *
+     C     mhorfs        CHAIN     HSP018                             92
+     C     *IN92         IFEQ      *OFF                                         if farm exists
+      *
+      * Determine if company is in current period or not.
+      *
+     C     fscocd        CHAIN     HSP0071                            93
+     C     *IN93         IFEQ      *OFF                                         determine co period
+      *
+      * Determine if movement event date is in prior period or not.
+      *
+     C     memedt        iflt      ccbpdt                                       beg curr period dt
+     C                   MOVE      yes           orgpp
+     C                   else
+     C                   MOVE      no            orgpp
+     C                   endif                                                  beg curr period dt
+     C                   endif                                                  determine co period
+     C                   endif                                                  farm exists
+      *
+      * Determine which company the destination farm belongs to ...
+      *
+     C     mhdnfs        CHAIN     HSP018                             92
+     C     *IN92         IFEQ      *OFF                                         if farm exists
+      *
+      * Determine if company is in current period or not.
+      *
+     C     fscocd        CHAIN     HSP0071                            93
+     C     *IN93         IFEQ      *OFF                                         determine co period
+      *
+      * Determine if movement event date is in prior period or not.
+      *
+     C     memedt        iflt      ccbpdt                                       beg curr period dt
+     C                   MOVE      yes           dstpp
+     C                   else
+     C                   MOVE      no            dstpp
+     C                   endif                                                  beg curr period dt
+     C                   endif                                                  determine co period
+     C                   endif                                                  farm exists
+      *
+      * If both origin farm and destination farm are in prior period, or status
+      * is blank or scheduled.....
+      *
+     C     orgpp         ifeq      yes
+     C     dstpp         andeq     yes
+      *
+     C     MHMSCD        IFEQ      *BLANK
+     C     MHMSCD        OREQ      'SC'
+     C     MHMSCD        OREQ      'PP'
+     C                   MOVEL     WKTRAN        WKTYPE
+     C                   MOVEL     YES           WKBAD
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00697'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     MEMVSN        XXMVSN
+     C                   MOVEA     XXMVSN        MGW(1)
+     C                   MOVEA     MHORBO        MGW(8)
+     C                   MOVEA     WKTYPE        MGW(13)
+     C                   MOVEL     MHORFS        XXFSCD
+     C                   MOVEA     XXFSCD        MGW(23)
+     C                   MOVEA     MHMSCD        MGW(28)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF                                                  IF ERROR
+     C                   ENDIF
+      *
+     C                   ENDIF                                                  org & dest in pp
+     C                   ENDSL
+      *
+      ** Check for the ship date = 0 and receive date = 0
+     C                   if        mhshdt = 0 and mhrcdt = 0                    if mhshdt = 0
+     C                   movel     wktran        wktype
+     C                   movel     yes           wkbad
+     C     error         iflt      maxmsg
+     C                   add       1             error
+     C                   movel     'HS00786'     mgid(e)
+     C                   clear                   mgw
+     C                   movel     memvsn        xxmvsn
+     C                   movea     xxmvsn        mgw(1)
+     C                   movea     mhorbo        mgw(8)
+     C                   movea     wktype        mgw(13)
+     C                   movel     mhorfs        xxfscd
+     C                   movea     xxfscd        mgw(23)
+     C                   movea     mhmscd        mgw(28)
+     C                   movea     mgw           mgdt(e)
+     C                   endif                                                  fi error
+     C                   endif                                                  fi mhshdt = 0
+      *
+     C                   ENDIF                                                  IF TRAN HDR
+      * SALES
+      *
+     C     MEMTCD        WHENEQ    'S'
+     C     MEMVSN        CHAIN     HSP084                             92
+     C     *IN92         IFEQ      *OFF                                         IF SALE HDR
+     C     SHMSCD        ANDNE     'FP'
+     C                   MOVE      *BLANK        WKTYPE
+     C                   MOVEL     SHSTCD        WKTYPE
+     C                   MOVE      'SALE'        WKTYPE
+     C                   MOVEL     YES           WKBAD
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00697'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     MEMVSN        XXMVSN
+     C                   MOVEA     XXMVSN        MGW(1)
+     C                   MOVEA     SHFSBO        MGW(8)
+     C                   MOVEA     WKTYPE        MGW(13)
+     C                   MOVEL     SHFSCD        XXFSCD
+     C                   MOVEA     XXFSCD        MGW(23)
+     C                   MOVEA     SHMSCD        MGW(28)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF                                                  IF ERROR
+     C                   ENDIF                                                  IF SALE HDR
+      *
+      * ADJUSTMENTS
+      *
+     C     MEMTCD        WHENEQ    'A'
+     C     MEMVSN        CHAIN     HSP069                             92
+     C     *IN92         IFEQ      *OFF                                         IF ADJ
+     C     IAMSCD        ANDNE     'EN'
+     C                   MOVEL     WKADJ         WKTYPE
+     C                   MOVEL     YES           WKBAD
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00698'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     MEMVSN        XXMVSN
+     C                   MOVEA     XXMVSN        MGW(1)
+     C                   MOVEA     IAFSBO        MGW(8)
+     C                   MOVEA     WKTYPE        MGW(13)
+     C                   MOVEL     HGHGCD        MGW(23)
+     C                   MOVEL     IAFSCD        XXFSCD
+     C                   MOVEA     XXFSCD        MGW(30)
+     C                   MOVEA     IAMSCD        MGW(35)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF                                                  IF ERROR
+     C                   ENDIF                                                  IF ADJ
+      *
+      * DAILY DEAD MOVEMENTS
+      *
+     C     MEMTCD        WHENEQ    'D'
+     C     MEMVSN        CHAIN     HSP068                             92
+     C     *IN92         IFEQ      *OFF                                         IF DEAD
+     C     KDMSCD        ANDNE     'EN'
+     C                   MOVEL     WKDEAD        WKTYPE
+     C                   MOVEL     YES           WKBAD
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00698'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEL     MEMVSN        XXMVSN
+     C                   MOVEA     XXMVSN        MGW(1)
+     C                   MOVEA     KDFSBO        MGW(8)
+     C                   MOVEA     WKTYPE        MGW(13)
+     C                   MOVEL     HGHGCD        MGW(23)
+     C                   MOVEL     KDFSCD        XXFSCD
+     C                   MOVEA     XXFSCD        MGW(30)
+     C                   MOVEA     KDMSCD        MGW(35)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF                                                  IF ERROR
+     C                   ENDIF                                                  IF DEAD
+     C                   ENDSL
+      *
+     C     ERROR         IFEQ      20
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+      *
+      * IF THERE IS NO ERROR WITH THE MOVEMENT, WRITE A MOVEMENT
+      * RECORD TO THE WORKFILE.
+      *
+     C     WKBAD         IFEQ      NO
+     C                   Z-ADD     MEMVSN        WMMVSN
+     C                   MOVEL     MEMTCD        WMMTCD
+     C                   WRITE     WMREC
+     C                   ENDIF
+      *
+     C                   ENDIF                                                  IF SAME MOVE
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO EVENTS
+      *
+      * PRINT ANY REMAINING ERROR MESSAGES
+      *
+     C     ERROR         IFNE      0
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * CHECK FOR DISPOSED HOG GROUPS
+      *---------------------------------------------------------------
+      *
+      * AN OPNQRY IN HP477CL WAS USED TO SELECT OUT ONLY "DISPOSED"
+      * GROUPS WITH A DISPOSE DATE IN THIS PERIOD.  THEREFORE, ANY
+      * RECORD FOUND IN THE HOG GROUP MASTER FILE IS AN ERROR.
+      *
+     C     $DSGRP        BEGSR
+      *
+593  C*    *LOVAL        SETLL     HSL034G
+593  C     *START        SETLL     HSL034G
+      *
+     C     *IN90         DOUEQ     *ON                                          DO GROUPS
+     C                   READ      HSL034G                                90
+     C     *IN90         IFEQ      *OFF                                         IF RECORD
+      *
+     C     ERROR         IFLT      MAXMSG
+     C                   ADD       1             ERROR
+     C                   MOVEL     'HS00308'     MGID(E)
+     C                   CLEAR                   MGW
+     C                   MOVEA     HGHGCD        MGW(1)
+     C                   MOVE      HGFSCD        XXFSCD
+     C                   MOVEA     XXFSCD        MGW(8)
+     C                   MOVEA     HGFSBO        MGW(13)
+     C                   MOVEA     MGW           MGDT(E)
+     C                   ENDIF
+      *
+     C     ERROR         IFEQ      20
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+      *
+     C                   ENDIF                                                  IF RECORD
+     C                   ENDDO                                                  DO GROUPS
+      *
+      * PRINT ANY REMAINING ERROR MESSAGES
+      *
+     C     ERROR         IFNE      0
+     C                   EXSR      $WRMSG
+     C                   Z-ADD     0             ERROR
+     C                   EXSR      $CLMSG
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * SUBROUTINE TO PRINT REPORT HEADINGS
+      *---------------------------------------------------------------
+      *
+      * RESET THE CURRENT LINE TO ZERO
+      * PRINT THE HEADING LINE
+      * INCREMENT THE CURRENT LINE
+      *
+     C     $HDRPT        BEGSR
+      *
+     C                   Z-ADD     0             WKCURL
+     C                   EXCEPT    HDRPT
+     C                   ADD       5             WKCURL
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * SUBROUTINE TO PRINT THE CATEGORY HEADING
+      *---------------------------------------------------------------
+      *
+      *  PRINT CATEGORY HEADING AND INCREMENT LINE COUNTER
+      *
+     C     $HDCAT        BEGSR
+      *
+     C                   EXCEPT    HDCAT
+     C                   ADD       2             WKCURL
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * SUBROUTINE TO WRITE ERROR MESSAGES TO REPORT
+      *---------------------------------------------------------------
+      *
+     C     $WRMSG        BEGSR
+      *
+      * IF OVERFLOW, PRINT REPORT HEADINGS
+      *
+     C     WKCURL        IFGT      WKOVFL
+     C                   EXSR      $HDRPT
+     C     FIRST         IFEQ      NO
+     C                   EXSR      $HDCAT
+     C                   ENDIF
+     C                   ENDIF
+      *
+      * IF FIRST TIME THROUGH FOR A CATEGORY, PRINT CATEGORY HEADINGS
+      *
+     C     FIRST         IFEQ      YES
+     C                   EXCEPT    HDCAT
+     C                   MOVEL     NO            FIRST
+     C                   ENDIF
+      *
+      * PROGRAM UT80046 DOES NOT PRINT HEADINGS OR CHECK FOR PAGE
+      * BREAKS.  BEFORE CALLING UT80046, DETERMINE IF ALL THE ERROR
+      * MESSAGES CAN BE PRINTED ON THE CURRENT PAGE.
+      * CALCULATE REMAINING PRINT LINES ON PAGE USING THE OVERFLOW LINE
+      * AND THE CURRENT LINE.
+      *
+     C     WKOVFL        SUB       WKCURL        WKDIFL
+      *
+      * IF YOU HAVE MORE MESSAGES THAN WILL FIT ON THE PAGE, THEN
+      * PAGE BREAK AND PRINT HEADINGS.
+      *
+     C     ERROR         IFGT      WKDIFL
+     C                   EXSR      $HDRPT
+     C                   EXSR      $HDCAT
+     C                   ENDIF
+      *
+      * INCREMENT THE CURRENT LINE BY THE NUMBER OF ERROR MESSAGES
+      * YOU WILL BE PRINTING IN UT80046 PLUS ONE FOR THE SPACE AFTER.
+      * THIS SETS THE CURRENT LINE NUMBER PROPERLY FOR WHEN YOU
+      * RETURN FROM UT80046.
+      *
+     C     WKCURL        ADD       ERROR         WKCURL
+     C                   ADD       1             WKCURL
+      *
+     C                   CALL      'UT80046'                            43
+     C                   PARM                    MGID
+     C                   PARM                    MGDT
+     C                   PARM                    ERROR
+     C                   PARM      MSGFIL        MSGFL
+      *
+     C                   MOVEL     YES           WKERR
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * SUBROUTINE TO CLEAR MESSAGES
+      *----------------------------------------------------------------
+      *
+     C     $CLMSG        BEGSR
+      *
+     C                   CALL      'UT80046'                            43
+     C                   PARM      *BLANK        MGI
+     C                   PARM      *BLANK        MGD
+     C                   PARM      *ZERO         ERROR
+     C                   PARM      MSGFIL        MSGFL
+      *
+     C                   ENDSR
+      *
+      /EJECT
+      *---------------------------------------------------------------
+      * FLIP DATE FROM YYMMDD TO MMDDYY
+      *---------------------------------------------------------------
+      *
+     C     $TOMDY        BEGSR
+      *
+     C                   Z-ADD     WKMON         WKMM
+     C                   Z-ADD     WKDAY         WKDD
+     C                   Z-ADD     WKYER         WKYY
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * INITIALIZATION SUBROUTINE
+      *---------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      * Parm lists
+      *
+     C     *entry        plist
+     C                   parm                    xxerror           1
+     C                   parm                    xxpass            1
+      *
+      *
+      * Key lists
+      *
+     C     key01         KLIST
+     C                   KFLD                    FHFMBO
+     C                   KFLD                    FHTKNO
+     C                   KFLD                    FHTRCD
+      *
+      *
+      * DEFINE SAVE FIELDS
+      *
+     C     *LIKE         DEFINE    MEMVSN        SVMVSN
+     C     *LIKE         DEFINE    MEHGSN        SVHGSN
+      *
+      *
+      * DEFINE WORK FIELDS FOR PRINTING
+      *
+     C                   MOVE      *BLANK        WKCAT            15
+      *
+      * SET UP CONTROL FLAGS
+      *
+     C                   MOVEL     YES           FIRST             1
+     C                   MOVEL     NO            WKERR             1
+     C                   MOVEL     NO            WKBAD             1
+      *
+      * Set up the 'version' of this run.
+      *
+     C                   select
+     C                   when      ldeffl = 'D'
+     C                   eval      hdversion = 'ON-DEMAND'
+     C                   seton                                        98
+      *
+     C                   when      ldeffl = 'E'
+     C                   eval      hdversion = '  EDIT   '
+      *
+     C                   when      ldeffl = 'F'
+     C                   eval      hdversion = '  FINAL  '
+     C                   endsl
+      *
+      * SET UP A DASHED LINE FOR UNDERLINING THE HEADING
+      * RETRIEVE TIME FOR REPORT HEADING
+      *
+     C                   MOVEL     *ALL'-'       DASH            132
+     C                   TIME                    RTIME             6 0
+      *
+      * DEFINE WORK FIELDS USED IN CONTROLLING LINE COUNTS FOR
+      * PRINTING SINCE DETAIL LINES ARE PRINTED FROM THIS RPG PROGRAM
+      * AND ERROR MESSAGES ARE PRINTED FROM CLP UT80046.
+      *
+     C                   Z-ADD     0             WKDIFL            3 0          LINES LEFT
+     C                   Z-ADD     62            WKOVFL            3 0          OVERFLOW LIN
+     C                   Z-ADD     0             WKCURL            3 0          CURRENT LINE
+      *
+      * MESSAGE PARMS
+     C                   MOVE      *BLANK        MSGFL            10            MESSAGE FILE
+     C                   Z-ADD     20            MAXMSG            2 0
+     C                   MOVE      *BLANK        XXMDY             6
+     C                   MOVE      *BLANK        XXMVSN            7
+     C                   MOVE      *BLANK        XXXTSN            7
+     C                   MOVE      *BLANK        XXTKNO            9
+     C                   MOVE      *BLANK        XXFSCD            5
+     C                   MOVE      *BLANK        WKTYPE           10
+      *
+      *
+      * PRINT REPORT HEADINGS
+      *
+     C                   EXSR      $HDRPT
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------
+      * REPORT HEADING LINES
+      *-------------------------------------------------------------
+      *
+     OQPRINT    E            HDRPT          1 01
+     O                       SDPGM               10
+     O                                           78 'HOG PRODUCTION SYSTEM'
+     O                                          122 'DATE'
+     O                       UDATE         Y    132
+      *
+     O          E            HDRPT          1
+     O                       SDUSR               10
+     O                                           67 'PRELIMINARY PERIOD'
+     O                                           87 'CLOSE ERROR LISTING'
+     O                                          122 'TIME'
+     O                       RTIME              132 '  :  :  '
+      *
+      *
+     O          E            HDRPT          1
+     O                       hdversion           72
+     O                                          122 'PAGE'
+     O                       PAGE          Z    132
+      *
+      * For the on-demand version only:
+      *
+     O          e    98      hdrpt          1
+     O                                           15 'Cut-off date ..'
+     O                       ldemdy        y     25
+      *
+      *
+     O          e    98      hdrpt          1
+     O                                           15 'Period/year ...'
+     O                       ldper         z     19
+     O                       ldccyy        z     25
+      *
+      *
+      * For the edit/final versions only:
+      *
+     O          E   n98      HDRPT          1
+     O                                            7 'PERIOD:'
+     O                       LDPER         M     11
+     O                       LDBMDY        Y     20
+     O                                           23 'TO'
+     O                       LDEMDY        Y     32
+      *
+     O          E            HDRPT          1
+     O                       DASH               132
+      *
+      *-------------------------------------------------------------
+      * CATEGORY HEADING
+      *-------------------------------------------------------------
+      *
+     O          E            HDCAT       1  1
+     O                       WKCAT               15
+      *
+      *-------------------------------------------------------------
+      * NO ERROR MESSAGE LINE
+      *-------------------------------------------------------------
+      *
+     O          E            NOERR       2
+     O                       noerrormsg         100

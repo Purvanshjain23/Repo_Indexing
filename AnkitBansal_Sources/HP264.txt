@@ -1,0 +1,948 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP264
+      * TITLE:       Safedata: Edit/Post Groups with Listing
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     01/22/01
+      *
+      * FUNCTION:  Batch program to a) list errors on the records uploaded from
+      *            Safedata and b) post records without errors to HPS.
+      *
+      *            This listing is submitted through HP263CL as part of the
+      *            upload process.
+      *
+      *           The listing prints each record and lists all error messages
+      *           for each record (up to a maximum of 20 per record).
+      *
+      * Error Messages:
+      *
+      *           The messages are retrieved through a call to CLP UT80046A
+      *           using the same user message file, arrays and array logic as
+      *           in the interactive programs. However, they are printed from
+      *           the CL using the command 'CLPRINTA' that was created by Ernie
+      *           Wallace.
+      *
+      *           QPRINT is used for the output file since the command 'CLPRINTA'
+      *           prints to QPRINT.  QPRINT is overridden in the submission CLP
+      *           to 'SHARE = YES' to allows both this RPG program and the CLP
+      *           UT80046A to write to the same print file.
+      *
+      *           Since the 'CLPRINTA' command logic in UT80046A is not being used
+      *           to print headings, count lines or page break, these functions are
+      *           controlled from this RPG program by counting the lines.
+      *
+      *           This program page-breaks when the line count reaches 62 lines
+      *           because this listing is designed to run on paper that is 68 lines
+      *           long.  Therefore, if the users generate this report on various
+      *           laser printers with different page lengths, the page breaks may
+      *           be goofy.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/09/01  LeAnne Fedor
+      *           We are no longer defaulting a value for the 'destroyed' flag. It is now
+      *           populated by logic in the receiving file program.
+      *
+      *           Also, we no longer validate the building/room that Safedata sends
+      *           back to us. We will simply populate the fields with the building/room
+      *           associated with the group in the HPS Database.
+      *
+      * 12/03/02  LeAnne Fedor
+      *           Removed Production Phase and Production Type from the Killed/Dead file.
+      *
+      * 04/01/04  LeAnne Fedor
+      *           The users want the 'Group Deaths Upload Listing' printed with all the
+      *           'error' records first followed by all the 'posted' records. BUT, we
+      *           don't know whether a record is E/P until we process it!
+      *
+      *           So, I added a workfile and made the program a 2-pass program. In Pass 1
+      *           each record is processed. If it has errors, it is printed. If there are
+      *           no errors, it is written to the workfile. The actual database files are
+      *           updated in Pass 1.
+      *
+      *           Then, in Pass 2, we read the workfile and print the records. These will
+      *           be all the 'posted' records.
+      *
+      * 07/02/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp018    if   e           k disk
+      *   Farm site
+      *
+      *
+     Fhsp034    if   e           k disk
+      *   Hog group
+      *
+      *
+     Fhsp058    uf a e           k disk
+      *  Movement event
+      *
+      *
+     Fhsp068    uf a e           k disk
+      *  Killed/dead hogs
+      *
+      *
+     Fhsl264a   uf   e           k disk
+      *  Safedata: Group deaths editing file
+      *
+      *
+     Fhsp391    uf a e           k disk
+      *  Workfile for printing
+      *
+     Fqprint    o    f  132        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     d dash            s            132    inz(*all'-')
+     d rtime           s              6  0
+     D maxmsg          s              2  0  inz(20)
+     D msgfl           s             10
+      *
+      *
+      * Control fields
+      *
+     d first           s              1    inz('Y')
+     d firsterr        s              1    inz('Y')
+     d firstpost       s              1    inz('Y')
+      *
+      *
+      * Work fields for counting lines
+      *
+     d wkovfl          s              3  0 inz(62)
+     d wkcurl          s              3  0 inz(62)
+     d wkdifl          s              3  0 inz(62)
+      *
+      *
+      * Print fields
+      *
+     D l1fscd          s                   like(u4fscd)
+     D l1hgcd          s                   like(u4hgcd)
+     D l1kdhd          s                   like(u4kdhd)
+     D l1kdlb          s                   like(u4kdlb)
+     D l1ultm          s                   like(u4ultm)
+     D l1erpofl        s                   like(u4erpofl)
+     D l1blcd          s                   like(hgblcd)
+     D l1rmcd          s                   like(hgrmcd)
+     D l1mdy           s              6  0
+     D l1mdyuldt       s              6  0
+      *
+      *
+      * Workfields for manipulating dates
+      *
+     D wkmmddyy        s               d   datfmt(*mdy)
+     D wkisodt         s               d   datfmt(*iso)
+     D wkmdy           s              6  0
+      *
+      *
+      * Parm fields
+      *
+     D xxalphfscd      s              5
+     D xxmdy           s              6
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *
+      *---------------------------------------------------------------
+      *  Data area for next movement number
+      *---------------------------------------------------------------
+      *
+     D                 ds
+     D  damvsn                 1      7  0
+      *
+      *---------------------------------------------------------------
+      *  Accounting period data area
+      *---------------------------------------------------------------
+      *
+     D dsdaaper       uds                  dtaara(daaper)
+     D  daccyy                        4s 0
+     D  daper                         2s 0
+     D  dabpdt                        8s 0
+     D  daepdt                        8s 0
+     D  dapgfl                        1a
+     D  dappfl                        1a
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Edit all records. Print the 'error' records with messages; write the
+      * 'posted' records to the workfile. Update the database.
+      *
+     C                   exsr      $pass1
+      *
+      * If you had any Safedata records, then see if you need to execute
+      * Pass 2 to print the 'posted' records.
+      *
+     C                   if        first = no
+     C                   exsr      $pass2
+     C                   else
+     C                   exsr      $prthdr
+     C                   except    nodata
+     C                   endif
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Pass 1
+      *---------------------------------------------------------------
+      *
+     C     $pass1        begsr
+      *
+      * Read all records that have a blank in the error/posted flag.
+      * (The logical file selects these records.)
+      *
+     C     *loval        setll     hsl264a
+      *
+     C                   dou       *in90 = *on                                  Pass 1 do
+     C                   read      hsl264a                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   if        first = yes
+     C                   move      no            first
+     C                   endif
+      *
+      * Edit the record. If it has errors, print the record and messages. If it
+      * has no errors, we will write it to the workfile to print in Pass 2.
+      *
+     C                   exsr      $edit
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Pass 1 do
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Pass 2--Print 'posted' records.
+      *---------------------------------------------------------------
+      *
+     C     $pass2        begsr
+      *
+      *  Print each record that we wrote to the workfile in Pass 1.
+      *
+     C     *loval        setll     hsp391
+      *
+     C                   dou       *in90 = *on                                  Pass 2 do
+     C                   read      hsp391                                 90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   if        firstpost = yes
+     C                   exsr      $prthdr
+     C                   move      no            firstpost
+     C                   endif
+      *
+     C                   z-add     u1fscd        l1fscd
+     C                   z-add     u1kdhd        l1kdhd
+     C                   z-add     u1kdlb        l1kdlb
+     C                   z-add     u1ultm        l1ultm
+     C                   move      u1hgcd        l1hgcd
+     C                   move      u1erpofl      l1erpofl
+      *
+      * Flip the upload date from CCMMDDYY to MMDDYY for printing
+      *
+     C     *iso          test(d)                 u1uldt                 92
+     C                   if        *in92 = *off                                 If valid date
+     C     *iso          move      u1uldt        wkmmddyy
+     C                   move      wkmmddyy      l1mdyuldt
+     C                   endif                                                  If valid date
+      *
+      * Flip the weekending date to MMDDYY for printing.
+      *
+     C     *iso          test(d)                 u1wedt                 92
+     C                   if        *in92 = *off                                 If good date
+     C     *iso          move      u1wedt        wkmmddyy
+     C                   move      wkmmddyy      l1mdy
+     C                   endif                                                  If good date
+      *
+      * Retrieve building/room from hog group record.
+      *
+     C     u1hgcd        chain     hsp034                             92
+     C                   if        *in92 = *off
+     C                   move      hgblcd        l1blcd
+     C                   move      hgrmcd        l1rmcd
+     C                   endif
+      *
+      * Print record.
+     C                   exsr      $prtrec
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Pass 2 do
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Edit record
+      *---------------------------------------------------------------
+      *
+     C     $edit         begsr
+      *
+      * Flip the upload date from CCMMDDYY to MMDDYY for printing
+      *
+     C     *iso          move      u4uldt        wkmmddyy
+     C                   move      wkmmddyy      l1mdyuldt
+      *
+      * Validate:
+      *   1) week-ending date
+      *   2) farm site
+      *   3) building
+      *   4) room
+      *   5) hog group code
+      *   6) head
+      *
+     C                   exsr      $wedt
+     C                   exsr      $fscd
+     C                   exsr      $hgcd
+     C                   exsr      $kdhd
+     C                   exsr      $kdlb
+      *
+      *
+      * If there are errors,
+      *    flag the record as (E)rror
+      *    print the record
+      *    print the messages
+      * else
+      *    flag the record as (P)osted into HPS
+      *    write an HPS record into the Killed/Dead file
+      *    write an HPS record into the Movement Event file
+      *    write a workfile record
+      *
+     C                   select
+     C                   when      error > 0
+     C                   move      'E'           u4erpofl
+     C                   exsr      $error
+     C                   other
+      *
+     C                   move      'P'           u4erpofl
+     C                   exsr      $wrt068
+     C                   exsr      $wrt058
+     C                   exsr      $wrt391
+     C                   endsl
+      *
+     C                   update    u4rec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Logic for printing error records and messages
+      *---------------------------------------------------------------
+      *
+     C     $error        begsr
+      *
+     C                   if        firsterr = yes
+     C                   exsr      $prthdr
+     C                   move      no            firsterr
+     C                   endif
+      *
+     C                   z-add     u4fscd        l1fscd
+     C                   z-add     u4kdhd        l1kdhd
+     C                   z-add     u4kdlb        l1kdlb
+     C                   z-add     u4ultm        l1ultm
+     C                   move      u4hgcd        l1hgcd
+     C                   move      u4erpofl      l1erpofl
+      *
+     C                   exsr      $prtrec
+     C                   exsr      $prtmsg
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a 'posted' record to the workfile for later printing.
+      *---------------------------------------------------------------
+      *
+     C     $wrt391       begsr
+      *
+     C                   z-add     u4wedt        u1wedt
+     C                   z-add     u4fscd        u1fscd
+     C                   move      u4hgcd        u1hgcd
+     C                   z-add     u4kdhd        u1kdhd
+     C                   z-add     u4kdlb        u1kdlb
+     C                   move      u4erpofl      u1erpofl
+     C                   z-add     u4uldt        u1uldt
+     C                   z-add     u4ultm        u1ultm
+     C                   write     u1rec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate week-ending date
+      *---------------------------------------------------------------
+      *
+     C     $wedt         begsr
+      *
+      * If week-ending date is zero, issue an error message.
+      *
+     C                   if        u4wedt = 0                                   If zero date
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09004'     mgid(e)
+     C                   endif
+     C                   else
+      *
+      *
+      * Check that 'week-ending' date is a valid date.
+      *
+     C     *iso          test(d)                 u4wedt                 92
+     C                   if        *in92 = *on                                  If bad date
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'HS09004'
+     C                   endif
+     C                   else
+      *
+      * The week-ending date is valid, so:
+      *     Check that it is not greater than the upload date
+      *     Check that it is not in a closed period
+      *     If it is in the current period,
+      *         Check that the period close programs are not running
+      *
+     C                   select
+     C                   when      u4wedt > u4uldt
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09151'     mgid(e)
+     C                   endif
+      *
+     C                   when      u4wedt < dabpdt
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09007'     mgid(e)
+     C                   endif
+      *
+     C                   when      u4wedt >= dabpdt and
+     C                             u4wedt <= daepdt and
+     C                             dappfl <> *blank
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09016'     mgid(e)
+     C                   endif
+     C                   endsl
+      *
+     C                   endif                                                  If bad date
+     C                   endif                                                  If zero date
+      *
+      * If week-ending date is a valid date, flip it to MMDDYY for printing.
+      * If it is not a valid date, just move it unflipped to the print field
+      *
+     C                   if        *in92 = *off
+     C     *iso          move      u4wedt        wkmmddyy
+     C                   move      wkmmddyy      l1mdy
+     C                   else
+     C                   z-add     u4wedt        l1mdy
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate farm site
+      *---------------------------------------------------------------
+      *
+      * Validations:
+      *  1) must be valid in farm master
+      *  2) cannot be a BGF farm
+      *
+     C     $fscd         begsr
+      *
+     C     u4fscd        chain     hsp018                             92
+     C                   select
+     C                   when      *in92 = *on
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00131'     mgid(e)
+     C                   clear                   mgw
+     C                   move      u4fscd        xxalphfscd
+     C                   movea     xxalphfscd    mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   other
+     C                   if        fsppcd = 'BGF  ' and
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09092'     mgid(e)
+     C                   endif
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate hog group code
+      *---------------------------------------------------------------
+      *
+      * Validate group:
+      *   1) group must be valid with an open status
+      *   2) group must belong to farm and business office selected
+      *   3) group must be in the building/room
+      *   4) pigs must have been delivered to the group on or before the
+      *      dead date.
+      *
+     C     $hgcd         begsr
+      *
+     C                   select
+     C                   when      u4hgcd = *blank and error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09001'     mgid(e)
+     C                   other
+      *
+     C     u4hgcd        chain     hsp034                             92
+     C                   if        *in92 = *on                                  IF BAD GROUP
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS00261'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     u4hgcd        mgw(1)
+     C                   movea     mgw           mgdt(e)
+     C                   endif
+     C                   else
+      *
+      * Populate building/room with values from hog group record.
+      *
+     C                   move      hgblcd        l1blcd
+     C                   move      hgrmcd        l1rmcd
+      *
+      * Group's farm site must match farm site.
+      *
+     C                   if        hgfscd <> u4fscd and error  < maxmsg         If diff farm
+     C                   add       1             error
+     C                   movel     'HS00468'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     u4hgcd        mgw(1)
+     C                   move      hgfscd        xxalphfscd
+     C                   movea     xxalphfscd    mgw(8)
+     C                   move      u4fscd        xxalphfscd
+     C                   movea     xxalphfscd    mgw(13)
+     C                   movea     mgw           mgdt(e)
+     C                   endif                                                  If diff farm
+      *
+     C                   if        hggscd <> 'OP' and error < maxmsg            If not open
+     C                   add       1             error
+     C                   moveL     'HS00586'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     u4hgcd        mgw(1)
+     C                   movea     hggscd        mgw(8)
+     C                   movea     mgw           mgdt(e)
+     C                   endif                                                  If not open
+      *
+      * Check that pigs were transferred into the group (the group was
+      * opened) on or before the dead date.
+      *
+     C                   if        u4wedt < hgopdt and error < maxmsg           If opened later
+     C                   add       1             error
+     C                   movel     'HS00682'     mgid(e)
+     C                   clear                   mgw
+     C                   movea     u4hgcd        mgw(1)
+      *
+      * Flip the opened date
+      *
+     C     *iso          move      hgopdt        wkmmddyy
+     C                   move      wkmmddyy      wkmdy
+     C                   move      wkmdy         xxmdy
+      *
+     C                   movea     xxmdy         mgw(8)
+     C                   movel     l1mdy         xxmdy
+     C                   movea     xxmdy         mgw(14)
+     C                   movea     mgw           mgdt(e)
+     C                   endif                                                  If opened later
+      *
+     C                   endif                                                  If bad group
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate head
+      *---------------------------------------------------------------
+      *
+     C     $kdhd         begsr
+      *
+      * Validate head:
+      *  1) cannot be negative
+      *  2) cannot be zero if pounds are entered
+      *
+     C                   select
+     C                   when      u4kdhd < 0 and
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09154'     mgid(e)
+      *
+     C                   when      u4kdhd = 0 and
+     C                             u4kdlb <> 0 and
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09156'     mgid(e)
+     C                   endsl
+      *
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Validate pounds
+      *---------------------------------------------------------------
+      *
+     C     $kdlb         begsr
+      *
+      * Validate pounds:
+      *  1) cannot be negative
+      *  2) cannot be zero if head entered
+      *
+     C                   select
+     C                   when      u4kdlb < 0 and
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09155'     mgid(e)
+      *
+     C                   when      u4kdlb = 0 and
+     C                             u4kdhd <> 0 and
+     C                             error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09157'     mgid(e)
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a record into the HPS Killed/Dead file
+      *---------------------------------------------------------------
+      *
+     C     $wrt068       begsr
+      *
+      *
+      * Use week-ending date for killed/dead date
+      *
+     C                   z-add     u4wedt        kdkddt
+      *
+      * Move in uploaded values
+      *
+     C                   z-add     u4kdhd        kdkdhd
+     C                   z-add     u4kdlb        kdkdlb
+     C                   z-add     u4fscd        kdfscd
+     C                   move      u4dsfl        kddsfl
+      *
+      * Move in hog group fields
+      *
+     C                   z-add     hghgsn        kdhgsn
+     C                   movel     hgfsbo        kdfsbo
+      *
+      * Set up defaults
+      *
+     C                   movel     '8    '       kddrcd
+     C                   z-add     0             kdepdt
+     C                   movel     'EN'          kdmscd
+      *
+      *
+     C     *lock         in        damvsn                                                       3
+     C                   add       1             damvsn
+     C                   out       damvsn
+      *
+     C                   z-add     damvsn        kdmvsn
+      *
+     C                   write     kdrec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a record into the HPS Movement Event file
+      *---------------------------------------------------------------
+      *
+     C     $wrt058       begsr
+      *
+      * Set up update time stamp
+      *
+     C                   z-add     u4uldt        meupdt
+     C                   z-add     u4ultm        meuptm
+     C                   movel     'Upload'      meuscd
+     C                   movel     'HP264'       mepgm
+      *
+     C                   z-add     u4wedt        memedt
+     C                   z-add     kdmvsn        memvsn
+     C                   z-add     kdhgsn        mehgsn
+     C                   movel     'D'           memtcd
+      *
+     C                   movel     'O'           meodfl
+     C                   z-add     0             mecvno
+     C                   z-add     0             mehsn
+     C                   z-add     0             melnno
+      *
+     C                   write     merec
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print report headings
+      *---------------------------------------------------------------
+      *
+     C     $prthdr       begsr
+      *
+     C                   z-add     0             wkcurl
+     C                   except    h1hdr
+     C                   add       8             wkcurl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print record
+      *---------------------------------------------------------------
+      *
+     C     $prtrec       begsr
+      *
+     C                   if        wkcurl > wkovfl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Program UT80046A does not print headings or check for page breaks.
+      * Before calling  UT80046A, determine if all 8 lines required for the
+      * record will fit on the current page. Calculate the remaining lines
+      * on the page using the overflow line and the current line.
+      *
+     C     wkovfl        sub       wkcurl        wkdifl
+      *
+      * If you have more messages than will fit on the page, then page break
+      * and print headings.
+      *
+     C                   if        wkdifl < 8
+     C                   exsr      $prthdr
+     C                   endif
+      *
+     C                   except    l1dtl
+     C                   add       1             wkcurl
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------
+      * Print error messages
+      *-------------------------------------------------------------------
+      *
+     C     $prtmsg       begsr
+      *
+     C                   if        error <> 0
+     C                   exsr      $wrmsg
+     C                   z-add     0             error
+     C                   exsr      $clmsg
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+      * If overflow, print headings.
+      *
+     C                   if        wkcurl > wkovfl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Program UT80046A does not print headings or check for page breaks.
+      * Before calling  UT80046A, determine if all the error messages can be
+      * printed on the current page.  Calculate the remaining print lines
+      * on the page using the overflow line and the current line.
+      *
+     C     wkovfl        sub       wkcurl        wkdifl
+      *
+      * If you have more messages than will fit on the page, then page break
+      * and print headings.
+      *
+     C                   if        error > wkdifl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Increment the current line by the number of error messages you will be
+      * printing in UT80046A plus one for the space after.  This sets the current
+      * line number properly for when you return from UT80046A.
+      *
+     C     wkcurl        add       error         wkcurl
+     C                   add       1             wkcurl
+      *
+     C                   call      'UT80046A'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      msgfil        msgfl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80046A'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      msgfil        msgfl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * *inzsr - initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Rerieve time for report heading.
+      *
+     C                   time                    rtime
+      *
+      * Define the data area that contains the movement number
+      *
+     C     *dtaara       define                  damvsn
+      *
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oqprint    e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           78 'HOG PRODUCTION SYSTEM'
+     O                                          122 'DATE'
+     O                       udate         y    132
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                                           67 'GROUP DEATHS '
+     O                                           81 'UPLOAD LISTING'
+     O                                          122 'TIME'
+     O                       rtime              132 '  :  :  '
+      *
+     O          e            h1hdr          2
+     O                                          122 'PAGE'
+     O                       page          z    132
+      *
+      *
+      *
+     O          e            h1hdr          1
+     O                                            5 'FARM'
+     O                                           28 'HOG'
+     O                                           40 'DEAD'
+     O                                           50 'DEAD'
+     O                                           65 'KILLED/DEAD'
+     O                                           75 'UPLOAD'
+     O                                           85 'UPLOAD'
+     O                                          100 'ERROR/POSTED'
+      *
+      *
+     O          e            h1hdr          1
+     O                                            5 'SITE'
+     O                                           14 'BLDG'
+     O                                           21 'ROOM'
+     O                                           30 'GROUP'
+     O                                           40 'HEAD'
+     O                                           50 'POUNDS'
+     O                                           61 'DATE'
+     O                                           75 'DATE'
+     O                                           85 'TIME'
+     O                                           96 'FLAG'
+      *
+     O          e            h1hdr          1
+     O                       dash               132
+      *
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       1
+     O                       l1fscd        mb     6
+     O                       l1blcd         b    15
+     O                       l1rmcd         b    22
+     O                       l1hgcd         b    32
+     O                       l1kdhd        kb    41
+     O                       l1kdlb        kb    51
+     O                       l1mdy          b    64 '  /  /  '
+     O                       l1mdyuldt      b    75 '  /  /  '
+     O                       l1ultm         b    85 '  :  :  '
+     O                       l1erpofl       b    95
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata      1
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'

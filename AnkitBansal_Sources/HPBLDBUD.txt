@@ -1,0 +1,171 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  HPBLDBUD                                      */
+/*  PROGRAM NAME:    BUILD DATAMART FILES FOR SUPPLY               */
+/*                   BUDGETS/ORDERS                                */
+/*                                                                 */
+/*  PROGRAMMER:      LEANNE FEDOR                                  */
+/*  CREATE DATE:     08/11/04                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS SUBMITTED FROM THE JOB SCHEDULER.  */
+/*                                                                 */
+/*                                                                 */
+/*  TO CLEAR/BUILD ALL FILES SUBMIT THIS CL WITH A PARM VALUE      */
+/*  OF H=HISTORY. TO DELETE/REBUILD ONLY 'CURRENT' RECORDS IN THE  */
+/*  FILES, SUBMIT THE JOB WITH A BLANK FOR THE PARM VALUE.         */
+/*                                                                 */
+/*  THE DATA AREA CONTAINS THE BEGINNING/ENDING DATES              */
+/*  FOR THE FIRST WEEK OF PROCESSING FOR BOTH SCENARIOS. USE OF    */
+/*  THE DATA AREA ELIMINATES HARD-CODING OF DATES IN PROGRAMS AND  */
+/*  ALLOWS 'CURRENT' TO BE REDIFINED AS TIME GOES BY.              */
+/*                                                                 */
+/*******************************************************************/
+/*  MODIFIED:                                                      */
+/*                                                                 */
+/* 08/31/09  ALICE BROWNFIELD                                      */
+/*           E00472 - Data Mart Build changes for DR Test          */
+/*           Change CPYF from PRKFLIB to PRKDMFLIB to build        */
+/*             directly into PRKDMFLIB.  files in PRKFLIB will be  */
+/*           empty  ----- this works better for MIMIX              */
+/*                                                                 */
+/*           Also removed &SENDFL input parm                       */
+/*           NIBBLE sends are discontinued                         */
+/*                                                                 */
+/* 04/29/10  LeAnne Ramsey  (C719)                                 */
+/*           Changed logic to use ESEND instead of MPLUS/MPLUS.    */
+/*                                                                 */
+/*******************************************************************/
+/*  THE PROC PARM WILL BE     1) BLANK FOR "CURRENT" PROCESSING, OR */
+/*                            2) 'H' FOR "HISTORY" PROCESSING       */
+
+
+             PGM        PARM(&PROCFL)
+
+             DCL        VAR(&PROCFL) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&CURBEGDT) TYPE(*DEC) LEN(8)
+             DCL        VAR(&ERR)    TYPE(*CHAR) LEN(1) VALUE('N')
+
+             DCL        VAR(&EMAIL)    TYPE(*CHAR) LEN(38)
+             DCL        VAR(&TSTPRDFL) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&SUBJECT)  TYPE(*CHAR) LEN(60) +
+                          VALUE('HPBLDBUD-Datamart BUD: Build +
+                          Files.....DIST LIST: prk cognos')
+
+/*------------------------------------------------------------------*/
+/* Set up the Email Recipient (either Test or Production)           */
+/*------------------------------------------------------------------*/
+
+/* Retrieve the Data Area that lets us know whether we are in TEST  */
+/* or PRODUCTION. (Always default to the 'TEST' Distribution List.) */
+
+             CHGVAR     VAR(&EMAIL) VALUE('prk cognos test')
+             RTVDTAARA  DTAARA(DATSTPRD (1 1)) RTNVAR(&TSTPRDFL)
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('prk cognos'))
+
+/*-----------------------------------------------------------------*/
+/* Add PRKDMFLIB so we will process directly into that library.    */
+/* We do not expect PRKDMFLIB to already be in the library list;   */
+/* but, since we want it at the top of the list, we will remove/add*/
+/* it.                                                             */
+/*-----------------------------------------------------------------*/
+             RMVLIBLE   LIB(PRKDMFLIB)
+             MONMSG     MSGID(CPF0000)
+             ADDLIBLE   LIB(PRKDMFLIB)
+
+/*-----------------------------------------------------------------*/
+/* CALCULATE 'CURRENT' BEGINNING/ENDING DATES AND UPDATE DATA AREA */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(HP2209) PARM(&CURBEGDT)
+
+/*-----------------------------------------------------------------*/
+/* ALWAYS CLEAR THE FOLLOWING DATAMART FILES...                    */
+/*-----------------------------------------------------------------*/
+
+             CLRPFM     FILE(*LIBL/HSP8181) /* Budget Items/Items */
+
+/*-----------------------------------------------------------------*/
+/* DELETE RECORDS FROM THEM FOR A 'CURRENT' RUN.                   */
+/*-----------------------------------------------------------------*/
+
+             IF         COND(&PROCFL *EQ 'H') THEN(DO)
+             CLRPFM     FILE(*LIBL/HSP8189) /* Quantities    */
+             CLRPFM     FILE(*LIBL/HSP8193) /* Weekly Orders */
+             CLRPFM     FILE(*LIBL/HSP8188) /* Closed Budgets */
+             ENDDO
+
+             IF         COND(&PROCFL *EQ ' ') THEN(DO)
+             CALL PGM(HP2210)
+             ENDDO
+
+/*-----------------------------------------------------------------*/
+/* BUILD THE BUDGET ITEM/ITEM MASTER                               */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(HP2181)
+
+/*-----------------------------------------------------------------*/
+/* CREATE/BUILD WORKFILES                                          */
+/*-----------------------------------------------------------------*/
+
+             CRTDUPOBJL OBJ(HSP8300) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)           /* Farm Budget Hdr */
+
+             CRTDUPOBJL OBJ(HSP8301) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)          /* Farm Budget Weeks */
+
+             CRTDUPOBJL OBJ(HSP8302) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) /* Quantities        */
+
+             CRTDUPOBJL OBJ(HSL8302A) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) /* Quantities        */
+
+
+             CALL       PGM(HP2300) PARM(&PROCFL)
+
+
+/*-----------------------------------------------------------------*/
+/* Roll the Workfile records up into the required Datamart record  */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(HP2302)
+
+/*-----------------------------------------------------------------*/
+/* Build the Closed Budgets Datamart file                          */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(HP2188)
+
+/*------------------------------------------------------------------------*/
+/* IF YOU ARE PERFORMING "CURRENT" PROCESSING, THEN REORG THE FILES.      */
+/*------------------------------------------------------------------------*/
+
+             IF         COND(&PROCFL *EQ ' ') THEN(DO)
+
+             RGZPFM     *LIBL/HSP8181
+             MONMSG     MSGID(CPF0000)
+
+             RGZPFM     *LIBL/HSP8188
+             MONMSG     MSGID(CPF0000)
+
+             RGZPFM     *LIBL/HSP8189
+             MONMSG     MSGID(CPF0000)
+
+             RGZPFM     *LIBL/HSP8193
+             MONMSG     MSGID(CPF0000)
+
+             ENDDO
+
+/*---------------------------------------------------------------------*/
+/* SEND COMPLETION MESSAGE TO I.S. FOLKS                               */
+/*---------------------------------------------------------------------*/
+
+             IF         COND(&ERR = 'N') THEN(ESNDMAIL +
+                          RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG('All Budget data was successfully +
+                          written to PRKDMFLIB; the build completed +
+                          normally.') IMPORTANCE(*HIGH))
+
+             ENDPGM
+

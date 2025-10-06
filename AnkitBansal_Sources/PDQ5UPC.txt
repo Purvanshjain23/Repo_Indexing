@@ -1,0 +1,231 @@
+/********************************************************************/
+/*                                                                  */
+/*  SYNOPSIS -  JOB CONTROL PROMPT FOR PRINTER OVERRIDE INFORMATION */
+/*              GENERIC PROMPTING FUNCTION. CAUSE PRINTER OVERRIDE  */
+/*              PROMPTING AND PASSES COMPANY, ORDER, DOCUMENT TYPE  */
+/*              AND COUNTRY.                                        */
+/*                                                                  */
+/*  SYSTEM    - ORDER MANAGEMENT SYSTEM                             */
+/*  PROGRAM   - PRINT REPORTS                                       */
+/*  DATE      - 06/25/98                                            */
+/*                                                                  */
+/*      PARAMETERS:                                                 */
+/*                                                                  */
+/*     O    &RETURN     - RETURN CODE                               */
+/*     I    &APPLIC     - APPLICATION CODE                          */
+/*     I    &PGM        - PRT PGM                                   */
+/*     I    &PGM$       - PRT PGM PRTFILE                           */
+/*     I    &DESC       - PRINT PROGRAM DESCRIPTION (FOR PROMPT     */
+/*                         SCREEN)                                  */
+/*     B    &OUTQ       -  OUTPUT QUEUE                             */
+/*                         IF THIS IS BLANK AT START, PROMPT        */
+/*                         PGM IS CALLED; OTHERWISE, THE PRINT CL   */
+/*                         IS SUBMITTED WITHOUT PROMPTING           */
+/*     B    &HOLD       -  HOLD STATUS                              */
+/*     B    &SAVE       -  SAVE STATUS                              */
+/*     B    &NQSTAT     -  INDICATOR WHETHER MUST RUN IN NIGHT Q    */
+/*     B    &NIGHTQ     -  NIGHT JOB QUEUE                          */
+/*     B    &COMPNYN    - COMPANY NUMBER (PASSED)                   */
+/*     B    &DOCTYP     - DOCUMENT TYPE  (PASSED)                   */
+/*     B    &COUNTRY    - COUNTRY CODE   (PASSED)                   */
+/*     B    &ORDER      - ORDER NMBR     (PASSED)                   */
+/*     B    &COPYN      - NO. OF COPIES  (PASSED)                   */
+/*     I    &OPT9       - Option 9 Taken                            */
+/*     I    &ATHTYP     - Attachment Type                           */
+/*     I    &ATHSTYP    - Attachment Subtype                        */
+/*                                                                  */
+/********************************************************************/
+/* MODIFICATIONS:                                                   */
+/* --------------                                                   */
+/* 06/19/18 DN  R13074 - FSIS Export Document from USDA             */
+/*    If overflow is Yes then call Printer Prompt to allow the      */
+/*    Health Certificate 9060-5A continuation sheet to print on a   */
+/*    laser printer.                                                */
+/* 11/29/18 DN  R13944 - USDA FSIS PHIS (PHASE 2)                   */
+/*    Added new input parms to program:                             */
+/*    1)Option 9 Taken flag 2)Attachment Type & 3)Attachment Subtype*/
+/*    Purpose is to create the report form in QPRINT2 & convert it  */
+/*    to PDF & send it to IFS directory for Doc Type not 'A' only.  */
+/*    Printer Outq will be set to QPRINT2 to force no printing.     */
+/*    Do not call Print Options Prompt if Option 9 was taken.       */
+/*    Doc Type 'H' are not affected by Option 9.                    */
+/* 03/11/20 RMC T16276 - CANADA CONTINUATION PAGE FORM 9135-3A    */
+/*    If overflow is Yes then call Printer Prompt to allow CANADA   */
+/*    Health Certificate 9135-3A continuation sheet to print on a   */
+/*    laser printer (SAME CONCEPT AS R13074 ABOVE)                 */
+/* 07/06/22 DN  DO2642 - EXPORT PRODUCT DESC ON HEALTH CERTIFICATE  */
+/*    WI497; Replaced PUH6XFR with PUWTXFR program. This will count */
+/*    the number of unique Item detail lines & the Language Xlate   */
+/*    Desc lines in PDMSREP to set the Overflow flag.               */
+/*                                                                  */
+/********************************************************************/
+
+ PDOWUPR:    PGM PARM(&RETURN &APPLIC &PGM &PGM$ &DESC &OUTQ &HOLD +
+                          &SAVE &NQSTAT &NIGHTQ &COMPNYN &ORDERN +
+                          &COPYN &DOCTYP &COUNTR &OPT9 &ATHTYP +
+                          &ATHSTYP)
+
+/* PARMS                                                                      */
+        DCL    &RETURN     *CHAR   (7)           /* Return Code               */
+        DCL    &APPLIC     *CHAR   (06)          /* Application Code          */
+        DCL    &PGM        *CHAR   (10)          /* PRT PGM                   */
+        DCL    &PGM$       *CHAR   (10)          /* PRTF FOR PGM              */
+        DCL    &DESC       *CHAR   (25)          /* PRT Pgm Description       */
+        DCL    &OUTQ       *CHAR   (10)          /* Output Queue              */
+        DCL    &HOLD       *CHAR   (4)           /* Hold Status               */
+        DCL    &SAVE       *CHAR   (4)           /* Save Status               */
+        DCL    &NQSTAT     *CHAR   (01)          /* If MUST run in Night Q    */
+        DCL    &NIGHTQ     *CHAR   (10)          /* Night Job Queue           */
+        DCL    &DESC       *CHAR   (25)          /* PRT Pgm Description       */
+             DCL        VAR(&PAPER) TYPE(*CHAR) LEN(1) +
+                          VALUE('1') /* LETTER +
+                          LETTER             */
+        DCL    &DOCTYP     *CHAR   (1)           /* DOCUMENT TYPE             */
+        DCL    &COUNTR     *CHAR   (6)          /*  COUNTRY      (Passed)     */
+        DCL    &COPYN      *DEC                  /* No. of Copies             */
+        DCL    &COMPNYN    *DEC                  /* Company Number (Passed)   */
+        DCL    &ORDERN     *DEC                  /* ORDER          (Passed)   */
+      DCL        VAR(&COMPANY) TYPE(*DEC) LEN(3 0) /* Company */
+      DCL        VAR(&FSISV2) TYPE(*CHAR) LEN(1) /* BLAH */
+
+/* INTERNAL FIELDS                                                            */
+        DCL    &COPY       *DEC    (2 0)         /* Number of copies          */
+        DCL    &COPY2      *DEC    (2 0)         /* Number of copies          */
+        DCL    &COPYN2     *DEC    (15 5)        /* Number of copies to Pass  */
+        DCL    &OUTQ2      *CHAR   (10)          /* Output Queue              */
+        DCL    &HOLD2      *CHAR   (4)           /* Hold Status               */
+        DCL    &SAVE2      *CHAR   (4)           /* Save Status               */
+        DCL    &DESC2      *CHAR   (25)          /* PRT Pgm Description       */
+        DCL    &OVERFLOW   *CHAR   (1)           /* Doc Type H Page Overflow  */
+        DCL    &ORDERN2    *DEC    (7 0)         /* Order Number              */
+        DCL    &OPT9       *CHAR   (1)           /* Opt 9 Taken Flag          */
+        DCL    &ATHTYP     *CHAR   (1)           /* Attachment Type           */
+        DCL    &ATHSTYP    *CHAR   (1)           /* Attachment SubType        */
+
+/* ERROR MESSAGE FIELDS                                                       */
+        DCL    &MSG        *CHAR   (512)         /* message                   */
+        DCL    &MSGID      *CHAR   (7)           /* message id                */
+        DCL    &MSGL       *DEC    (5 0)
+
+/********************************************************************/
+/*   INITIALIZE VARIABLES                                           */
+/********************************************************************/
+
+             CHGVAR     VAR(&RETURN) VALUE('       ')
+             CHGVAR     VAR(&SAVE) VALUE('*YES')
+             CHGVAR     VAR(&COPY) VALUE(&COPYN)
+             CHGVAR     VAR(&COMPANY) VALUE(&COMPNYN)
+             CHGVAR     VAR(&ORDERN2) VALUE(&ORDERN)
+             CHGVAR     VAR(&FSISV2) VALUE('N')
+
+/********************************************************************/
+/*   MONITOR FOR ALL MESSAGES AT PROGRAM LEVEL                      */
+/********************************************************************/
+
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(MSGTRAP))
+
+/********************************************************************/
+/* GET COMPANY VALUE TO SEE IF FSIS V2 IS YES - CALL TO HEALTH CERT CHECKS IT */
+/********************************************************************/
+             CALL       PGM(PUH4XFR) PARM(' ' &COMPANY 'MPGFORMV2 ' &FSISV2)
+             IF         COND(&FSISV2 *EQ ' ') THEN(CHGVAR +
+                          VAR(&FSISV2) VALUE('N'))
+
+/********************************************************************/
+/* R13074 - Get Overflow Flag to Print Continuation Page for Health +
+     Certificate (Doc Type=H) Form 9060-5A on a laser printer.      +
+/********************************************************************/
+             CHGVAR     VAR(&OVERFLOW) VALUE('N')
+             IF         COND(&COUNTR *NE 'CAN' *AND &DOCTYP *EQ 'H' +
+                          *AND &FSISV2 *EQ 'Y') THEN(DO)
+/* DO2642 - Replaced PUH6XFR with PUWTXFR Program */
+/* DO2642    CALL       PGM(PUH6XFR) PARM(' ' &COMPANY &ORDERN2 +
+                          &DOCTYP &COUNTR &OVERFLOW)                 */
+             CALL       PGM(PUWTXFR) PARM(' ' &COMPANY &ORDERN2 +
+                          &DOCTYP &COUNTR &OVERFLOW)            /* DO2642 */
+             ENDDO
+ T16276:     IF         COND(&COUNTR *EQ 'CAN' *AND &DOCTYP *EQ 'H' +
+                          *AND &FSISV2 *EQ 'Y') THEN(DO)
+/* DO2642 - Replaced PUH6XFR with PUWTXFR Program */
+/* DO2642    CALL       PGM(PUH6XFR) PARM(' ' &COMPANY &ORDERN2 +
+                          &DOCTYP &COUNTR &OVERFLOW)                 */
+             CALL       PGM(PUWTXFR) PARM(' ' &COMPANY &ORDERN2 +
+                          &DOCTYP &COUNTR &OVERFLOW)            /* DO2642 */
+             ENDDO
+
+/********************************************************************/
+/*   CALL PROMPT PROGRAM                                            */
+/********************************************************************/
+
+/* R13944-Manually set Print Options Values if Option 9 was Taken. +
+          Use QPRINT2 to Not Print the Form.                        */
+             IF         COND(&OPT9 *EQ 'Y') THEN(DO)
+             CHGVAR     VAR(&OUTQ) VALUE('QPRINT2')
+             CHGVAR     VAR(&HOLD) VALUE('*NO')
+             CHGVAR     VAR(&COPY) VALUE(1)
+             CHGVAR     VAR(&COPYN) VALUE(&COPY)
+             CHGVAR     VAR(&NIGHTQ) VALUE('*JOBD')
+             ENDDO
+
+/* R13944-Do not call Print Options Prompt if Option 9 was Taken */
+/* R13944 */ IF         COND(&OPT9 *NE 'Y') THEN(DO)
+             CALL       PGM(PDV8PVR) PARM(&RETURN &DESC &OUTQ &HOLD +
+                          &SAVE &COPY &NQSTAT &NIGHTQ &APPLIC &PAPER)
+             CHGVAR     VAR(&COPYN) VALUE(&COPY)
+             IF         COND(&RETURN *NE ' ') THEN(GOTO +
+                          CMDLBL(USERQUIT))
+/* R13944 */ ENDDO
+
+/* R13074-Populate Override Printer Options w/ Previous Printer Options */
+             CHGVAR     VAR(&OUTQ2) VALUE(&OUTQ)
+             CHGVAR     VAR(&HOLD2) VALUE(&HOLD)
+             CHGVAR     VAR(&SAVE2) VALUE(&SAVE)
+             CHGVAR     VAR(&COPY2) VALUE(&COPY)
+             CHGVAR     VAR(&COPYN2) VALUE(&COPY)
+
+/********************************************************************/
+/* R13074 - If Overflow Flag=Y then call Printer Options Prompt     +
+     again to set Override Printer Options for Doc Type=H.          +
+/* S16276 DO FOR CANADA HEALTH CERT TOO  RMC 3-11-2020             */
+/********************************************************************/
+             IF         COND(&OVERFLOW *EQ 'Y') THEN(DO)
+ /*          CHGVAR     VAR(&DESC2) VALUE('9060 Continuation Sheet')        */
+             CHGVAR     VAR(&DESC2) VALUE('Continuation Sheet')
+             CALL       PGM(PDV8PVR) PARM(&RETURN &DESC2 &OUTQ2 +
+                          &HOLD2 &SAVE2 &COPY2 &NQSTAT &NIGHTQ +
+                          &APPLIC &PAPER)
+             CHGVAR     VAR(&COPYN2) VALUE(&COPY2)
+             ENDDO
+
+/********************************************************************/
+/*   SUBMIT PRINT CL PROGRAM                                        */
+/********************************************************************/
+
+/* R13074-Added Override Printer Options to Call Command to Support +
+     Overflow Continuation Sheet for Form 9060 (Doc Type=H).        */
+/*   AND T16276 CANADA H FORM 9135-3A                             */
+/* R13944-Pass in Opt9 flag, Attachment Type & Subtype.             */
+/********************************************************************/
+ SUBMIT:     SBMJOB     CMD(CALL PGM(PDQ5UCLP) PARM(&COMPNYN &ORDERN +
+                          &DOCTYP &COUNTR &PGM &PGM$ &OUTQ &HOLD +
+                          &SAVE &COPYN &FSISV2 &OUTQ2 &HOLD2 &SAVE2 +
+                          &COPYN2 &OPT9 &ATHTYP &ATHSTYP)) +
+                          JOB(EXPDOCUM) JOBQ(&NIGHTQ)
+             GOTO       CMDLBL(END)
+
+/*-------------------------USER QUIT--------------------------------*/
+ USERQUIT:   CHGVAR     VAR(&RETURN) VALUE('Y2U0005')
+             GOTO       CMDLBL(END)
+
+/*----------------------RECEIVE MESSAGES----------------------------*/
+
+ MSGTRAP:    RCVMSG     MSGTYPE(*EXCP) MSGDTA(&MSG) MSGDTALEN(&MSGL) +
+                          MSGID(&MSGID)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(END))
+
+             SNDPGMMSG  MSGID(&MSGID) MSGF(QCPFMSG) MSGDTA(%SST(&MSG +
+                          1 &MSGL)) MSGTYPE(*ESCAPE)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(END))
+
+ END:        ENDPGM
+

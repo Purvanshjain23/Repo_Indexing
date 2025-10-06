@@ -1,0 +1,132 @@
+/***************************************************************** */
+/*                                                                 */
+/*  Program Number  -> GETACTBAL                                   */
+/*                                                                 */
+/*  Program Name    -> GET ACCOUNT BALANCES FROM E1 FOR HPS JOB    */
+/*                                                                 */
+/*  Program Purpose -> This CLP is used to tell E1 to push the account */
+/*                     balances to a sql table for the ibmi job to */
+/*                     to update the E1 version of F0902-> E10902  */
+/*                     The E1 job is monitored until completion,   */
+/*                     then it will invoke GETE10902 which puts the Account */
+/*                     Balances into E10902. Then the HPS job can continue */
+/*                                                                 */
+/*  Programmer      -> Rose Centonze            09/22/2020         */
+/*                                                                       */
+/*******************************************************************/
+/*   RMC  10/12/2021   ADDED SECTION TO VALIDATE IF THE BALANCES WERE  */
+/*                     ACTUALLY RETRIEVED AND SEND MSG IF THEY WERE NOT   */
+/*                     TO DIST LIST E1 BATCH ERROR        */
+/*******************************************************************/
+ GETACTBAL:  PGM        PARM(&YRA &CO &ERR)
+
+             DCL        VAR(&YRA) TYPE(*CHAR) LEN(2) /*FISCAL YEAR */
+             DCL        VAR(&YRN) TYPE(*DEC) LEN(2 0) /*FISCAL YEAR */
+             DCL        VAR(&ERR) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&ERROR) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&JOBNUM) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&VERSION) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PROFILE) TYPE(*CHAR) LEN(1) /* profile */
+             DCL        VAR(&JSFLAG) TYPE(*CHAR) LEN(1) /*  status OF SBMJOB */
+             DCL        VAR(&BSSV) TYPE(*CHAR) LEN(1)   /* BSSV return FLAG */
+
+             DCL        VAR(&COUNT) TYPE(*DEC) LEN(2 0) VALUE(1) /* counter */
+             DCL        VAR(&USER) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&RETURN) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&CO) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&CO5) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&MSG) TYPE(*CHAR) LEN(100)
+
+             CHGVAR     VAR(&YRN) VALUE(&YRA)
+             CHGVAR     VAR(&PROFILE) VALUE('S')
+             RTVJOBA    USER(&USER)
+
+               /* FOR NOW UNTIL THE YEAR IS FIXED TO PULL ONLY THAT YR  */
+
+ /*  1. DELETE BALANCES IN E10902 FOR PAR.COMPANY                            +
+           CALL EXTERNAL PGM TO USE LF KEYED BY FISCAL YR/COMPANY FOR DE     */
+             CALL       PGM(DEL0902) PARM(&RETURN &YRN &CO)
+             RGZPFM     FILE(E10902)
+             MONMSG     MSGID(CPF3202 CPF2981)
+
+ /*  SET VERSION TO THE COMPANY'S VALUE                        */
+
+  CHKBAL:    IF         COND(&CO *EQ '340') THEN(CHGVAR +
+                          VAR(&VERSION) VALUE('SF0001    '))
+             IF         COND(&CO *EQ '350') THEN(CHGVAR +
+                          VAR(&VERSION) VALUE('SF0002    '))
+
+ /*  2) CHKBAL API WILL SUBMIT R580902 TO E1 BATCH SERVER. FOLLOWING PARAMETERS+
+     ARE REQUIRED. THIS API WILL RETURN JOB NUMBER OF SUBMITTED UBE ON E1 */
+
+             CALL       PGM(CHKBAL) PARM(&YRA &VERSION &PROFILE +
+                          &JOBNUM &BSSV)
+
+             IF         COND(&JOBNUM *EQ '        ') THEN(GOTO +
+                          CMDLBL(ERROR))
+
+     /*      SNDMSG     MSG(&JOBNUM) TOUSR(ISRCENT) MSGTYPE(*INFO) */
+
+  /* 3) JOBSTT API will Get UBE Completion status. Following Parameters are  +
+  required. This API Will return Status of submitted UBE on E1               */
+
+   DELAY:       DLYJOB     DLY(180 )  /*Seconds-> 3  MINUTES       */
+
+             CALL       PGM(JOBSTT) PARM(&JOBNUM &VERSION &PROFILE +
+                          &JSFLAG &BSSV)
+
+  /* 4) Invoke pgm to get the account balances into E10901                 */
+
+         IF         COND(&JSFLAG *EQ 'D') THEN(DO)
+
+ GETIT:      CALL       PGM(GETE10902)
+
+ VALIDATE:   CHGVAR     VAR(&CO5) VALUE('00' *CAT &CO)
+             CALL       PGM(E1L9XFR) PARM('' &YRN &CO5 &ERROR)
+             IF         COND(&ERROR *EQ 'ERR') THEN(DO)
+             CHGVAR     VAR(&MSG) VALUE('E1 Account Balances +
+                      NOT Successfully Retrieved for Company:'  +
+                          |> &CO)
+             ESNDMAIL   RECIPIENT('e1 batch error') SUBJECT(&MSG) +
+                          MSG('Balances appeared to have been +
+                          retrieved but are not in E10902.')
+             CHGVAR     VAR(&ERR) VALUE('Y')
+             GOTO       CMDLBL(END)
+             ENDDO
+
+
+             CHGVAR     VAR(&MSG) VALUE('E1 Account Balances +
+                          Successfully Retrieved for Company:'  +
+                          |> &CO)
+             SNDMSG     MSG(&MSG) TOUSR(&USER)
+             ESNDMAIL   RECIPIENT('e1 batch error') SUBJECT(&MSG)
+             GOTO       CMDLBL(END)
+             ENDDO
+
+  /* 5) Loop back to check status of the job -- loop 10 times so it doesnt */
+  /*    loop until infininit                                               */
+
+             CHGVAR     VAR(&COUNT) VALUE(&COUNT + 1)
+             IF         COND(&COUNT *GT 10) THEN(GOTO CMDLBL(ERROR2))
+
+             GOTO       CMDLBL(DELAY)
+
+ ERROR:      CHGVAR     VAR(&MSG) VALUE('E1 Account Balances NOT +
+                          Successfully Retrieved for Company:' +
+                          |> &CO)
+             SNDMSG     MSG(&MSG) TOUSR(&USER)
+             ESNDMAIL   RECIPIENT('e1 batch error') SUBJECT(&MSG) +
+                          MSG('Job number missing from E1 Job')
+             CHGVAR     VAR(&ERR) VALUE('Y')
+             GOTO       CMDLBL(END)
+
+
+ ERROR2:     CHGVAR     VAR(&MSG) VALUE('E1 Account Balances timed +
+                          out. Balances not retrieved for +
+                          Company:' |> &CO)
+             SNDMSG     MSG(&MSG) TOUSR(&USER)
+             ESNDMAIL   RECIPIENT('e1 batch error') SUBJECT(&MSG)
+             CHGVAR     VAR(&ERR) VALUE('Y')
+             GOTO       CMDLBL(END)
+
+ END:        ENDPGM

@@ -1,0 +1,512 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HPS - JDE
+      * PROGRAM:     HP241
+      *
+      * PROGRAMMER:  Barb Gutierrez
+      * CREATED:     09/03/2003
+      *
+      * FUNCTION:    This program reads the account balances file in JDE and
+      *              creates expense records to be used in the cost detail
+      *              cube in cognos.
+      *
+      *              It is called from HPBLDCD$ where an open query is performed to
+      *              only get records from the jde acct balances file for the year
+      *              and period being processed, actual amounts, and expense accounts.
+      *              (accts > 5999 and <= 9999).
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      * 10/03/03  Barb Gutierrez
+      *           Added the process to delete any records for the period
+      *           being processed in the INZSR routine.
+      *
+      *  07/15/04  Barb Gutierrez
+      *            Corrected problem of having some balances slip through when
+      *            they weren't a farm.  We only want to process actual farms.
+      *            Instead of looking at category code 10 in JDE to be between
+      *            01 and 21, we are now going to look at category code 3 in
+      *            JDE.  If it is equal to SOW. G/F, or NUR then it is a farm.
+      *            We want to include the balance.  We had some Support cost
+      *            centers slipping through.  We don't want them at this time.
+      *
+      *  02/07/05  Barb Gutierrez
+      *            Added units per request COG011.  Accounting is keeping track
+      *            of gas usage in JDE and would like to see it brought into
+      *            the cost detail cube.  We need to know break at the sub code level
+      *            because of the JDE Fastr report being compared too.
+      *
+      *  05/12/16 Barb Gutierrez
+      *           Added company control file HSP0071 and farm master.  Had to
+      *           change logic to accomodate multiple companies being processed. E5752
+      *
+      ****************************************************************
+      *
+     Ff0902CD   IF   E           K DISK
+      *  JDE Acct Balances File Key:gbco,gbctry,gbfy,gbmcu,gbobj,gbsub
+      *
+     Ff0006     IF   E           K DISK
+      *  JDE Cost Center Master File (Key:  mcmcu)
+      *
+     Ff0901la   IF   E           K DISK
+      *  JDE Account Master File (Key:  gmaid)
+      *
+     Ff0008     IF   E           K DISK
+      *  JDE Date File (Key:  cddtpn, cddfyj, cdfq)
+      *
+     Fhppa039   IF   E           K DISK
+      *  Cost Category Master (Key:  ccexcd)
+      *
+     Fhsp0071   IF   E           K DISK    rename(ccrec:ccrec71)
+      *  Company Control File
+      *
+     Fhpla018a  IF   E           K DISK
+      *  Farm master
+      *
+     F*hpla100a  uf A E           K DISK
+     Fhpla100   uf A E           K DISK
+      *    HPS JDE Expense File
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      *  Definition for external data area 'DALPER' which holds the last
+      *  period that was closed in HPS.
+      *---------------------------------------------------------------
+      *   Remove use of dalper.  e5752
+     D*                DS
+     D* DALPER                 1     24
+     D* DACC                   1      2  0
+     D* DAYY                   3      4  0
+     D* DAPER                  5      6  0
+     D* DABPDT                 7     14  0
+     D* DAEPDT                15     22  0
+     D* DAPPFL                24     24
+     D*
+      *---------------------------------------------------------------
+     D*  SETUP COMPANY NUMBER TO BE RIGHT JUSTIFIED ZERO FILLED.
+     D*  IE. 100 = 00100
+      *---------------------------------------------------------------
+     D*
+     D                 DS
+     D  WKCO                   1      5
+     D  WKCO1                  1      2    INZ('00')
+     D  WKCO2                  3      5
+     D*
+      *---------------------------------------------------------------
+     D*  Break apart 4 digit year to be 2 digit century and 2 digit yr
+      *---------------------------------------------------------------
+     D*
+     D                 DS
+     D  WKPEYR                 1      4  0
+     D  WKCC                   1      2  0
+     D  WKYY                   3      4  0
+     D*
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+      *---------------------------------------------------------------
+      *  WORK FIELDS
+      *---------------------------------------------------------------
+      *
+     D wkisodate       s               d   datfmt(*iso)
+     D wkepiso         s               d   datfmt(*iso)
+     D*wkco            s              5    inz('00350')
+     D wkmdy           s              6  0
+     D wkamt           s                   like(gban01)
+     D wkunit          s                   like(gban01)
+     D wkobj           s                   like(ccexcd)
+     D svmcu           s                   like(gbmcu)
+     D svobj           s                   like(gbobj)
+     d svccly          s                   like(ccccly)
+     d svcclp          s                   like(cccclp)
+     d svlepdt         s                   like(cclepdt)
+     d svlbpdt         s                   like(cclbpdt)
+     D svsub           s                   like(gbsub)
+     D first           s              1
+     D proc            s              1
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+      *
+      * Read the JDE account balances file for expense accounts only and
+      * actual amounts.
+      *
+     C                   dou       *in90 = *on
+     C                   read      i0902                                  90
+     C                   if        *in90 = *off                                 If read
+      *
+      * Do not want to process these accounts.  They are offset accounts.  This
+      * is temporary until we find a way to omit them in the account master (9/17/03)
+      *
+     C                   if        gbobj <> '9630' and gbobj <> '9642'          9630 / 9642
+      *
+      *  Save the cost center, object and sub first time.......
+     C*
+     C                   if        first = yes
+     C                   move      gbmcu         svmcu
+     C                   move      gbobj         svobj
+     C                   move      gbsub         svsub
+     C*
+     C* Determine if this is a posting costcenter or not and if the category code
+     C* is within range to process.
+     C*
+     C                   exsr      $mcu
+     C*
+     C                   move      no            first
+     C                   endif
+      *
+      * When the cost center or object changes or last record, write it.
+      *
+     C                   if        gbmcu <> svmcu                               mcu/obj changed?
+     C                              or gbobj <> svobj or gbsub <> svsub
+     C                              or *in90 = *on
+      *
+     C                   move      wkamt         jdamt
+     C                   move      wkunit        jdunits
+      *
+     C                   if        proc = yes                                   want to process
+     C                   if        jdamt <> 0 or jdunits <> 0                   have $$ or units?
+     C                   write     jdrec
+     C                   endif                                                  have $$ or units?
+     C                   endif                                                  want to process
+      *
+     C                   move      gbmcu         svmcu
+     C                   move      gbobj         svobj
+     C                   move      gbsub         svsub
+     C                   z-add     0             wkamt
+     C                   z-add     0             wkunit
+      *
+     C                   endif                                                  mcu/object change?
+     C*
+     C* Determine if this is a posting costcenter or not and if the category code
+     C* is within range to process for the new record
+     C*
+     C                   exsr      $mcu
+      *
+      * If this is a cost center to be processed.....
+      *
+     C                   if        proc = yes                                   want to process
+      *
+      * excute the routine to retrieve the category/account codes and descriptions
+      *
+     C                   exsr      $codes
+      *
+      *  select which period we're processing by what's in the data area to determine
+      *  which value to move in.
+      *
+     C                   select
+      *
+      * Process Actual Amounts
+      *
+     C                   when      gblt = 'AA'
+     C                   exsr      $selper$
+      *
+      * Process Actual Units
+      *
+     C                   when      gblt = 'AU'
+     C                   exsr      $selperu
+     C                   endsl
+      *
+     C                   endif                                                  want to process
+      *
+     C                   endif                                                  9630 / 9642
+     C                   endif                                                  If found
+     C                   enddo                                                  dou
+      *
+     C                   seton                                        LR
+      *
+      /EJECT
+      *----------------------------------------------------------------
+      * Setup the new category/account codes and descriptions
+      *----------------------------------------------------------------
+      *
+     C     $codes        begsr
+      *
+      * Retreive expense category code and description
+      *
+     C                   movel(p)  svobj         wkobj
+     C     wkobj         chain     hppa039                            92
+     C                   if        *in92 = *off                                 have record
+     C                   movel     ccexclcd      jdcacode                       expense class code
+     C                   movel(p)  ccexclds      jdcadesc                       expense class descr
+     C                   else                                                   no record found
+     C                   movel(p)  '99'          jdcacode                       expense class code
+     C                   movel(p)  'Unknown'     jdcadesc                       expense class descr
+     C                   endif                                                  have record
+      *
+      * Retreive jde account description
+      *
+     C     gbaid         chain     i0901                              94        Co/Cust
+     C                   if        *in94 = *off                                 If found
+     C                   move(p)   gmdl01        jdobjdesc
+     C                   else                                                   If found
+     C                   move      *blanks       jdobjdesc
+     C                   endif                                                  If found
+      *
+     C                   move      svobj         jdobjno
+     C                   move      svsub         jdsubno
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Process cost center
+      *----------------------------------------------------------------
+      *
+     C     $mcu          begsr
+      *
+      * Only process posting cost centers and cost centers that are coded
+      * as an actual farm....
+      *
+     C     svmcu         chain     i0006                              91
+     C                   if        *in91 = *off                                 If found
+     C                   if        mcpecc <> 'N'
+     C                   if        mcrp03 = 'SOW' or                            SOW
+     C                                mcrp03 = 'NUR' or                         NUR
+     C                                mcrp03 = 'G/F'                            G/F
+      *
+      *  setup static information
+      *
+     C                   move      '01 '         jdbucode
+     C                   moveL(p)  'Farm'        jdbudesc
+     C                   move      svmcu         jdcccode
+     C                   move      mcdl01        jdccdesc
+     C                   move      svmcu         wkfscd            3 0
+     C                   z-add     wkfscd        jdfscd
+      *
+     C                   move      yes           proc
+      *
+     C                   else                                                   non posting mcu
+     C                   move      no            proc
+     C                   endif                                                  SOW
+      *
+     C                   else                                                   non posting mcu
+     C                   move      no            proc
+     C                   endif                                                  posting acct
+      *
+     C                   else                                                   not found
+     C                   move      no            proc
+     C                   endif                                                  If found
+      *
+     C                   endsr
+      *
+      /EJECT
+      *----------------------------------------------------------------
+      * Process actual amounts for the period being passed in.
+      *----------------------------------------------------------------
+      *
+     C     $selper$      begsr
+      *
+      *  select which period we're processing by what's in the data area to determine
+      *  which value to move in.
+      *    changed to use last close period from company control file instead
+      *    of dalper.  e5752
+      *
+      * period 1
+     C                   select
+      *
+     C                   when      svcclp = 01
+     C                   add       gban01        wkamt
+      * period 2
+     C                   when      svcclp = 02
+     C                   add       gban02        wkamt
+      * period 3
+     C                   when      svcclp = 03
+     C                   add       gban03        wkamt
+      * period 4
+     C                   when      svcclp = 04
+     C                   add       gban04        wkamt
+      * period 5
+     C                   when      svcclp = 05
+     C                   add       gban05        wkamt
+      * period 6
+     C                   when      svcclp = 06
+     C                   add       gban06        wkamt
+      * period 7
+     C                   when      svcclp = 07
+     C                   add       gban07        wkamt
+      * period 8
+     C                   when      svcclp = 08
+     C                   add       gban08        wkamt
+      * period 9
+     C                   when      svcclp = 09
+     C                   add       gban09        wkamt
+      * period 10
+     C                   when      svcclp = 10
+     C                   add       gban10        wkamt
+      * period 11
+     C                   when      svcclp = 11
+     C                   add       gban11        wkamt
+      * period 12
+     C                   when      svcclp = 12
+     C                   add       gban12        wkamt
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Process actual units for the period being passed in.
+      *----------------------------------------------------------------
+      *
+     C     $selperu      begsr
+      *
+      *  select which period we're processing by what's in the data area to determine
+      *  which value to move in.
+      *    changed to use last close period from company control file instead
+      *    of dalper.  e5752
+      *
+      * period 1
+     C                   select
+      *
+     C                   when      svcclp = 01
+     C                   add       gban01        wkunit
+      * period 2
+     C                   when      svcclp = 02
+     C                   add       gban02        wkunit
+      * period 3
+     C                   when      svcclp = 03
+     C                   add       gban03        wkunit
+      * period 4
+     C                   when      svcclp = 04
+     C                   add       gban04        wkunit
+      * period 5
+     C                   when      svcclp = 05
+     C                   add       gban05        wkunit
+      * period 6
+     C                   when      svcclp = 06
+     C                   add       gban06        wkunit
+      * period 7
+     C                   when      svcclp = 07
+     C                   add       gban07        wkunit
+      * period 8
+     C                   when      svcclp = 08
+     C                   add       gban08        wkunit
+      * period 9
+     C                   when      svcclp = 09
+     C                   add       gban09        wkunit
+      * period 10
+     C                   when      svcclp = 10
+     C                   add       gban10        wkunit
+      * period 11
+     C                   when      svcclp = 11
+     C                   add       gban11        wkunit
+      * period 12
+     C                   when      svcclp = 12
+     C                   add       gban12        wkunit
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      *  Pass in company.  E5752
+      *
+     C     *entry        plist
+     C                   parm                    xxcocd            3
+      *
+      *  set up key lists
+      *
+     C     key100        klist
+     C                   kfld                    fsfscd                         farm site
+     C                   kfld                    wkepiso                        period end date
+      *
+      * Bring in the data area that contains the last Period posted
+      * in hps.
+      *    remove use of dalper E5752
+      *
+     C**   *dtaara       define                  dalper
+     C**                 in        dalper
+      *
+      * Read the company control file for the company being passed in to retrieve
+      * the last HPS closed year/period.      E5752
+      *
+     C     xxcocd        chain     hsp0071                            92
+     C                   if        *in92 = *off                                 If exists
+     C                   move      ccccly        svccly                         last close year
+     C                   move      cccclp        svcclp                         last close period
+     C                   move      cclbpdt       svlbpdt                        last close beg date
+     C                   move      cclepdt       svlepdt                        last close end date
+     C                   endif                                                  If exists
+      *
+     C**   *ymd          move      daepdt        wkepiso
+     C     *ymd          move      svlepdt       wkepiso
+      *
+      *  Only delete records for company being processed.
+      *
+     C     xxcocd        setll     hpla018a
+     C                   dou       *in93 = *on
+     C     xxcocd        reade     hpla018a                               93
+     C                   if        *in93 = *off                                 If read
+      *
+      * Always delete any existing period records from the Datamart file.
+      *   should only have the farms for the company being processed.
+      *
+     C     key100        setll     hpla100
+     C                   dou       *in91 = *on                                  Do deletes
+     C     key100        reade     hpla100                                91
+     C                   if        *in91 = *off                                 If read
+     C                   delete    jdrec
+     C                   endif                                                  If read
+     C                   enddo                                                  Do deletes
+     C                   endif                                                  If read
+     C                   enddo                                                  Do deletes
+      *
+      *  Use the company being passed in to retrieve the JDE period end
+      *  date.  Need to proceed it with leading zeros first.  E5752
+      *
+     C                   move      xxcocd        wkco2
+      *
+      * move 4 digit year from company values file into data structure to
+      * break up into cc and yy for use in jde routine.  E5752
+      *
+     C                   move      svccly        wkpeyr
+      *
+      * Retrieve JDE period end date
+      *  send in year and period retrieved from the company values file.  e5752
+      *
+     C                   call      'X09031'
+     C                   parm      '3'           #calc             1
+     C                   parm      wkco          #co               5
+     C     wkmdy         parm                    #dg               6 0
+     C     jdperiod      parm      svcclp        #pn               2 0
+     C                   parm      wkyy          #fy               2 0
+     C                   parm      wkcc          #ctry             2 0
+     C                   parm                    #edt              1
+     C                   parm                    #dgsy             1
+      *
+      * Setup Date from jde (mmddyy) to Data Mart *ISO (CCYY-MM-DD)
+      *
+     C     *mdy          move      wkmdy         wkisodate                      Invoice Date
+     C                   move      wkisodate     jdpedte                        Invoice Date
+      *
+      *  use last closed year from company control file instead of lda. e5752
+      *
+     C**                 move      dayy          jdyear
+     C**                 movel     dacc          jdyear
+     C                   move      wkyy          jdyear
+     C                   movel     wkcc          jdyear
+      *
+     C                   endsr

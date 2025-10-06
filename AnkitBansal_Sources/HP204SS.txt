@@ -1,0 +1,423 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP204SS- Build JDE Upload file: HPS Semen Doses Shipped
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     05/22/03
+      *
+      * FUNCTION: This program builds an upload file of current period
+      *           data that will be interfaced to JDE.
+      *
+      *           This program is called from HP204CLSS which is called
+      *           from the upload driver CL HP404CL..which is submitted from
+      *           HP404.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/16/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 02/26/16  Barb Gutierrez(E5290)
+      *           Added logic to handle new company Iowa Farms.
+      *
+      * 10/12/18  Danny Nguyen  (S13682)
+      *           Removed control break by Company since OPNQRYF logic on
+      *           hsl018i is now selecting by Company.
+      *
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsl018i   if   e           k disk
+      *    Farm site
+      *    (only records with cost centers selected in open query)
+      *
+      *
+     Fhsl081b   if   e           k disk
+      *    Weekly sire line doses
+      *    (records selected in open query)
+      *
+      *
+     Fhsl099a   if   e           k disk
+      *    Sire line sources
+      *
+      *
+     Fhsp204    uf a e           k disk
+      *    HPS to JDE upload file
+      *
+      *
+     Fhsl204a   if a e           k disk    rename(hjrec:hjreca) prefix(p1)
+      *    HPS to JDE upload file
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      *---------------------------------------------------------------
+      * STANDALONE FIELDS
+      *---------------------------------------------------------------
+      *
+      * Control fields
+      *
+     D svmcu           s                   like(fscjd)
+     D svcocd          s                   like(fscocd)
+     D svdesc          s                   like(hjdesc)
+     D svre            s                   like(hjre)
+     D first           s              1    inz('Y')
+      *
+      * Workfields
+      *
+     D wkmcu           s                   like(hjmcu)
+      *
+      * Workfields for accumulating
+      *
+     D wkdono          s                   like(hjhpsval)
+     D wkhpsval        s                   like(hjhpsval)
+     D wkjdeval        s                   like(hjjdeval)
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldacyr                 1      4  0
+     D  ldacpe                 5      6  0
+     D  ldbpdt                 7     14  0
+     D  ldepdt                15     22  0
+     D  ldhucd                23     24
+      *
+     D  ldhuds               100    129
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Process each farm selected by open query
+      *
+     C                   exsr      $farms
+      *
+      * Set 'new batch number' and 'new document number' flags
+      *
+     C                   exsr      $flags
+      *
+      * Write offsetting entries
+      *
+     C                   exsr      $offset
+      *
+     C                   seton                                        lr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process all farms selected by open query (ie: farms that have a cost center)
+      *--------------------------------------------------------------------------------------
+      *
+     C     $farms        begsr
+      *
+     C     *loval        setll     hsl018i
+      *
+     C                   dou       *in90 = *on                                  Do farms
+     C                   read      hsl018i                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   if        first = yes
+     C                   exsr      $first
+     C                   endif
+      *
+      * Control break on company number
+      *   a) write last record to interface file
+      *   b) clear accumulators and save cost center
+      *   c) Set new batch number and new document flags
+      *   e) Write offsetting entries for company
+      *
+     C                   select
+      * S13682-Removed Control Break on Company Number. Open Query File Logic will now select
+      *        by Company Number.
+13682C**                 when      svcocd <> fscocd
+  |  C**                 exsr      $srcjde
+  |  C**                 exsr      $flags
+  |  C**                 exsr      $offset
+  |  C**                 exsr      $clear
+13682C**                 move      fscocd        svcocd
+      *
+      * Control break on cost center
+      *   a) write records to interface file
+      *   b) clear accumulators and save cost center
+      *
+     C                   when      svmcu <> fscjd
+     C                   exsr      $srcjde
+     C                   exsr      $clear
+     C                   endsl
+      *
+      * Accumulate detail values for the source farm
+      *
+     C                   exsr      $srcfarm
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do BGF farms
+      *
+      * Last record processing for farms
+      *
+     C                   exsr      $srcjde
+     C                   exsr      $clear
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Retrieve values for the semen source farm
+      *--------------------------------------------------------------------------------------
+      *
+     C     $srcfarm      begsr
+      *
+      * Process each Sire Line Source record that exists for this farm.
+      *
+     C     fsfscd        setll     hsl099a
+     C                   dou       *in91 = *on                                  Do sources
+     C     fsfscd        reade     hsl099a                                91
+     C                   if        *in91 = *off                                 If more sources
+      *
+      * Now accumulate the Weekly Sire Line Doses data for this sire source:
+      *
+     C     sssscd        setll     hsl081b
+     C                   dou       *in93 = *on                                  Do semen doses
+     C     sssscd        reade     hsl081b                                93
+     C                   if        *in93 = *off                                 If EOF
+     C                   add       swdono        wkdono
+     C                   endif                                                  If EOF
+     C                   enddo                                                  Do semen doses
+      *
+     C                   endif                                                  If more sources
+     C                   enddo                                                  Do sources
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write records to the upload file for a cost center
+      *--------------------------------------------------------------------------------------
+      *
+     C     $srcjde       begsr
+      *
+      * Semen doses shipped
+      *
+     C                   if        wkdono <> 0
+     C                   z-add     wkdono        hjhpsval
+     C     100           mult      wkdono        hjjdeval
+     C                   eval      hjdesc = 'Semen Doses Shipped'
+     C                   eval      hjobj = '6017'
+     C                   eval      hjsub = '001'
+     C                   move      *blank        hjre
+     C                   exsr      $write204
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write record to interface file
+      *--------------------------------------------------------------------------------------
+      *
+     C     $write204     begsr
+      *
+     C                   eval      hjexa = hjdesc
+     C                   move      'AU'          hjtype
+     C                   move      no            hjoffset
+     C                   z-add     0             hjbatval
+     C                   move      svmcu         hjmcu
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+     C                   move      svcocd        hjcocd
+      *
+     C                   write     hjrec
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Clear accumulators
+      *--------------------------------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   z-add     0             wkdono
+      *
+     C                   move      fscjd         svmcu
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process interface records and populate 'new batch number' and 'new doc number' flags
+      *--------------------------------------------------------------------------------------
+      *
+      * The interface file is used by several HPS programs. But, we have written only 1 JDE
+      * program to read the file and write its records into JDE. And, each 'upload' seems to
+      * have different requirements on the number of 'batches' and 'documents'. So, we
+      * customize the 'flag' logic here so that the JDE program can be 'generic'.
+      *
+      * For this upload to JDE, we will ultimately:
+      *    1) create a new JDE batch for each unique 'description' per company
+      *    2) retrieve a new JDE 'document' number for each unique 'description' per company
+      *
+      *
+     C     $flags        begsr
+      *
+     C                   move      *blank        svdesc
+     C                   move      *blank        svre
+     C     svcocd        setll     hsp204
+      *
+     C                   dou       *in91 = *on                                  Do flag loop
+     C     svcocd        reade     hsp204                                 91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C                   select
+     C                   when      svdesc <> hjdesc
+     C                   move      hjdesc        svdesc
+     C                   move      hjre          svre
+     C                   move      yes           hjnewbat
+     C                   move      yes           hjnewdoc
+     C                   other
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+     C                   endsl
+      *
+     C                   update    hjrec
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do flag loop
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Process interface records and write offsetting records
+      *--------------------------------------------------------------------------------------
+      *
+     C     $offset       begsr
+      *
+     C                   move      yes           first
+     C     svcocd        setll     hsl204a
+      *
+     C                   dou       *in91 = *on                                  Do offsets
+     C     svcocd        reade     hsl204a                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+     C                   if        first = yes
+     C                   move      no            first
+     C                   move      p1hjdesc      svdesc
+     C                   move      p1hjre        svre
+     C                   endif
+      *
+      * Control break on description
+      *   a) write offsetting record to interface file
+      *   b) clear accumulator and save description
+      *
+     C                   if        svdesc <> p1hjdesc
+     C                   exsr      $writeoff
+     C                   endif
+      *
+      * Detail processing
+     C                   add       p1hjhpsval    wkhpsval
+     C                   add       p1hjjdeval    wkjdeval
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do offsets
+      *
+      *  Write offsetting record for last description
+      *
+     C                   if        first = no
+     C                   exsr      $writeoff
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write offset records to interface file
+      *--------------------------------------------------------------------------------------
+      *
+     C     $writeoff     begsr
+      *
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+      *
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+     C                   move      'AU'          hjtype
+     C                   move      svcocd        wkmcu
+     C                   eval      hjmcu = wkmcu
+     C                   eval      hjobj = '6020'
+     C                   move      *blank        hjsub
+     C                   move      yes           hjoffset
+      *
+     C                   move      svdesc        hjdesc
+     C                   move      svre          hjre
+     C                   eval      hjexa = hjdesc
+     C     -1            mult      wkhpsval      hjhpsval
+     C     -1            mult      wkjdeval      hjjdeval
+      *
+      * Populate the 'batch header value' field with the 'offset' value. Force the
+      * number to be positive.
+      *
+     C                   select
+     C                   when      hjjdeval >= 0
+     C                   z-add     hjjdeval      hjbatval
+     C                   other
+     C     -1            mult      hjjdeval      hjbatval
+     C                   endsl
+      *
+     C                   write     hjrec
+      *
+     C                   z-add     0             wkhpsval
+     C                   z-add     0             wkjdeval
+     C                   move      p1hjdesc      svdesc
+     C                   move      p1hjre        svre
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * First time subroutine
+      *--------------------------------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+     C                   move      fscjd         svmcu
+     C                   move      fscocd        svcocd
+     C                   move      no            first
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Initialization subroutine
+      *--------------------------------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      *
+     C                   endsr
+      /EJECT

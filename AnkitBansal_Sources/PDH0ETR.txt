@@ -1,0 +1,384 @@
+// ?------------------------------------------------------------------------------------------------
+// ?Synon action diagram for PDH0ETR
+// ?Date: 14.08.2025 Time: 03:34:43
+// ?------------------------------------------------------------------------------------------------
+
+//?USER: Initialize program
+
+EXECUTE FUNCTION(VAL Set Inter. Access  IF) TYPE(EXCINTFUN)                     AC1144606;
+PARAMETER('I/C');
+PARAMETER(WRK.Company_Number);
+PARAMETER(WRK.Warehouse_Code);
+PARAMETER(PAR.Allow_Multi_Company);
+PARAMETER(PAR.Default_Printer);
+PARAMETER(PAR.Salesperson_Code);
+
+//?USER: Initialize screen for old transaction
+
+EXECUTE FUNCTION(Rtv Base Values        RT) TYPE(RTVOBJ) FILE(CABZREP)          AC1125011;
+PARAMETER(CTL.Company_Number);
+PARAMETER(CTL.Item_Code);
+PARAMETER(WRK.Description_Line_One);
+PARAMETER(WRK.Description_Line_Two);
+PARAMETER(CTL.UOM_Primary);
+PARAMETER(WRK.Conversion_Factor_1);
+PARAMETER(WRK.Operation_Factor_1);
+PARAMETER(WRK.UOM_Second);
+PARAMETER(WRK.Conversion_Factor_2);
+PARAMETER(WRK.Operation_Factor_2);
+PARAMETER(WRK.UOM_Third);
+PARAMETER(WRK.UOM_Pricing);
+PARAMETER(CTL.Unit_Weight_USR);
+PARAMETER(WRK.Production_Date_Control);
+PARAMETER(WRK.Catch_Weight_Status);
+PARAMETER(WRK.Fresh_Chilling_Time);
+
+//?USER: Initialize subfile record (old record)
+
+EXECUTE FUNCTION(Rtv Allocated Qty     RT) TYPE(RTVOBJ) FILE(PDL8CPP)           AC1514260;
+PARAMETER(DB2.Company_Number);
+PARAMETER(DB2.Item_Code);
+PARAMETER(DB2.Warehouse_Code);
+PARAMETER(DB2.Production_Date);
+PARAMETER(DB2.Lot_Number);
+PARAMETER(DB2.Location_Code);
+PARAMETER(DB2.Location_Level);
+PARAMETER(RCD.OIA_Alloc_Shipped_Qty);
+
+// RCD.Quantity Avail USR = RCD.ILL Item Qty On-Hand - RCD.OIA Alloc/Shipped Qty
+RCD.Quantity_Avail_USR = RCD.ILL_Item_Qty_On_Hand - RCD.OIA_Alloc_Shipped_Qty;
+
+EXECUTE FUNCTION(Val Comment Exist     RT) TYPE(RTVOBJ) FILE(PDL6CPP)           AC1514751;
+PARAMETER(DB2.Company_Number);
+PARAMETER(DB2.Item_Code);
+PARAMETER(DB2.Warehouse_Code);
+PARAMETER(DB2.Production_Date);
+PARAMETER(DB2.Lot_Number);
+PARAMETER(RCD.Comment_Sts_USR);
+
+//?USER: Initialize subfile record (new record)
+
+// RCD.Comment Sts USR = CND.Does Not Exist
+RCD.Comment_Sts_USR = 'D';
+
+//?USER: Validate header non-key fields
+
+//?Display Lot Trans
+CASE;
+
+// IF CTL.*CMD key is CF07
+IF CTL.*CMD_key = '07';
+
+// Call program Dsp Item Lot Trans    DF.
+CALL PROGRAM(Dsp Item Lot Trans    DF) ('PDKXDFR');
+PARAMETER(CTL.Company_Number);
+PARAMETER(CTL.Item_Code);
+PARAMETER(CTL.Warehouse_Code);
+PARAMETER(CTL.Production_Date);
+PARAMETER(*ZERO);
+
+// PGM.*Defer confirm = CND.Defer confirm
+PGM.*Defer_confirm = 'Y';
+
+ENDIF;
+
+//?USER: Validate subfile record fields
+
+//?Init:  Status
+CASE;
+
+// IF RCD.ILL Status is *ALL values
+IF RCD.ILL_Status = 'A'/'H';
+
+//?Init:  Status
+// IF *OTHERWISE
+IF *OTHERWISE;
+
+// RCD.ILL Status = CND.Available
+RCD.ILL_Status = 'A';
+
+ENDIF;
+
+//?Init:  Location Level
+CASE;
+
+// IF RCD.Item Code is Pancreas
+IF RCD.Item_Code = 93210;
+
+// RCD.Location Level = CON.1
+RCD.Location_Level = 1;
+
+ENDIF;
+
+//?Val:  Status Reason
+CASE;
+
+// IF RCD.ILL Status is Hold
+IF RCD.ILL_Status = 'H';
+
+// AND RCD.Inv Sts Reason Code is EQ Blank
+AND RCD.Inv_Hold_Reason_Code = *BLANK;
+
+// Send error message - 'Status Reason Code is required.'
+ERROR(USR2672);
+MSGPARM(RCD.Inv_Hold_Reason_Code);
+
+ENDIF;
+
+//?Val:  Location Level
+CASE;
+
+// IF RCD.Location Level is 0 through 5
+IF RCD.Location_Level >= 0;
+ AND RCD.Location_Level <= 5;
+
+//?Val:  Location Level
+// IF *OTHERWISE
+IF *OTHERWISE;
+
+// Send error message - 'Level must be between 0 and 5.'
+ERROR(USR3135);
+MSGPARM(RCD.Location_Level);
+
+ENDIF;
+
+//?Val:  Location Quantity
+CASE;
+
+// IF RCD.ILL Item Qty On-Hand LT RCD.OIA Alloc/Shipped Qty
+IF RCD.ILL_Item_Qty_On_Hand < RCD.OIA_Alloc_Shipped_Qty;
+
+// Send information message - 'Allocated Quantity for Orders exceeds the Location Quantity.'
+MESSAGE(USR2708 *INFO);
+MSGPARM(RCD.ILL_Item_Qty_On_Hand);
+
+ENDIF;
+
+//?Display Orders
+CASE;
+
+// IF RCD.*SFLSEL is Option 5
+IF RCD.*SFLSEL = '5'/'5';
+
+// Call program Dsp Lot/Loc Orders    DF.
+CALL PROGRAM(Dsp Lot/Loc Orders    DF) ('PDIEDFR');
+PARAMETER(RCD.Company_Number);
+PARAMETER(RCD.Item_Code);
+PARAMETER(RCD.Warehouse_Code);
+PARAMETER(RCD.Production_Date);
+PARAMETER(RCD.Lot_Number);
+PARAMETER(RCD.Location_Code);
+PARAMETER(RCD.Location_Level);
+
+// PGM.*Defer confirm = CND.Defer confirm
+PGM.*Defer_confirm = 'Y';
+
+// RCD.*SFLSEL = CND.*Reset to blank
+RCD.*SFLSEL = *BLANK;
+
+ENDIF;
+
+//?Calculate Available Ship Date/Initialize Status
+CASE;
+
+// IF RCD.Location Code NE WRK.BLANK
+IF RCD.Location_Code <> WRK.BLANK;
+
+// AND RCD.ILL Avail Ship Date EQ WRK.ZERO
+AND RCD.ILL_Avail_Ship_Date = WRK.ZERO;
+
+EXECUTE FUNCTION(Clc Loc Avail Shp Dte IF) TYPE(EXCINTFUN)                      AC1510130;
+PARAMETER(RCD.Company_Number);
+PARAMETER(RCD.Warehouse_Code);
+PARAMETER(RCD.Production_Date);
+PARAMETER(RCD.Location_Code);
+PARAMETER(RCD.ILL_Avail_Ship_Date);
+
+ENDIF;
+
+//?Edit Comments
+CASE;
+
+// IF RCD.*SFLSEL is Option 9
+IF RCD.*SFLSEL = '9'/'9';
+
+// Call program Zzz Item Lot/Loc Comm EF.
+CALL PROGRAM(Zzz Item Lot/Loc Comm EF) ('PDHYEFR');
+PARAMETER(CTL.Company_Number);
+PARAMETER(CTL.Item_Code);
+PARAMETER(CTL.Warehouse_Code);
+PARAMETER(CTL.Production_Date);
+PARAMETER(RCD.Lot_Number);
+
+// PGM.*Defer confirm = CND.Defer confirm
+PGM.*Defer_confirm = 'Y';
+
+// RCD.*SFLSEL = CND.*Reset to blank
+RCD.*SFLSEL = *BLANK;
+
+// PGM.*Reload subfile = CND.*YES
+PGM.*Reload_subfile = 'Y';
+
+// PGM.*Continue transaction = CND.*NO
+PGM.*Continue_transaction = 'N';
+
+QUIT;
+
+ENDIF;
+
+//?10=Warehouse Transfer
+CASE;
+
+// IF RCD.*SFLSEL is Option 10
+IF RCD.*SFLSEL = '10';
+
+// Call program Zzz Item Whs Trans    PV.
+CALL PROGRAM(Zzz Item Whs Trans    PV) ('POE9PVR');
+PARAMETER(RCD.Company_Number);
+PARAMETER(RCD.Item_Code);
+PARAMETER(RCD.Warehouse_Code);
+PARAMETER(RCD.Production_Date);
+PARAMETER(RCD.Lot_Number);
+PARAMETER(RCD.Location_Code);
+PARAMETER(RCD.Location_Level);
+PARAMETER(RCD.ILL_Item_Qty_On_Hand);
+PARAMETER(RCD.ILL_Unit_Weight);
+PARAMETER(RCD.ILL_Avail_Ship_Date);
+PARAMETER(RCD.ILL_Status);
+PARAMETER(RCD.Inv_Hold_Reason_Code);
+
+// PGM.*Defer confirm = CND.Defer confirm
+PGM.*Defer_confirm = 'Y';
+
+// RCD.*SFLSEL = CND.*Reset to blank
+RCD.*SFLSEL = *BLANK;
+
+// PGM.*Reload subfile = CND.*YES
+PGM.*Reload_subfile = 'Y';
+
+// PGM.*Continue transaction = CND.*NO
+PGM.*Continue_transaction = 'N';
+
+QUIT;
+
+ENDIF;
+
+//?CALC: Subfile record function fields
+
+CTL.Quantity_Loc_On_Hand_SUM = SUM(RCD.ILL_Item_Qty_On_Hand);
+
+CTL.Quantity_Loc_Alloc_SUM = SUM(RCD.OIA_Alloc_Shipped_Qty);
+
+CTL.Quantity_Loc_Avail_SUM = SUM(RCD.Quantity_Avail_USR);
+
+//?CALC: Header function fields
+
+EXECUTE FUNCTION(Item Desc DRV) TYPE(DRVFLD)                                    AC1505592;
+PARAMETER(CTL.Item_Desc_DRV);
+PARAMETER(CTL.Item_Code);
+
+//?USER: Validate totals
+
+CASE;
+
+// IF CTL.Quantity Loc On-Hand SUM is LT Zero
+IF CTL.Quantity_Loc_On_Hand_SUM < *ZERO;
+
+// Send error message - 'Quantity cannot be negative.'
+ERROR(USR0416);
+MSGPARM(CTL.Quantity_Loc_On_Hand_SUM);
+
+ENDIF;
+
+//?USER: Change header DBF record
+
+EXECUTE FUNCTION(Chg Balance Dtl NULL  IF) TYPE(EXCINTFUN) FILE(CAB1REP)        AC1505607;
+
+//?USER: Delete detail DBF record
+
+EXECUTE FUNCTION(Del Item Loc/Crt Trn  DL) TYPE(DLTOBJ) FILE(PDL5CPP)           AC1505605;
+PARAMETER(RCD.Company_Number);
+PARAMETER(RCD.Item_Code);
+PARAMETER(RCD.Warehouse_Code);
+PARAMETER(RCD.Production_Date);
+PARAMETER(RCD.Lot_Number);
+PARAMETER(RCD.Location_Code);
+PARAMETER(RCD.Location_Level);
+
+//?USER: Change detail DBF record
+
+EXECUTE FUNCTION(Chg Item Loc/Crt Trn  CH) TYPE(CHGOBJ) FILE(PDL5CPP)           AC1505604;
+PARAMETER(RCD.Company_Number);
+PARAMETER(RCD.Item_Code);
+PARAMETER(RCD.Warehouse_Code);
+PARAMETER(RCD.Production_Date);
+PARAMETER(*ZERO);
+PARAMETER(RCD.Location_Code);
+PARAMETER(RCD.Location_Level);
+PARAMETER(RCD.ILL_Item_Qty_On_Hand);
+PARAMETER(RCD.ILL_Unit_Weight);
+PARAMETER(RCD.ILL_Co_Packer_Lot_Num);
+PARAMETER(RCD.ILL_Item_Wgt_On_Hand);
+PARAMETER(RCD.ILL_Unused_Qty_3);
+PARAMETER(RCD.ILL_Unused_Wgt_3);
+PARAMETER(RCD.ILL_Avail_Ship_Date);
+PARAMETER(RCD.ILL_Unused_Date_1);
+PARAMETER(RCD.ILL_Unused_Date_2);
+PARAMETER(RCD.ILL_Unused_Nbr_1);
+PARAMETER(RCD.ILL_Customer_Code);
+PARAMETER(RCD.ILL_Status);
+PARAMETER(RCD.ILL_Unused_Sts_1);
+PARAMETER(RCD.ILL_Unused_Sts_2);
+PARAMETER(RCD.ILL_Unused_Sts_3);
+PARAMETER(RCD.Inv_Hold_Reason_Code);
+PARAMETER(RCD.EDI_Status_1);
+PARAMETER(RCD.EDI_Status_2);
+PARAMETER(RCD.EDI_Status_3);
+PARAMETER(RCD.Record_Status);
+PARAMETER(RCD.Job_Time);
+PARAMETER(RCD.User_Id);
+PARAMETER(RCD.Job_Name);
+PARAMETER(RCD.Job_Date);
+
+//?USER: Create detail DBF record
+
+EXECUTE FUNCTION(Crt Item Loc/Crt Trn  CR) TYPE(CRTOBJ) FILE(PDL5CPP)           AC1513774;
+PARAMETER(CTL.Company_Number);
+PARAMETER(CTL.Item_Code);
+PARAMETER(CTL.Warehouse_Code);
+PARAMETER(CTL.Production_Date);
+PARAMETER(*ZERO);
+PARAMETER(RCD.Location_Code);
+PARAMETER(RCD.Location_Level);
+PARAMETER(RCD.ILL_Item_Qty_On_Hand);
+PARAMETER(CTL.Unit_Weight_USR);
+PARAMETER(RCD.ILL_Co_Packer_Lot_Num);
+PARAMETER(RCD.ILL_Item_Wgt_On_Hand);
+PARAMETER(RCD.ILL_Unused_Qty_3);
+PARAMETER(RCD.ILL_Unused_Wgt_3);
+PARAMETER(RCD.ILL_Avail_Ship_Date);
+PARAMETER(RCD.ILL_Unused_Date_1);
+PARAMETER(RCD.ILL_Unused_Date_2);
+PARAMETER(RCD.ILL_Unused_Nbr_1);
+PARAMETER(RCD.ILL_Customer_Code);
+PARAMETER(RCD.ILL_Status);
+PARAMETER(RCD.ILL_Unused_Sts_1);
+PARAMETER(RCD.ILL_Unused_Sts_2);
+PARAMETER(RCD.ILL_Unused_Sts_3);
+PARAMETER(RCD.Inv_Hold_Reason_Code);
+PARAMETER(RCD.EDI_Status_1);
+PARAMETER(RCD.EDI_Status_2);
+PARAMETER(RCD.EDI_Status_3);
+PARAMETER(RCD.Record_Status);
+PARAMETER(RCD.Job_Time);
+PARAMETER(RCD.User_Id);
+PARAMETER(RCD.Job_Name);
+PARAMETER(RCD.Job_Date);
+
+//?USER: Process command keys
+
+// PGM.*Continue transaction = CND.*NO
+PGM.*Continue_transaction = 'N';
+
+QUIT;
+

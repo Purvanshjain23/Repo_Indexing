@@ -1,0 +1,286 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  PKTMUPR                                       */
+/*  PROGRAM NAME:    PAYMENT PRODUCER EDIT                         */
+/*  PROGRAMMER:      SUSAN L. MASON                                */
+/*  CREATE DATE:     06/09/95                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS SUBMITTED WITH EXECUTE MESSAGE     */
+/*                   FROM PMT BALANCE TO KILL                      */
+/*                   USER OPTIONS ARE PASSED THROUGH THE PARMS.    */
+/*                                                                 */
+/*******************************************************************/
+/*  Modification History                                           */
+/*                                                                 */
+/*  Modification     10/04/96                                      */
+/*                   REMOVE HARD CODE LIBRARY FROM CL              */
+/*                                                                 */
+/*  SLM              11/04/96                                      */
+/*                   SHIP WEIGHT FIX PGM UNTIL HELD OVER PRJ INSTL */
+/*                                                                 */
+/*  SLM              12/02/96                                      */
+/*                   REMOVE SHIPPED WEIGHT                         */
+/*                                                                 */
+/*  RMC              05/12/97                                      */
+/*                   COMMENT OVERRIDES FOR COMPETITORS REPORTS     */
+/*                                                                 */
+/*  RMC              12/16/98                                      */
+/*                   ADD PRTOVR FOR COMMISSION EDIT/POST RPT       */
+/*                                                                 */
+/*  SLM              02/21/08                                      */
+/*                   IF USR CLASS IS PROGRAMER THEN CLEAR          */
+/*                   THE TATTOO FAX DRIVER (EMAIL)                 */
+/*                   SO THE PROGRAMER CAN RECREATE FOR             */
+/*                   TESTING                                       */
+/*                                                                 */
+/*  ROSE CENTONZE  08/12/15 E004069 - NEW TFS 2377                 */
+/*                 M3 - IN POST PRINT IF M3 IS LIVE/PARALLEL CALL  */
+/*                 M3 PROCESS TO CRT VOUCHERS IN PLCCCPP/PLCFCPP. */
+/*                 WRITE TO QTEMP, COPY/ADD TO M3IFLIB WHEN DONE      */
+/*                                                                 */
+/*  SLM            0530/17  E7519 M3 *blank supplier invalid on a  */
+/*                 trucker or on a producer when allowed or not    */
+/*                 allowed payment edit allow the error,           */
+/*                 post do not allow the error                     */
+/*                                                                 */
+/*                 ADD override to the following PWCDPFR$          */
+/*                 ADD override to the following PWCQPFR$          */
+/*                                                                 */
+/*  JBB            06/30/17 E9904 TF2  Increase the length of the  */
+/*                 &DATAS field to accomodate en allowed or not    */
+/*                 allowed payment edit allow the error,           */
+/*                 post do not allow the error                     */
+/*                                                                 */
+/*  JBB            01/04/19 E14281 - Add Print File Override       */
+/*                 Add print file override for the Pricing Error   */
+/*                 report PWHYPFR$.  Execute a Sequel Viewpoint    */
+/*                 for the Payment Price Errors and email it to    */
+/*                 a retrieved distribution list.                  */
+/*                                                                 */
+/*******************************************************************/
+             PGM        PARM(&RTN &PDEV &HOLD &SAVE &XCOPIES &XCOMP +
+                       &APP)
+/* PRINT OPTION PARMS                                             */
+             DCL        VAR(&RTN) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&PDEV) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&HOLD) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&SAVE) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&XCOPIES) TYPE(*CHAR) LEN(15)
+
+/* FUNCTION SPECIFIC PARMS                                        */
+             DCL        VAR(&XCOMP) TYPE(*CHAR) LEN(15)
+             DCL        VAR(&APP) TYPE(*CHAR) LEN(33)
+             DCL        VAR(&LPP) TYPE(*CHAR) LEN(40)
+             DCL        VAR(&PYMTDATE)  TYPE(*DEC) LEN(7 0)
+             DCL        VAR(&PYMTDATEA) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&DATEA)     TYPE(*CHAR) LEN(10)
+             DCL        VAR(&PYMTSTEP)  TYPE(*DEC) LEN(5 0)
+             DCL        VAR(&EMLMSG)    TYPE(*CHAR) LEN(100)
+             DCL        VAR(&COMPA)     TYPE(*CHAR) LEN(3)
+             DCL        VAR(&DL)        TYPE(*CHAR) LEN(100)
+             DCL        VAR(&ERRLVL)    TYPE(*CHAR) LEN(1)
+             DCL        VAR(&ERRLVLD)   TYPE(*CHAR) LEN(7)
+             DCL        VAR(&CORUN)     TYPE(*CHAR) LEN(1)
+             DCL        VAR(&SYSVALA)   TYPE(*CHAR) LEN(40)
+             DCL        VAR(&CMPVALDL)  TYPE(*CHAR) LEN(40)
+
+/* NUMERIC VARIABLES                                             */
+             DCL        VAR(&COPIES) TYPE(*DEC) LEN(2 0)
+             DCL        VAR(&COMP) TYPE(*DEC) LEN(3 0)
+
+             DCL        VAR(&LIVEM3) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&RETRN) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&DATAS) TYPE(*CHAR) LEN(10)       /* M3IFLIB */
+
+/* SBDPRTOVR VARIABLE                                          */
+             DCL        VAR(&CMD) TYPE(*CHAR) LEN(512)
+
+/* USER CLASS                                                  */
+             DCL        VAR(&USRCLS) TYPE(*CHAR) LEN(10)
+
+/* CHANGE ALPHA PARMS TO NUMERIC VARIABLES                       */
+             CHGVAR     VAR(&COPIES) VALUE(&XCOPIES)
+             CHGVAR     VAR(&COMP) VALUE(&XCOMP)
+             CHGVAR     VAR(&LPP) VALUE(&APP)
+
+
+             RTVUSRPRF  USRCLS(&USRCLS)
+
+/* CAN LOOK AT THE DATA THAT WAS JUST CREATED                 */
+             SELECT
+             WHEN       COND(&USRCLS *EQ '*PGMR') THEN(DO)
+             CLRPFM     PKD7CPP
+             CHGVAR     VAR(&CMPVALDL) VALUE('HPEPYPRDLT')  /* Test */
+             ENDDO
+
+             OTHERWISE  CMD(CHGVAR VAR(&CMPVALDL) +
+                          VALUE('HPEPYPRDL '))              /* Prod */
+             ENDSELECT
+
+/* *********************************************************/
+
+/* CREATE TATTOO HEADER DRIVER FILE IN QTEMP                    */
+
+             CRTDUPOBJL OBJ(PKC6CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) DATA(*NO)
+
+             CRTDUPOBJL OBJ(PKC6CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP) DATA(*NO)
+
+/* CREATE PRINTER FILE OVERRIDE CODE    BALANCE TO KILL EDIT    */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PKLIPFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+/* CREATE PRINTER FILE OVERRIDE CODE    TRUCKER Edit Report     */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PWCDPFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+/* CREATE PRINTER FILE OVERRIDE CODE    TRUCKER REPORT          */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PKSMPFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+/* CREATE PRINTER FILE OVERRIDE CODE    PAY EDIT REPORT         */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PWCQPFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+/* CREATE PRINTER FILE OVERRIDE CODE    PAY EDIT/POST           */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PKS2PFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+/* CREATE PRINTER FILE OVERRIDE CODE COMMISSION EDIT/POST       */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PKPMPFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+/* CREATE PRINTER FILE OVERRIDE CODE    PRE CHECK EDIT          */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PKTQPFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+/* CREATE PRINTER FILE OVERRIDE CODE    PRICING ERRORS          */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PWHYPFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+/* CREATE PRINTER FILE OVERRIDE CODE    PUR JOURNAL PRIM/FINAL  */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PKTTPFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+/* CREATE PRINTER FILE OVERRIDE CODE    PUR JOURNAL RESALE      */
+             SBDPRTOVR  CMDVAR(&CMD) FILE(PKTZPFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE)
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)
+
+
+/* CREATE PRINTER FILE OVERRIDE CODE    CM COMPETITOR DETAIL    */
+/*           SBDPRTOVR  CMDVAR(&CMD) FILE(PKX1PFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE) +
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)               */
+
+
+
+/* CREATE PRINTER FILE OVERRIDE CODE    CM COMPETITOR TOTAL     */
+/*           SBDPRTOVR  CMDVAR(&CMD) FILE(PKX4PFR$) OUTQ(&PDEV) +
+                          COPIES(&COPIES) HOLD(&HOLD) SAVE(&SAVE) +
+             CALL       PGM(QCMDEXC) PARM(&CMD 512)             */
+
+
+/**********************************************************************/
+/*   M3HPEVCH PROCESSING:  IF LIVE WITH M3   - E000549      */
+/*     8/12/2015 RMC       IF PARALLEL WITH M3                  */
+/**********************************************************************/
+/*  EXECUTE THE PROGRAM TO RETRIEVE THE COMP VALULE:  LIVE WITH M3HPEVCH     */
+        CALL       PGM(POMTXFR) PARM(&RETRN &COMP 'M3HPEVCH ' &LIVEM3)
+
+ LIVEYEP:    IF         COND(&LIVEM3 *EQ 'Y' *OR &LIVEM3 *EQ 'P')  THEN(DO)
+
+/*   CRT TEMP FILES:  PLCCCPP AND PLCFCPP TO WRITE TO; WHEN DONE THEN   */
+/*   COPY TO M3IFLIB, COPY THE DETAIL FIRST, THEN THE HEADER TABLE   */
+/* GET THE M3 INTERFACE LIBRARY                              */
+             CALL       PGM(PBSHXFR) PARM(' ' &DATAS)
+             CRTDUPOBJ  OBJ(PLCCCPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PLCCCPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PLCCCPL2) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PLCFCPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PLCFCPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+                          ENDDO
+/**********************************************************************/
+
+/* PROCESS PAYMENT PRODUCER EDIT                               */
+
+             CALL       PGM(PKPXXFR) PARM(' ' &COMP &LPP)
+
+/*********************************************************************/
+/*  1/04/2019 JBB E14281 - Pricing Error Report                      */
+/* PAYMENT PRICING ERROR ERROR SEQUEL                                */
+
+/* Retrieve Company Value for Pricing Errors                         */
+             CALL       PGM(POMTXFR) PARM(' ' &COMP 'HPEPYPRERR' +
+                          &SYSVALA)
+
+             CHGVAR     VAR(&CORUN)  VALUE(%SST(&SYSVALA 7 1))
+             CHGVAR     VAR(&ERRLVL) VALUE(%SST(&SYSVALA 26 1))
+
+             SELECT
+             WHEN       COND(&ERRLVL = 'W') THEN(CHGVAR +
+                          VAR(&ERRLVLD) VALUE('Warning'))
+             WHEN       COND(&ERRLVL = 'H') THEN(CHGVAR +
+                          VAR(&ERRLVLD) VALUE('Hard'))
+             ENDSELECT
+
+/* If Company runs Pricing Report flag = Y, continue                 */
+             IF         COND(&CORUN = 'Y') THEN(DO)
+
+/* If Error Level flag is W or H, continue                                */
+             IF         COND(&ERRLVL *NE 'N') THEN(DO)
+
+/* Retrieve distribution list                                        */
+             CALL       PGM(POMTXFR) PARM(' ' &COMP &CMPVALDL &DL)
+
+/* Retrieve Payment Date                                             */
+             CHGVAR     VAR(&PYMTDATE) VALUE(0)
+             CHGVAR     VAR(&PYMTSTEP) VALUE(0)
+             CALL       PGM(PLLPXFR) PARM(' ' &COMP &PYMTDATE +
+                          &PYMTSTEP)
+
+/* Convert Company and Date to character                             */
+             CHGVAR     VAR(&COMPA) VALUE(&COMP)
+             CHGVAR     VAR(&PYMTDATEA) VALUE(&PYMTDATE)
+             CVTDAT     DATE(&PYMTDATEA) TOVAR(&DATEA) +
+                          FROMFMT(*CYMD) TOFMT(*ISO)
+
+/* Build subject line for email                                      */
+             CHGVAR     VAR(&EMLMSG) VALUE('Pricing ' *CAT &ERRLVLD +
+                          *TCAT ' Errors for Company ' *CAT &COMPA +
+                          *CAT ' and Payment Date ' *CAT &DATEA)
+
+             EXECUTE    VIEW(*LIBL/PYMTPRCERR) PCFMT(*XLSX) +
+                          RECIPIENT(&DL) EMLMSG(&EMLMSG) +
+                          SETVAR((&COMPANY &COMPA) (&KILLDATE +
+                          &PYMTDATEA))
+             ENDDO      /* &ERRLVL */
+             ENDDO      /* &CORUN  */
+
+/**********************************************************************/
+/*   M3HPEVCH PROCESSING:  IF LIVE WITH M3   - E000549      */
+ LIVEAFT:    IF         COND(&LIVEM3 *EQ 'Y' *OR &LIVEM3 *EQ 'P')  THEN(DO)
+             CPYF       FROMFILE(QTEMP/PLCCCPP) +
+                          TOFILE(&DATAS/PLCCCPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+             CPYF       FROMFILE(QTEMP/PLCFCPP) +
+                          TOFILE(&DATAS/PLCFCPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+                          ENDDO
+/**********************************************************************/
+             DLTOVR *ALL
+             ENDPGM

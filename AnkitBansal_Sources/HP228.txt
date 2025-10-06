@@ -1,0 +1,345 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      HPS---Datamart
+      * PROGRAM:     HP228 - Datamart BGF: Build BGF Period Group Costs
+      *                     (BGF Only)
+      * PROGRAMMER:  Barb Gutierrez
+      * CREATED:     08/22/03
+      *
+      * FUNCTION:    Write records for the 'operating costs' to the cost
+      *              detail file.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 01/30/04  Barb Gutierrez
+      *           Added the retrieval of the accounting quarter to bring
+      *           into cognos.
+      *
+      * 02/01/05  LeAnne Fedor
+      *           Recompile only. New fields (Sire Line Company and Prime Line) added
+      *           to Datamart Group Header file.
+      *
+      * 08/02/06  LeAnne Fedor
+      *           Recompile only. Two new fields (ration 8 feed pounds, ration paylean flag)
+      *           added to Datamart Group Header file.
+      *
+      * 10/18/10  LeAnne Ramsey  (E1079)
+      *           Recompile only. Sire Line Company is now 2-characters instead
+      *           of one.
+      *
+      *  05/12/16 Barb Gutierrez
+      *          -Added company control file HSP0071 and changed some logic to
+      *           accomodate multiple companies being processed.  E5752
+      *          -Populate company number in HPPF120              E5752
+      *          -changed key on logical hpla034a to have com #.  E5752
+      *
+      * 10/14/16  Barb Gutierrez
+      *           Recompile only. Added fields Sold days in phase, Avg Sold days in phase,
+      *           Wgt open date, and company number to HPPF034.         E6136
+      *
+      * 01/12/23  Eric Louchez - 111690 - Increment HGCD from 7 A to 9A.
+      *           The group code in is being incremented due to the business utilizing more than 3
+      *           digits for a BGF farm number.  Nursery and Grow Finisher groups will still be 7.
+      *‚  2/27/25 JAGDISH MISTRY SR 3000224,CM=S300224
+      *‚          JDE units will be received in IBM I, hence in HPPA100
+      *‚          converting JDUNITS from 15,0 to 15,2 to include
+      *‚          decimal.We will divide by 100 as JDE doesn't have
+      *‚          decimal.Recompile.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp0071   IF   E           K DISK    rename(ccrec:ccrec71)
+      *   Company Control File
+      *
+     Fhpla034a  if   e           k disk
+      *    Datamart ALL: Group header by closed date
+      *
+     Fhppa039   if   e           k disk
+      *    Cost Category Master (Key:  ccexcd)
+      *
+     Fhpla100   if   e           k disk
+      *    Datamart ALL: Financials by Farm/EOP Date/Account #
+      *
+      *  e5752 changed hppf120 to hplf120a.  already changed hppf120 to have
+      *        company as part of the key.  don't need it in this program.
+     Fhplf120a  uf A e           k disk
+      *    Datamart ALL: Closed Group Cost Detail
+      *
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Workfields
+      *
+     D wkamt           s                   like(g1am)
+     D wkbgf           s              5    inz('BGF  ')
+     D wkobj           s              5
+     d svccly          s                   like(ccccly)
+     d svcclp          s                   like(cccclp)
+     d svlepdt         s                   like(cclepdt)
+     d svlbpdt         s                   like(cclbpdt)
+      *
+      * Workfields for date manipulation
+      *
+     D wkepiso         s               D   datfmt(*iso)
+     D wkccyymmdd      s              8  0
+     D wkyymmdd        s              6  0
+     D wkacqr          s                   like(g1acqr)
+      *
+      * Parms
+      *
+     d  xxperiod       s                   like(g1acpe)
+     d  xxquarter      s                   like(g1acqr)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *-----------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      *  Definition for external data area 'DALPER' which holds the last
+      *  period that was closed in HPS.
+      *---------------------------------------------------------------
+      *   Remove use of dalper.  e5752
+     D*                DS
+     D* DALPER                 1     24
+     D* DACCYY                 1      4  0
+     D* DAPER                  5      6  0
+     D* DABPDT                 7     14  0
+     D* DAEPDT                15     22  0
+     D* DAPPFL                24     24
+      *---------------------------------------------------------------
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * MAINLINE
+      ***************************************************************************************
+      *
+      * Read each record in the Datamart Group Header file.  Only process Closed groups in
+      * the period we are processing.  We should only be processing the company selected
+      * out in the open query. (HPBLDCD$)
+      *
+     C     key           setll     hpla034a                               90
+     C                   dou       *in90 = *on
+     C     key           reade     hpla034a                               90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Retrieve the cost information for the hog group.
+      *
+     C                   exsr      $getcosts
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do loop
+      *
+      * EOF Processing
+      *
+      *    write all groups with zero dollars
+      *
+     C                   exsr      $zero
+      *
+     C                   seton                                        lr
+      /EJECT
+      *
+      *----------------------------------------------------------------
+      * Get Costs
+      *----------------------------------------------------------------
+      *
+     C     $getcosts     begsr
+      *
+     C     keycst        setll     hpla100
+     C                   dou       *in91 = *on                                  Do codes
+     C     keycst        reade     hpla100                                91
+     C                   if        *in91 = *off                                  If not EOF
+      *
+      * If expense code does not exist, don't write it.....
+      *
+     C                   movel     jdobjno       wkobj
+     C     wkobj         chain     hppa039                            95
+     C                   if        *in95 = *off or jdamt <> 0                   If not EOF
+      *                                                                         or amt <> 0
+      **** 111690        move      hghgcd        g1hgcd
+     C                   movel     hghgcd        g1hgcd                         111690
+      *
+      * Populate the year, period with the values from the data area
+      *  use year and period from company control file instead of lda.  e5752
+      *
+     C**                 z-add     daccyy        g1acyr                         hppf121
+     C**                 z-add     daper         g1acpe
+     C                   z-add     svccly        g1acyr                         hppf121
+     C                   z-add     svcclp        g1acpe
+      * get quarter
+     C                   exsr      $getqtr
+     C                   z-add     wkacqr        g1acqr
+      *
+     C                   movel     jdobjno       g1excd
+     C                   z-add     jdamt         g1am
+      *
+     C                   write     g1rec
+     C                   z-add     *zeros        g1am
+     C                   move      *blanks       g1excd
+     C                   move      *blanks       g1hgcd
+      *
+     C                   endif                                                  If not EOF
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do codes
+     C                   endsr
+      /EJECT
+      *
+      *----------------------------------------------------------------
+      * Process zero dollar records
+      *----------------------------------------------------------------
+      *
+     C     $zero         begsr
+      *
+      * read through all expense codes.
+      *
+     C     *loval        setll     hppa039                                92
+     C                   dou       *in92 = *on                                  Do codes
+     C                   read      hppa039                                92
+     C                   if        *in92 = *off                                 If not EOF
+      *
+      * Read all groups in the period we're processing
+      *
+     C     key           setll     hpla034a                               93
+     C                   dou       *in93 = *on
+     C     key           reade     hpla034a                               93
+     C                   if        *in93 = *off                                 If not EOF
+      *
+      * If we didn't write a record to the closed group cost detail file in the first
+      * pass, we want to write it now with zero dollars.
+      *
+     C     keyexp        chain     hplf120a                           94
+     C                   if        *in94 = *on                                  no record
+      **** 111690        move      hghgcd        g1hgcd
+     C                   movel     hghgcd        g1hgcd                         111690
+      *
+      * Populate the year, period with the values from the data area
+      *  use year and period from company control file instead of lda.  e5752
+      *
+     C**                 z-add     daccyy        g1acyr                         hppf121
+     C**                 z-add     daper         g1acpe
+     C                   z-add     svccly        g1acyr                         hppf121
+     C                   z-add     svcclp        g1acpe
+      * get quarter
+     C                   exsr      $getqtr
+     C                   z-add     wkacqr        g1acqr
+      *
+     C                   movel     ccexcd        g1excd
+     C                   z-add     *zeros        g1am
+     C                   z-add     *zeros        g1tispam
+     C                   z-add     *zeros        g1tidpam
+     C                   z-add     *zeros        g1tospam
+     C                   z-add     *zeros        g1todpam
+      *
+     C                   write     g1rec
+     C                   endif                                                  no record
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do codes
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do codes
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Get the quarter the period falls in
+      *----------------------------------------------------------------
+      *
+     C     $getqtr       begsr
+      *
+      * Call the generic program to retrieve the quarter associated with the accounting period.
+      *  use period from company control file instead of lda.  e5752
+      *
+     C                   call      'HP8006'
+     C**                 parm      daper         xxperiod
+     C                   parm      svcclp        xxperiod
+     C     wkacqr        parm      0             xxquarter
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      *  Pass in company.  E5752
+      *
+     C     *entry        plist
+     C                   parm                    xxcocd            3
+      *
+     C                   move      xxcocd        g1cocd
+      *
+      * Bring in the data area that contains the last Period posted
+      * in hps.
+      *    remove use of dalper E5752
+      *
+     C**   *dtaara       define                  dalper
+     C**                 in        dalper
+      *
+      * Read the company control file for the company being passed in to retrieve
+      * the last HPS closed year/period.      E5752
+      *
+     C     xxcocd        chain     hsp0071                            92
+     C                   if        *in92 = *off                                 If exists
+     C                   move      ccccly        svccly                         last close year
+     C                   move      cccclp        svcclp                         last close period
+     C                   move      cclbpdt       svlbpdt                        last close beg date
+     C                   move      cclepdt       svlepdt                        last close end date
+     C                   endif                                                  If exists
+      *
+      *  move end of period lda date into data data type
+      *  use the end date from company constants instead of lda. e5752
+      *
+     C     *ymd          move      svlepdt       wkepiso
+      *
+      * Key lists
+      *
+     C     key           klist
+     C                   kfld                    xxcocd
+     C                   kfld                    wkepiso
+     C                   kfld                    wkbgf
+      *
+     C     keycst        klist
+     C                   kfld                    hgfscd
+     C                   kfld                    hgcldt
+      *
+     C     keyexp        klist
+     C                   kfld                    hgclcdyr                       closed year
+     C                   kfld                    hgclcdpe                       closed period
+     C                   kfld                    hghgcd                         group
+     C                   kfld                    ccexcd                         expense code
+     C                   endsr

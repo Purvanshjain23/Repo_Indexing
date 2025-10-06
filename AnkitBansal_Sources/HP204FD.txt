@@ -1,0 +1,578 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP204FD- Build JDE Upload file: HPS Feed Delivery Dollars
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     10/17/01
+      *
+      * FUNCTION: This program builds an upload file of feed delivery tickets
+      *           that will be interfaced to JDE.
+      *
+      *           Only "Produced" feed tickets are uploaded in this process.
+      *
+      *           This program is called from HP204CLFD which is called
+      *           from the upload driver CL HP404CL..which is submitted from
+      *           HP404.
+      *
+      *
+      * For the HPS Feed Delivery upload to JDE, we will ultimately:
+      *    1) create a new JDE batch for each feed mill
+      *    2) retrieve a new JDE document number for each feed mill
+      *
+      *********************************************************************************
+      * MODIFICATIONS:
+      *********************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 12/11/01  LeAnne Fedor
+      *           Recompile only. We added a field to the Feed Mill Alias file.
+      *
+      * 12/27/01  LeAnne Fedor
+      *           Recompile only.  'Maximum Age(Days)' added to Rations file.
+      *
+      * 12/09/02  LeAnne Fedor
+      *           Removed 'production phase' from the Feed Ticket Detail file.
+      *           So, changed logic in this program to retrieve 'production phase' from
+      *           the Hog Group file or Farm Site file if there is not Hog Group on a
+      *           Feed Detail record.
+      *
+      * 04/19/05  LeAnne Fedor
+      *           Added logic to limit processing to "Produced" feed tickets.
+      *
+      * 09/26/07  LeAnne Ramsey
+      *           Added logic for new Sunray mill. The users do not want/need the
+      *           Sunray mill feed by BGF/NUR/GF since they are not tracking inventory.
+      *           They are not tracking inventory because Sunray currently has feed
+      *           purchased from Murphy's--but the users want the feed to show/process in
+      *           HPS as Produced--not Purchased. So, as far as HPS knows, this feed is
+      *           Produced. At some point in the future, we assume that Sunray will
+      *           actually be our own feed; so, at that time we're guessing that we would
+      *           take out the special SUMIL code.
+      *
+      * 02/20/08  LeAnne Ramsey
+      *           We have another new mill like Sunray--we don't own it. We will
+      *           handle it exactly like Sunray; the new mill is DAMIL=Dalhart.
+      *
+      * 04/23/09  LeAnne Ramsey
+      *           Recompile only. Costed Time/User added to Feed Ticket Header.
+      *
+      * 05/12/09  LeAnne Ramsey
+      *           Recompile only. PickUp Ticket Type added to Feed Ticket Header.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 09/21/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Upload Date' to Feed Ticket Header.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      * 02/28/16  Barb Gutierrez(E5290)
+      *           Added logic to handle new company Iowa Farms.
+      *
+      * 06/05/2017  Lara Buser  E010639
+      *           Added 3 fields to HSP089, Mill Type Code and Description and Active/
+      *           Inactive Status. Removed hardcoding of SUMIL and DAMIL and replaced
+      *           with test of Mill Type Code.
+      *
+      * 10/30/19  Brad Baden   E15736 - Upload Toll Mill Receipts
+      *           Recompiled only for new field is HSP089 file.
+      *
+      * 05/19/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      *********************************************************************************
+      * FILE SPECIFICATIONS
+      *********************************************************************************
+      *
+     Fhsp018    if   e           k disk
+      *    Farm site
+      *
+      *
+     Fhsl034d   if   e           k disk
+      *    Hog group
+      *
+      *
+     Fhsp037    if   e           k disk
+      *    Feed ticket header
+      *
+      *
+     Fhsl038f   if   e           k disk
+      *    Feed ticket detail
+      *    (records selected in open query)
+      *
+      *
+     Fhsp071    if   e           k disk
+      *    Ration
+      *
+      *
+     Fhsp089    if   e           k disk
+      *    Feed mill alias
+      *
+      *
+     Fhsp204    uf a e           k disk
+      *    HPS to JDE upload file
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *---------------------------------------------------------------
+      * STANDALONE FIELDS
+      *---------------------------------------------------------------
+      *
+      * Control fields
+      *
+     D svfscd          s                   like(fdfscd)
+     D svfmbo          s                   like(fdfmbo)
+     D svmltcd         s                   like(mamltcd)
+     D first           s              1    inz('Y')
+      *
+      * Work fields
+      *
+     D wkmcu           s                   like(hjmcu)
+      *
+      * Workfields for accumulating
+      *
+     D wkalphfscd      s              5
+     D wk2sub          s                   like(ma2sub)
+     D wkam            s                   like(hjhpsval)
+     D wkfarmam        s                   like(hjhpsval)
+     D wkbgfam         s                   like(hjhpsval)
+     D wknuram         s                   like(hjhpsval)
+     D wkgfam          s                   like(hjhpsval)
+     D wkhpsval        s                   like(hjhpsval)
+     D wkjdeval        s                   like(hjjdeval)
+     D wkppcd          s                   like(fsppcd)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldacyr                 1      4  0
+     D  ldacpe                 5      6  0
+     D  ldbpdt                 7     14  0
+     D  ldepdt                15     22  0
+     D  ldhucd                23     24
+      *
+     D  ldhuds               100    129
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *************************************************************************************
+      * MAINLINE
+      *************************************************************************************
+      *
+      * Read all feed ticket detail records selected by the open query.
+      * If the record is for "Produced" feed, process.
+      *
+     C     *loval        setll     hsl038f
+      *
+     C                   dou       *in90 = *on                                  Do tickets
+     C                   read      hsl038f                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Check the Feed Ticket Header record to see if this Feed Detail
+      * Record is for "Produced" feed. If so, continue.
+      *
+     C     key01         chain     hsp037                             92
+     C                   if        *in92 = *off and fhprfl = yes                If continue
+      *
+      *
+      * We will omit all tickets for a farm that does not have a 'cost
+      * center' assigned to it in HPS. So, check now for a cost center.
+      *
+     C     fdfscd        chain     hsp018                             92
+     C                   if        *in92 = *off and fscjd <> *blank             If process
+      *
+     C                   if        first = yes
+     C                   exsr      $first
+     C                   endif
+      *
+      * Control breaks:
+      *   a) on mill break
+      *        1) write debit entry for farm
+      *        2) write offsetting entry for mill
+      *   b) on farm break
+      *        1) write debit entry for farm
+      *
+     C                   select
+     C                   when      svfmbo <> fdfmbo
+     C                   exsr      $farm
+     C                   exsr      $offset
+      *
+     C                   when      svfscd <> fdfscd
+     C                   exsr      $farm
+     C                   endsl
+      *
+      * Accumulate dollars for the farm.
+      *
+     C                   add       fdinam        wkfarmam
+     C                   add       fdmfam        wkfarmam
+     C                   add       fdmdam        wkfarmam
+      *
+      * Determine ration phase and accumulate for offsetting records based
+      * on phase.
+     C                   exsr      $ration
+      *
+     C                   endif                                                  If process
+     C                   endif                                                  If continue
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do tickets
+      *
+      * Last record processing
+      *
+     C                   exsr      $farm
+     C                   exsr      $offset
+      *
+     C                   seton                                        lr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Determine ration phase and accumulate appropriately for phase
+      *--------------------------------------------------------------------------------------
+      *
+     C     $ration       begsr
+      *
+     C                   z-add     fdinam        wkam
+     C                   add       fdmfam        wkam
+     C                   add       fdmdam        wkam
+      *
+     C     fdrncd        chain     hsp071                             92
+     C                   if        *in92 = *off                                 If found
+      *
+     C                   select
+     C                   when      rnppcd = 'BGF  '
+     C                   add       wkam          wkbgfam
+      *
+     C                   when      rnppcd = 'NUR  '
+     C                   add       wkam          wknuram
+      *
+     C                   when      rnppcd = 'GF   '
+     C                   add       wkam          wkgfam
+     C                   endsl
+      *
+     C                   else
+      *
+      * If ration is not found in ration file, accumulate the dollars based
+      * on the phase.
+      *
+     C                   exsr      $ppcd
+     C                   endif                                                  If found
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Accumulate dollars based on Production Phase
+      *--------------------------------------------------------------------------------------
+      *
+     C     $ppcd         begsr
+      *
+     C                   move      *blank        wkppcd
+      *
+      * Retrieve 'production phase' associated with a) group or b) farm
+      *
+     C                   select
+     C                   when      fdhgsn <> 0
+     C     fdhgsn        chain     hsl034d                            92
+     C                   if        *in92 = *off
+     C                   move      hgppcd        wkppcd
+     C                   endif
+     C                   other
+      *
+     C     fdfscd        chain     hsp018                             92
+     C                   if        *in92 = *off
+     C                   move      fsppcd        wkppcd
+     C                   endif
+     C                   endsl
+      *
+      * Accumulate dollars based on phase
+      *
+     C                   select
+     C                   when      wkppcd = 'BGF  '
+     C                   add       wkam          wkbgfam
+      *
+     C                   when      wkppcd = 'NUR  '
+     C                   add       wkam          wknuram
+      *
+     C                   when      wkppcd = 'GF   '
+     C                   add       wkam          wkgfam
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write records to the upload file for a farm site
+      *--------------------------------------------------------------------------------------
+      *
+     C     $farm         begsr
+      *
+      * Set up defaults for upload record
+      *
+     C                   move      'AA'          hjtype
+     C                   move      no            hjoffset
+     C                   z-add     0             hjbatval
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+      *
+      * Detail entries will be debit entries for feed delivery tickets.
+      *
+     C                   z-add     wkfarmam      hjhpsval
+     C     100           mult      wkfarmam      hjjdeval
+      *
+      *
+      * Hardcode account
+     C                   eval      hjobj = '6100'
+     C                   eval      hjsub = *blank
+      *
+      * Retrieve cost center for farm
+      *
+     C     svfscd        chain     hsp018                             92
+     C                   if        *in92 = *off                                 If hit
+     C                   move      fscjd         hjmcu
+     C                   move      fscocd        hjcocd
+     C                   else
+     C                   move      *blank        hjmcu
+     C                   endif                                                  If hit
+      *
+      * Move farm site number to an alpha field and strip the leading zeros.
+      * Then concatenate it with text for the description field. This field
+      * will ulimately end up being the value in the JDE 'Explanation-remark'
+      * field.
+     C                   move      svfscd        wkalphfscd
+      *
+     C                   if        %subst(wkalphfscd:1:1) = '0'                 If position 1
+     C                   eval      %subst(wkalphfscd:1:1) = *blank
+      *
+     C                   if        %subst(wkalphfscd:2:1) = '0'                 If position 2
+     C                   eval      %subst(wkalphfscd:2:1) = *blank
+      *
+     C                   if        %subst(wkalphfscd:3:1) = '0'                 If position 3
+     C                   eval      %subst(wkalphfscd:3:1) = *blank
+      *
+     C                   if        %subst(wkalphfscd:4:1) = '0'                 If position 4
+     C                   eval      %subst(wkalphfscd:4:1) = *blank
+     C                   endif                                                  If position 4
+     C                   endif                                                  If position 3
+     C                   endif                                                  If position 2
+     C                   endif                                                  If position 1
+      *
+     C                   eval      hjdesc = 'Feed delivery - Farm ' +
+     C                                      %trim(wkalphfscd)
+      *
+     C                   write     hjrec
+      *
+      *
+      * Clear farm accumulator and save new farm
+      *
+     C                   z-add     0             wkfarmam
+     C                   move      fdfscd        svfscd
+      *
+     C                   move      no            hjnewbat
+     C                   move      no            hjnewdoc
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write up to 3 offset records for the mill
+      *--------------------------------------------------------------------------------------
+     C     $offset       begsr
+      ****
+      **** Sunray Mill and Dalhart Mill (ie: mills we do not own).
+      **** Accumulate all feed (BGF, NUR, GF) into one offsetting entry
+      ****
+     C****               select
+     C****               when      svfmbo = 'SUMIL' or svfmbo = 'DAMIL'
+     C****               eval      hjdesc = 'Feed delivery offset - ' +
+     C****                                  %trim(svfmbo)
+     C****               move      *blank        hjsub
+     C****               eval      wkhpsval = wkbgfam + wknuram + wkgfam
+     C****               if        wkhpsval <> 0
+     C**** 100           mult      wkhpsval      wkjdeval
+     C****               exsr      $writeoff
+     C****               endif
+     C****               other
+      *
+      * All mills except Toll Mills                                             E010639
+      * Retrieve the G/L 2 characters to use for the 'subsidiary' value.
+      *
+     C     svfmbo        chain     hsp089                             92
+     C                   move      *blank        wk2sub
+     C                   if        *in92 = *off                                 If mill hit
+     C                   move      ma2sub        wk2sub
+     C                   move      mamltcd       svmltcd
+     C                   endif                                                  If mill hit
+      *
+      * Select by Feed Mill Type Code:  Toll Mill (TM) or Company Owned (CO)
+      * Accumulate all feed (BGF, NUR, GF) into one offsetting entry
+      *
+     C                   select
+     C                   when      svmltcd = 'TM'                               When Toll Mill
+     C**                 eval      hjdesc = 'Feed delivery offset - ' +
+     C**                                    %trim(svfmbo)
+     C                   eval      hjdesc = 'Toll Feed Purchased - ' +
+     C                                      %trim(svfmbo)
+     C                   move      *blank        hjsub
+     C                   eval      wkhpsval = wkbgfam + wknuram + wkgfam
+     C                   if        wkhpsval <> 0
+     C     100           mult      wkhpsval      wkjdeval
+     C                   exsr      $writeoff
+     C                   endif
+     C                   other
+      *
+      * If you have BGF feed, write an offsetting entry.
+      *
+     C                   if        wkbgfam <> 0                                 If BGF feed
+     C                   eval      hjdesc = 'Feed delivery offset - SOW'
+     C                   eval      hjsub = wk2sub + 'SP'
+     C                   z-add     wkbgfam       wkhpsval
+     C     100           mult      wkbgfam       wkjdeval
+     C                   exsr      $writeoff
+     C                   endif                                                  If BGF feed
+      *
+      * If you have Nursery feed, write an offsetting entry
+      *
+     C                   if        wknuram <> 0                                 If nursery feed
+     C                   eval      hjdesc = 'Feed delivery offset - NUR'
+     C                   eval      hjsub = wk2sub + 'NP'
+     C                   z-add     wknuram       wkhpsval
+     C     100           mult      wknuram       wkjdeval
+     C                   exsr      $writeoff
+     C                   endif                                                  If nursery feed
+      *
+      * If you have Grow Finish feed, write an offsetting entry
+      *
+     C                   if        wkgfam <> 0                                  If grow finish
+     C                   eval      hjdesc = 'Feed delivery offset - FIN'
+     C                   eval      hjsub = wk2sub + 'FP'
+     C                   z-add     wkgfam        wkhpsval
+     C     100           mult      wkgfam        wkjdeval
+     C                   exsr      $writeoff
+     C                   endif                                                  If grow finish
+     C                   endsl                                                  When Toll Mill
+      *
+      * Clear accumulators
+     C                   z-add     0             wkbgfam
+     C                   z-add     0             wknuram
+     C                   z-add     0             wkgfam
+      *
+      * Save mill and set up 'explanation' for next mill
+      *
+     C                   move      fdfmbo        svfmbo
+     C                   exsr      $mill
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Write offset records to interface file
+      *--------------------------------------------------------------------------------------
+      *
+      * Offsets will be credit entries for feed delivery tickets.
+      *
+     C     $writeoff     begsr
+      *
+     C                   z-add     ldacyr        hjacyr
+     C                   z-add     ldacpe        hjacpe
+     C                   move      yes           hjoffset
+     C                   move      'AA'          hjtype
+     C                   move      hjcocd        wkmcu
+     C                   eval      hjmcu = wkmcu
+      *
+     C                   select
+     C****               when      svfmbo = 'SUMIL' or svfmbo = 'DAMIL'
+     C                   when      svmltcd = 'TM'                               Type code=Toll Mill
+     C                   eval      hjobj = '3063'
+     C                   other
+     C                   eval      hjobj = '1649'
+     C                   endsl                                                  Type code=Toll Mil
+      *
+     C     -1            mult      wkhpsval      hjhpsval
+     C     -1            mult      wkjdeval      hjjdeval
+      *
+      * Populate the 'batch header value' field with the 'offset' value. Force the
+      * number to be positive.
+      *
+     C                   select
+     C                   when      hjjdeval >= 0
+     C                   z-add     hjjdeval      hjbatval
+     C                   other
+     C     -1            mult      hjjdeval      hjbatval
+     C                   endsl
+      *
+     C                   write     hjrec
+      *
+     C                   z-add     0             wkhpsval
+     C                   z-add     0             wkjdeval
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Set up values for new mill
+      *--------------------------------------------------------------------------------------
+      *
+     C     $mill         begsr
+      *
+     C                   eval      hjexa  = 'HPS Feed Delivery Upl - ' +
+     C                                      %trim(svfmbo)
+      *
+     C                   move      yes           hjnewbat
+     C                   move      yes           hjnewdoc
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * First time logic
+      *--------------------------------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+     C                   z-add     fdfscd        svfscd
+     C                   move      fdfmbo        svfmbo
+     C                   move      no            first
+      *
+     C                   exsr      $mill
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Initialization subroutine
+      *--------------------------------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    fdfmbo
+     C                   kfld                    fdtkno
+     C                   kfld                    fdtrcd
+      *
+     C                   endsr
+      /EJECT

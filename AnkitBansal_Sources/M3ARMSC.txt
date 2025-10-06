@@ -1,0 +1,1724 @@
+      *****************************************************************
+      *
+      *  Program number:  M3ARMSC  -- copied from ARMISJDE   --
+      *  Program name:    CREATE J.E.s  IN M3 Stage Tables for FOR HOG A/R MISC ENTRIES
+      *  Programmer:      Rose Centonze
+      *  Date created:    07/31/15
+      *
+      *  Program purpose: CREATE J.E.s FOR A/R MISC ADJUSTMENTS.
+      *                   COMPANY WILL BE PASSED INTO THIS PROGRAM FOR
+      *                   FOR PROCESSING.  A SUMMARY RECORD FOR EACH
+      *                   ACCOUNT I.D. WILL BE WRITTEN AS UNPOSTED TO
+      *                   JDE.
+      *
+      *                   ONLY PROCESS RECORDS WITH A STATUS OF 'A'.
+      *                   THESE ARE SELECTED IN THE LOGICAL ARBECPL7.
+      *                   ONLY PROCESS RECORDS WITH BLANKS IN THE
+      *                   ORIGINATING PROGRAM FIELD.
+      *
+      *                   WILL UPDATE THE A/R DETAIL FILE WITH THE
+      *                   BATCH NUMBER, POST DATE AND A STATUS CODE OF E
+      *                   A 'P'. (PROCESSED)
+      *
+      *                   THE USER MUST THEN GO INTO M3  TO ACTUALLY
+      *                   POST THE BATCH OF JOURNAL ENTRIES.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      * 3/04/16   RMC  change interface template from AR_MSCUPL to GL_MSCUPL
+      * 8/30/16   JBB  do not process rebill records                   ???
+      * 3/23/17   RMC  changes for multi-company posting  -- USE DIFF LF OVER AR DETAIL
+      * 9/14/18   RMC  add doneOnce check -- and separate accum buckets for 440/960
+      * 3/26/20   RMC  P16169 remove all refs to jde files and pgms - they arent needed
+      *                comment subr $julian that called x0028, file F0901
+      * 7/28/21    RMC SDN440 -  CHANGE COMPANY 362 TO 320 - everywhere, comments, subrs,...
+      /eject
+      *****************************************************************
+      * File specifications
+      ****************************************************************
+      *
+     FarbecplC  uf   e           k disk
+      * A/R Detail  by G/L posting CO, Deposit Date, Deposit Time, GL ID, sub ledger
+     F*arbecpl5  If   e           k disk
+      * A/R Detail  by company , Deposit Date, Deposit Time, GL ID, sub ledger
+      *             selects only Process Status = 'A' (bfajst)
+      *             and post adjustments flag = 'Y' (bfetsx)
+      *
+     F*f0011     uf a e           k disk
+      *   JDE batch header file
+      *
+     F*f0901     if   e           k disk                                  p16169
+      *   JDE Account master
+      *   (This file is only used to define the fields that are used in what was a /Copy).
+      *
+     F*f0911     o    e             disk
+      * JDE G/L ledger
+      *
+      *
+      *
+     Fplb8rel3  if   e           k disk
+      * JDE M3 Cross Reference Table  (K=jde cost center/object/sub)
+      *
+     Fplb8rel5  if   e           k disk    rename(@b8reva:b8reva) prefix(p1)
+      * JDE M3 Cross Reference Table  (K=CGL code)
+     Fplb8rel8  if   e           k disk
+      * JDE M3 Cross Reference Table  (K=ACCT CO  GLID )
+      *
+     Fplb9cpp   o    e             disk
+      *   M3 G/L header staging file for Miscellaneous Post
+      *
+     Fplcacpp   o    e             disk
+      *   M3 G/L detail staging file for Miscellaneous Post
+      *
+      *
+     Fprint132  o    f  132        printer oflind(*inof)
+     F                                     usropn
+      *
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+     D gldct           c                   'UA'
+     D gllt            c                   'AA'
+     D glam            c                   '2'
+     D glpkco          c                   '00000'
+     D glokco          c                   '00000'
+     D glpsfx          c                   '000'
+     D glpost          c                   ' '
+      *
+      *---------------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------------
+      *
+      * Standard fields
+      *
+     d rtime           s              6  0
+     d return          s              7
+      *
+      *
+      * Control fields
+      *
+     d first           s              1    inz('Y')
+     d svc1ny          s                   like(bfc1ny)
+     d svacctco        s                   like(bfc1ny)
+     d svglid          s                   like(bfiztx)
+     d svdvdt          s                   like(bfdvdt)
+     d svdvdtjul       s                   like(bfdvdt)
+     d svtime          s                   like(bfyxnx)
+     d*svsbl           s                   like(glsbl)
+     d svglvl          s                   like(bfglvl)
+      *
+      * Accumulators
+      *
+     D acttot          s             17  2
+     D co#amt          s             17  2
+     D wkoffsetam      s             15  2                                      used in subrs w/offs
+     D wkoffset960     s             15  2                                      accum 960 offset
+     D wkoffset440     s             15  2                                      accum 440 offset
+     D batamt          s             15  0
+     D batndo          s              5  0
+     D dsamt           s             17
+     D battot          s              1
+      *
+      * Workfields
+      *
+     d wktype          s              2
+     d*wkco            s                   like(glco)
+     d wkco960         s                   like(bfaic3)                             dont init
+     d wkaid           s              8
+     d wkglcode        s              8
+     d wkani           s             29
+     d wkdesc          s             29
+     D wkvndr          s              9  0
+     D wkvndr8         s              8  0
+     D wksbl           s              9  0
+     D wksbl8          s              8  0
+     D wkmmddyy        s              6  0
+     d wksyssyndt      s              7  0
+     D wkcymdiso       s               d   datfmt(*iso)
+     d RBinvoice#      s                   like(bfconb)
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               D   datfmt(*iso)
+      *
+     d wkhhmmss        s                   like(caabtm)
+     d wktime          s             12  0
+     d wkdate          s              6  0
+      *
+      *
+      * Parm fields
+      *
+     d xxtfflag        s              1
+      *
+     D xxmmddyy        s              6  0
+     D xxccyymmdd      s              8  0
+     D xxsyssyndt      s              7  0
+     D wk80dpdt        s              8  0
+      *
+     d xxcalc          s              1
+     d*xxpn            s                   like(glpn)
+     d*xxfy            s                   like(glfy)
+     d*xxctry          s                   like(glctry)
+     d xxedt           s              1
+     d xxdgsy          s              1
+      *
+     d xxsidat         s              6
+     d xxedat          s              8
+     d xxffmt          s              7
+     d xxtfmt          s              7
+     d xxsep           s              7
+     d xxertst         s              1
+     d xxctryalph      s              2
+      *
+      *
+     d*xxbatch         s                   like(glicu)
+     d xxsy            s              4
+     d xxidx           s              2
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxerrm          s              4
+      *
+     d*xxani           s                   like(glani)
+     d*xxicu           s                   like(glicu)
+     d*xxdoc           s                   like(gldoc)
+      *
+     D xxacctco        s              3  0
+     D xxnumco         s              3  0
+     d xxglcode        s              8
+     d xxsubtype       s              1
+     d xxbalsheet      s              1
+      *
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+     D                 DS
+     D  GLYMD                  1      7  0
+     D  YYGL                   2      3  0
+     D  MMGL                   4      5  0
+     D  DDGL                   6      7  0
+     D*
+     D***  G/L DATE MMDDYY
+     D*
+     D                 DS
+     D  GLMDY                  1      6  0
+     D  GLMM                   1      2  0
+     D  GLDD                   3      4  0
+     D  GLYY                   5      6  0
+     d*i0901ds         ds           500
+     d*xxco                                like(gmco)
+     d*xxaid                               like(gmaid)
+     d*xxmcu                               like(gmmcu)
+     d*xxobj                               like(gmobj)
+     d*xxsub                               like(gmsub)
+     d*xxans                               like(gmans)
+     d*xxdl01                              like(gmdl01)
+     d*xxlda                               like(gmlda)
+     d*xxbpc                               like(gmbpc)
+     d*xxpec                               like(gmpec)
+     d*xxbill                              like(gmbill)
+     d*xxcrcd                              like(gmcrcd)
+     d*xxum                                like(gmum)
+     d*xxr001                              like(gmr001)
+     d*xxr002                              like(gmr002)
+     d*xxr003                              like(gmr003)
+     d*xxr004                              like(gmr004)
+     d*xxr005                              like(gmr005)
+     d*xxr006                              like(gmr006)
+     d*xxr007                              like(gmr007)
+     d*xxr008                              like(gmr008)
+     d*xxr009                              like(gmr009)
+     d*xxr010                              like(gmr010)
+     d*xxr011                              like(gmr011)
+     d*xxr012                              like(gmr012)
+     d*xxr013                              like(gmr013)
+     d*xxr014                              like(gmr014)
+     d*xxr015                              like(gmr015)
+     d*xxr016                              like(gmr016)
+     d*xxr017                              like(gmr017)
+     d*xxr018                              like(gmr018)
+     d*xxr019                              like(gmr019)
+     d*xxr020                              like(gmr020)
+     d*xxr021                              like(gmr021)
+     d*xxr022                              like(gmr022)
+     d*xxr023                              like(gmr023)
+     d*xxobja                              like(gmobja)
+     d*xxsuba                              like(gmsuba)
+     d*xxwcmp                              like(gmwcmp)
+     d*xxcct                               like(gmcct)
+     d*xxerc                               like(gmerc)
+     d*xxhtc                               like(gmhtc)
+     d*xxqlda                              like(gmqlda)
+     d*xxccc                               like(gmccc)
+     d*xxfmod                              like(gmfmod)
+     d*xxuser                              like(gmuser)
+     d*xxpid                               like(gmpid)
+     d*xxjobn                              like(gmjobn)
+     d*xxupmj                              like(gmupmj)
+     d*xxupmt                              like(gmupmt)
+      *
+      *---------------------------------------------------------------
+     D* New for M3
+     D*   Format M3 Key Value for this batch:   yyyymmmddnnnn where nnnn is the m3series #
+     D*    example:  201506220001,  then next key for that day would be 201506220002 ,...
+     D*
+     D m3keyv          ds
+     D   m3keyvalue                  12
+     D   m3keydt                      8    overlay(m3keyvalue:1)
+     D   m3series                     4    overlay(m3keyvalue:9)
+      *
+      * Explanation
+     D                 ds
+     D  wkexa                  1     30
+     D  wk1                    1      3    inz('A/R')
+     D  wk2                    5      9    inz('MISC')
+     D* wk3dt                 11     16  0
+     D  wk3dt                 11     18  0
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /eject
+      *----------------------------------------------------------------------------------
+      * Mainline
+      *----------------------------------------------------------------------------------
+      *
+      * Read records in the A/R Detail file.
+      *   appropriate records selected in Logical file
+      *
+     c                   move      'N'           doneOnce          1
+     C     *loval        setll     arbecplc
+     C                   dou       *in80 = *on                                  Main do
+     C                   read      arbecplc                               80
+     C                   if        *in80 = *off                                  If not EOF
+     C                   if        bfuhcd =  'RB'                                If RB
+     c                   eval      RBinvoice#  = bfconb                          save #
+     c                   endif
+     C                   if        bfuhcd <> 'RB' and bfconb<>RBinvoice#        If not RB adj type
+      * Break logic:
+      *  1) First time
+      *  2) When Posting Company # changes
+      *  3) When Deposit Date, or Deposit Time changes
+      *  4) When Account ID changes
+      *
+     C                   select
+      *  1) First time
+     C                   when      first = yes
+     C                   exsr      $setsave
+     C                   exsr      $first
+     C                   exsr      $trans
+      *
+      *  2) BREAK:   Posting company
+      *     1.  write the last post company record
+      *     2.  if not = 0, then write 1910 offset
+      *
+     C                   when      (bfc1ny <> svc1ny)                              any company break
+     C                   exsr      $writes
+      *
+     c* Write offset 1910 if company amount isnt zero. this will be for 300 and 360 comps.
+      *
+     c                   if        co#amt <>0
+     C                   exsr      $writeoffset
+     C                   z-add     0             CO#amt                         company total
+     c                   endif
+      *
+     c* Write header for posting company just completed
+      *
+     c                   exsr      $writebatch                                     write header
+     c*
+      *  Retrieve next number and new div for new company
+     c*
+     C                   close     print132
+     C                   exsr      $setsave
+     C                   exsr      $nextnbr                                       M3
+     C                   exsr      $trans
+     c                   open      print132
+     C                   except    hdg
+     C                   except    dochdg
+     C                   move      yes           xxtfflag
+     c*
+     c* Write offset for 320 when 960/440 company starts
+     c*
+     c                   if        bfc1ny = 960 or bfc1ny = 440
+     c*
+     C**                 if        wkoffsetAM  <> 0
+     C                   if        wkoffset960 <> 0 or wkoffset440 <> 0            NEW 9.13.18
+     c                   if        DoneOnce = 'N'
+     C                   exsr      $offsets                                        for 320 -> 490
+     C                   exsr      $nextnbr                                       M3
+     C                   close     print132
+     c                   open      print132
+     C                   except    hdg
+     C                   except    dochdg
+     c                   move      'Y'           doneOnce
+     c                   endif
+     C                   exsr      $setsave
+     C                   exsr      $trans
+     c                   move      m3divi        dsdivi
+     c                   move      m3divi        caqxcd
+     c                   endif
+     c     bfaic3        ifeq      960
+     C                   move      *blanks       sdusr
+     C                   movel     'TFGLPOST'    sdusr
+     c                   endif
+
+     C**   WKOFFSETAM    IFNE      0
+     C                   if        wkoffset960 <> 0 or wkoffset440 <> 0         new 9.13.18
+     C                   EXSR      $offset960
+     c                   endif
+     c*
+     c*
+     c                   endif
+     c*
+      *
+      *  3) When Deposit Date, or Deposit Time changes
+      *     1.  write the record to the GL
+      *     2.  setup save fields
+      *     3.  Get new document number     -- new voucher series
+      *     4.  Retrieve new julian date/year/period for deposit date
+      *     5.  Print document heading
+      *
+     C                   when      (bfdvdt <> svdvdt or bfyxnx <> svtime)
+     C                   exsr      $writes
+     C                   exsr      $setsave
+     C*                  exsr      $docnbr
+     C*                  exsr      $nextnbr                                       M3
+      *
+      *        Convert Deposit Date from CYYMMDD format to MMDDYY format.
+      *
+     C*  p16169          exsr      $julian
+     C                   exsr      $synondt
+      *
+     C                   except    hdg
+     C                   except    dochdg
+     C                   endsl
+      *
+      *  4) When Account ID changes or sub ledger
+      *
+     C                   if        bfiztx <> svglid or bfglvl <> svglvl
+     C                   exsr      $writes
+     C                   exsr      $setsave
+     C                   endif
+      *
+      * Detail processing:
+      *   1) Accumulate Transaction Amount into Account.
+      *   2) Accumulate Transaction Amount into total for OFFSET if Transaction company
+      *              = 960 but Posting company <> 960.
+      *   3) Update the AR Detail record as "posted"
+      *
+     C                   add       bfbsva        acttot
+     C                   add       bfbsva        co#amt
+      *
+     C                   if        bfaic3 = 960 and bfc1ny <> 960                uncomment 4.13.17
+     C*                  add       bfbsva        wkoffsetam
+     C                   add       bfbsva        wkoffset960                     new 960 9.13.18
+     C                   endif
+     C                   if        bfaic3 = 440 and bfc1ny <> 440                uncomment 4.13.17
+     C*                  add       bfbsva        wkoffsetam
+     C                   add       bfbsva        wkoffset440                     new 440 9.13.18
+     C                   endif
+      *
+     c*
+     C** Update ARBECPP if live with M3
+     c*
+     c     LivewM3       ifeq      'Y'
+     C                   move      'P'           bfajst
+     C                   z-add     m3seriez      bfcknb
+     C                   z-add     xxsyssyndt    bfhydt
+     C                   update    @becpzi                                      ar dtl with Posted
+     C                   endif                                                  If LivewM3 = 'Y'
+      *
+     C                   endif                                                  If not RB
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *----------------------
+      * EOF processing
+      *----------------------
+      *
+      *
+     C                   select
+     C                   when      first = yes
+     C                   open      print132
+     C                   except    hdg
+     C                   except    norec
+     C                   other
+      *
+      * Write out last record to M3 (was JDE) and then
+      * Conditionally write a Batch record
+      *
+     C                   exsr      $writes
+      *
+     c* Write offset 1910 if company amount isnt zero
+      *
+     c                   if        co#amt <>0
+     C                   exsr      $writeoffset
+     c                   endif
+      *                                                                                   $ not 0
+     C**                 if        batamt <> 0                                  If batch $$ not 0
+     C                   if        battot = yes                                 If batch $$ not 0
+     C                   exsr      $writebatch
+     C                   endif                                                  If batch $$ not 0
+     C                   endsl
+      *
+      * This will close any files that were left open from any called programs.
+      *
+     C                   call      'UTRCRSC'
+     C                   close     print132
+      *
+     C                   seton                                        lr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Setup save fields and account description
+      *----------------------------------------------------------------------------------
+      *
+     C     $setsave      begsr
+      *
+     C                   z-add     bfc1ny        svc1ny
+     C                   z-add     bfc1ny        svacctco
+     C                   z-add     bfdvdt        svdvdt
+     C                   z-add     bfyxnx        svtime
+     C                   move      bfiztx        svglid
+      *
+      *
+     C                   z-add     bfglvl        svglvl
+     C                   movel     bfglvl        wkglvl            9 0
+     C                   move      wkglvl        prglvl            8 0
+      *
+     C                   z-add     0             acttot
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Format a date to Julian format
+      *----------------------------------------------------------------------------------
+      *
+     C*    $julian       begsr
+      *
+     C*                  move      bfdvdt        xxsidat
+      *
+     C*                  call      'X0028'
+     C*                  parm                    xxsidat
+     C*                  parm      *blank        xxedat
+     C*                  parm      '*YMD   '     xxffmt
+     C*                  parm      '*JUL   '     xxtfmt
+     C*                  parm      '*NONE  '     xxsep
+     C*                  parm      *blank        xxertst
+     C*                  parm      *blank        xxctryalph
+      *
+     C*                  move      xxsidat       svdvdtjul
+      *
+     C*                  endsr
+      *----------------------------------------------------------------------------------
+      * Write the M3 journal entry line to PLCACPP
+      *----------------------------------------------------------------------------------
+     C* Format sample for PARM field:
+     C* I12015072411       50011410            CS1
+     C* 00000000000000000USD                 00000013736271520150723  ACCOUNTS RECEIVABLE-TRADE
+     C* I12015072411       49013830            101
+     C* 00000000000000000USD                 -0000013736271520150723  DUE TO TF - CASH
+      *
+     C     $writes       begsr
+     C*
+     C                   move      acttot        glaa             15 2
+     C*                  move      svglid        wkaid
+     C*                  move      wkaid         glaid
+     C*
+     C                   move      *blanks       dsdim           200
+     c                   movel(p)  m3keyvalue    caait1                         key: yyyymmddnnnn
+     C                   ADD       1             CAWKA1                         LINE NUMBER
+     C*
+     C**  Retrieve new division number
+     C*
+     C                   EXSR      $trans
+     c                   move      m3cono        cawja1                         GL Posting Co
+     c***                movel     svdivi        caqxcd
+     c                   movel     m3divi        caqxcd
+     C*
+     C**** Translate JDE cost center/object/sub to M3 dimensions.
+     C*
+     C                   EXSR      $getdim
+      *
+     c*                  if        b8hgss='I'                can this happen with misc posts?????
+     c*                  if        dsdim5= *blanks
+     c*                  move      ARcust        work8             8
+     c*                  eval      dsdim5 =  %triml(work8)                      move cust to DIM5
+     c*                  endif
+     c*                  endif
+      *
+      *
+      *  M3  Set values in parameter field
+      *
+     C                   eval      dsamt = %triml(%editc(acttot:'Q'))
+     C                   z-add     0             wkqty             1 0          quantity
+     C                   move      wkqty         dsqty            17            quantity
+      *
+      *  Move 11.2 vendor (subledger) number into an 8.0 field and ultimately into an 8A.
+      *
+     C                   if        svglvl <> 0
+     C                   movel     svglvl        wksbl             9 0
+     C                   move      wksbl         wksbl8            8 0
+     C                   movel     wksbl8        svsbl             8
+     C                   endif
+      *
+     C                   if        svsbl <> *blanks                             have subledger
+     c                   evalr     dsdim7=%subst(svsbl:%check('0':svsbl))       left adj, remv 00-
+     C                   eval      dsdim7= %triml(dsdim7)
+     c                   endif
+     C*                  movel(p)  wkdesc        dsdescr          40            description
+      *
+     C*  CONVERT  DATE FROM YYMMDD TO MMDDYY
+     C*
+     C                   Z-ADD     SVdvDT        GLYMD
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C                   CALL      'PBRRUPC'
+     C                   PARM                    SVdvDT
+     C                   PARM                    dsacdt            8            yyyymmdd
+      *
+      *
+     C                   eval      dsdim = 'I1'                 +                id
+     C                                     m3series9    +                        rrno run number
+     C                                     '1       '  +                         group nbr
+     C                                     m3divi      +                         division
+     C**                                   svdivi      +                         all 3nn divisions
+     C                                     '0'         +                         ext/int, ext=0
+     C                                            dsdim1  +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '1            ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             dsacdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter
+      *
+     C                   movel(p)  sdusr         caabvn                         RS User Added
+     C                   move      xxccyymmdd    caaedx                         entry date
+     C                   move      wksyssyndt    caabdt                         RS Date added
+     C                   move      wkhhmmss      caabtm                         RS time added
+     c                   movel     'ARMSCPST'    CAAHVN                         job
+     c                   movel     'M3ARMSC'     CAAGVN                         pgm
+      *
+     C                   if        glaa   <> 0
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+     C                   move      yes           battot                         battot write
+     C                   endif
+      *
+     c                   if        glaa  > 0
+     c                   add       glaa          batamt
+     C                   endif
+      *
+     C                   exsr      $l1dtl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+     C*   WRITE Batch Header Record     M3 PLB9CPP
+      *---------------------------------------------------------------
+      *
+     C     $writebatch   begsr
+     C     m3keyvalue    IFNE      *blanks                                     keyvalue not blank
+      *
+      * retrieve m3 company and division
+      *
+     C*                  exsr      $trans
+      *
+     C**                 z-add     m3cono        b9wja1                         company
+     C                   movel     m3divi        b9qxcd                         division
+     C                   z-add     m3cono        b9wja1                         company
+     c*                  movel     svdivi        b9qxcd
+     c*
+     c                   movel(p)  m3keyvalue    b9ait1                         key: yyyymmddnnnn
+     C                   movel(p)  'GL_MSCUPL'   b9ajt1                         Interface template
+      *
+     C********           move      '001'         b9wga1                         Status
+      *
+      *  Setup explanation to be "A/R + MISC + deposit date".
+      *
+     C***                movel     wkmmddyy      wk3dt                          deposit date
+     C                   move      wk80dpdt      wk3dt                          deposit date
+     C                   movel(p)  wkexa         dsdescr          40            description
+     C                   movel(p)  dsdescr       b9akt1                         Description
+      *
+     C                   movel(p)  sdusr         b9abvn                         User
+     C                   move      xxccyymmdd    b9aedx                         M3 Entry Date
+     C                   move      wksyssyndt    b9abdt                         date added
+     C                   move      wkhhmmss      b9abtm                         time added
+     C                   move      '0'           b9g5ss                         erp process sts
+     C                   movel     sdpgm         b9agvn                         program updated
+      *
+     C                   write     @b9cpuj
+     C                   ENDIF                                                  BATCH# NOT 0
+      *
+      * reset batndo
+     C                   z-add     0             batndo
+     C                   z-add     0             batamt
+     C**                 z-add     0             cawka1                         plcacpp line#
+      *
+     C                   endsr
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE offset 1910 SUBROUTINE
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $WRITEoffset  BEGSR
+      *
+     C                   z-sub     co#amt        GLAA                           -(company total)
+     C                   z-add     0             GLu              15 0          no decimals
+     C*
+     C*******************************************************************************
+      * Write the M3 journal entry line to PLCACPP
+     C*******************************************************************************
+     c                   movel     m3cono        cawja1
+     c*                  movel     m3cdivi       caqxcd
+     c                   movel     svdivi        caqxcd
+     c                   movel     m3keyvalue    caait1                         key: yyyymmddnnnn
+     C                   ADD       1             CaWKA1                         LINE NUMBER
+     C*
+     C*
+     C                   move      svc1ny        ommcu            12            Acct Posting CO
+     C                   move      '1910  '      omobj             6
+     C                   move      *blanks       omsub             8
+     C**** Translate JDE cost center/object/sub to M3 dimensions.
+     C                   EXSR      $getdim2
+     c*
+      *
+     C**** use act ship date of the Group
+      *
+     C**                 movel     m3keydt       WKacdt            8            m3 acctngDt=current
+      *
+      *  M3  Set values in parameter field
+      *
+     C                   eval      dsamt = %triml(%editc(glaa:'Q'))             leave left justf
+     c                   move      *blanks       wrk19            19
+     C**                 eval      wrk19 = %editc(glaa:'Q')                     right just
+     C**                 move      wrk19         dsamt                         right just
+     C*                  z-add     glu           wkqty            17 0          quantity UNITS
+     C                   move      '0'           dsqty            17            quantity
+     C                   move      *blanks       vatamt           17            vat amt
+     C*                  eval      dsqty = %triml(%editc(glu:'Z'))              quantity UNITS
+     C*    group number alpha
+     C***                eval      omgrpa= %triml(%editc(omgrpn:'Z'))             left justf
+      *
+     c                   movel(p)  wkicbal       dsdescr
+      *
+     C*                  movel(p)  wkuser        caaavn                         User changed
+     C**                 move      wkb4dt        caaedx                         M3 Entry Date
+     C                   move      wksyssyndt    caabdt                         date added
+     C                   move      wkhhmmss      caabtm                         time added
+     C***                MOVEL     svUSRNAM      caabvn                         USER ID added
+     C                   movel(p)  sdusr         caabvn                         RS User Added
+     C                   movel     sdpgm         caagvn                         program updated
+     C                   movel     m3seriez      dsrnno            9            run number
+     C                   movel(p)  '1'           dsgrnr            8            group number
+     C*
+     c                   movel     'I1'          dsiden            2
+     c*
+     C                   move      *blanks       dsdim
+     C                   eval      dsdim = dsiden               +                id
+     C                                     dsrnno      +                        rrno run number
+     C                                      dsgrnr  +                           grp #/Vchr # = 1
+     C***                                  m3cdivi     +                         division
+     C                                     svdivi      +                         division
+     C                                     '0'         +                         ext/int,ext=0
+     C                                             dsdim1        +
+     C                                             dsdim2        +
+     C                                             dsdim3        +
+     C                                             dsdim4        +
+     C                                             dsdim5        +
+     C                                             dsdim6        +
+     C                                             dsdim7        +
+     C                                             dsqty        +
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '1            ' +            exch rate (13)
+     C                                             dsamt        +               amt (17)
+     C                                             dsacdt       +               actng date (8)
+     C                                             '1 '        +                vat code (2)
+     C                                             dsdescr
+     C                   movel     dsdim         caplt1                         parameter 200 long
+      *
+      *
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+      *
+     c                   movel(p)  dsdescr       dsdescp
+     c                   movel(p)  dsdescr       dsvtxt
+     c                   z-add     glaa          acttot
+     C                   exsr      $l1dtl                                       print report
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve the Account info
+      *---------------------------------------------------------------
+      *
+     C     $getdim       begsr
+      *
+      ** Retrieve JDE cost center/object/subsidiary from the JDE Account ID
+      *
+     C*                  call      'X0901'
+     C*                  parm                    xxsym
+     C*                  parm      '9'           xxomod
+     C*                  parm      '1'           xximod
+     C*                  parm      svglid        xxaid
+     C*                  parm      *blank        xxmcu
+     C*                  parm      *blank        xxobj
+     C*                  parm      *blank        xxsub
+     C*                  parm      *blank        xxerrm
+     C*                  parm                    i0901ds
+      *
+     C*                  if        xxerrm = *blank
+      *
+      *  Translate JDE cost center/object/sub to M3 dimensions.
+      *      ....take cc/obj/sub and look up in table for new.....
+      *
+      *
+     C*    key07         chain     plb8rel3                           92
+     C     SVGLID        CHAIN     PLB8REL8                           92
+      *
+     C                   if        *in92 = *off
+     C                   move      b8qpcd        dsdim1            8
+     C                   move      b8qqcd        dsdim2            8
+     C                   move      b8qrcd        dsdim3            8
+     C                   move      b8qscd        dsdim4            8
+     C                   move      b8qtcd        dsdim5            8
+     C                   move      b8qucd        dsdim6            8
+     C                   move      b8qvcd        dsdim7            8
+     C                   movel     b8awt1        dsdescr
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     C                   eval      dsdescr = '*** Invalid Account ***'
+     C                   endif
+     c                   movel     dsdescr       dsdescp          24         desc for print
+     c                   movel     dsdescr       dsvtxt                      desc for print
+     C*                  endif
+      *
+     C                   endsr
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   get M3 DIM EQUIVALENT FOR JDE COST CENTER/OBJ/SUB
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $getdim2      BEGSR
+     C*
+      *  Translate JDE cost center/object/sub to M3 dimensions.
+      *      ....take cc/obj/sub and look up in table for new.....
+      *
+     C     key1910       klist
+     C                   kfld                    ommcu
+     C                   kfld                    omobj
+     C                   kfld                    omsub
+      *   DAILYS ONLY
+     c     ommcu         ifeq      '         364'                           inval acct catch
+     c     omobj         andeq     '5030    '
+     c     omsub         andeq     '600     '
+     c                   movel     '010     '    omsub
+     c                   endif
+      *
+     C     key1910       chain     plb8rel3                           92
+      *
+     C                   if        *in92 = *off
+     C                   move      b8qpcd        dsdim1            8
+     C                   move      b8qqcd        dsdim2            8
+     C                   move      b8qrcd        dsdim3            8
+     C                   move      b8qscd        dsdim4            8
+     C                   move      b8qtcd        dsdim5            8
+     C                   move      b8qucd        dsdim6            8
+     C                   move      b8qvcd        dsdim7            8
+     c                   movel(p)  b8awt1        wkicbal          40               dscription
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     c                   move      *blanks       wkicbal
+     C                   endif
+      *
+     C                   ENDSR
+      *
+      *---------------------------------------------------------------
+      * Retrieve next number to pass into m3 to tie records together.
+      *---------------------------------------------------------------
+      *
+     C     $nextnbr      begsr
+      *
+      *    get next voucher number from M3 voucher number series
+      *
+     C                   call      'PLW8XFR'
+     C                   PARM                    RTNCDE            7
+     C                   PARM      'ARS'         P1Q4CD            3            vchr nbr series
+     C                   PARM                    P1WVA1            8 0          NEXT NUMBER
+     C                   Z-ADD     P1WVA1        m3seriez          4 0          BATCH NUM
+     C                   move      m3seriez      m3series                       BATCH NUM
+     C                   movel     m3seriez      m3series9         9            BATCH NUM
+     C                   movel     m3seriez      dsrnno            9            run number
+     c                   z-add     0             cawka1                         line number
+     c*
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve M3 Division
+      *---------------------------------------------------------------
+      *
+     C     $trans        begsr
+      *
+      * RETRIEVE M3 DIVISION
+      *
+     C                   CALL      'PDHGXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    svacctco                       COMP
+     C                   PARM      'M3COMPANY '  KMV8CD           10            DESC
+     C                   PARM                    KMM8NB           15 5          VALUE
+     c                   z-add     kmm8nb        m3cono            3 0
+      *
+     C                   CALL      'POMTXFR'
+     C                   PARM                    RTNCDE
+     C                   PARM                    svacctco                       co
+     C                   PARM      'M3DIVISION'  KMV8CD           10            DESC
+     C                   PARM                    kmbxtx           40            DIVISION
+     c                   movel     kmbxtx        m3divi            3
+     c     offset        ifeq      'N'
+     c                   movel     kmbxtx        svdivi            3
+     c                   endif
+     C*
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Write a Journal Record to JDE for the total of this account ID
+      *----------------------------------------------------------------------------------
+      *
+     C*    $writeold     begsr
+      *
+     C*                  move      svglid        wkaid
+     C*                  move      wkaid         glaid
+     C*                  move      acttot        glaa             15 2
+      *
+     C*                  move      0             wkco
+     C*                  move      svacctco      wkco
+     C*                  move      wkco          glco                           Company nbr
+      *
+     C*                  movel     wktype        glicut                         Batch type
+     C*                  z-add     xxbatch       glicu                          Batch number
+     C*                  move      'R'           glrcnd                         Reconciled code
+      *
+     C*                  movel     sdusr         gluser                         User ID
+     C*                  movel     sdusr         gltorg                         Trans Originator
+     C*                  movel     sdjob         gljobn                         Workstation ID
+     C*                  move      svdvdtjul     gldgj                          G/L date
+      *
+     C*                  move      *blank        glcn                           Check number
+     C*                  z-add     0             gldkj                          Check date
+     C*                  z-add     0             gldkc                          Check clear date
+      *
+     C*                  add       1             gljeln                         Line number
+     C*                  move      gldsyj        gldicj                         Batch date
+      *
+      * Retrieve JDE account ID for the cost center/object/subsidiary
+      *
+     C*                  exsr      $account
+      *
+      * Retrieve the structured Account Number.
+      *
+     C*                  move      *blank        wkani
+      *
+     C*                  call      'X0901'
+     C*                  parm                    xxsym
+     C*                  parm      '2'           xxomod
+     C*                  parm      '9'           xximod
+     C*    wkani         parm                    xxani
+     C*                  parm      glmcu         xxmcu
+     C*                  parm      globj         xxobj
+     C*                  parm      glsub         xxsub
+     C*                  parm                    xxerrm
+     C*                  parm                    i0901ds
+      *
+     C*                  if        xxerrm = *blank
+     C*                  movel     wkani         glani                          Account nbr
+     C*                  else
+     C*                  move      *blank        glani
+     C*                  endif
+      *
+     C*                  move      svdvdtjul     gldsvj                         Service/tax date
+      *
+     C*                  eval      glexa = 'A/R MISC DEP'                       Explanation
+     C*                  movel     sdusr         gluser                         User id
+     C*                  move      *blank        glre                           Reverse/void
+     C*                  move      0             glcrr                          Exchange rate
+     C*                  move      0             glhcrr                         Hist exch rate
+      *
+      *  E00039
+      *
+      *  BFGLVL is an 11.2 amount field that is being used to store the vendor number.  We do not
+      *  want the decimal portion of the amount field.  Ultimately the vendor number must be
+      *  8A, left zero filled.  (WKVNDR 9.0, WKVNDR8 is 8.0.)
+      *
+     C*                  if        svglvl <> 0
+     C*                  movel     svglvl        wksbl                          9.0
+     C*                  move      wksbl         wksbl8                         8.0
+     C*                  movel     wksbl8        glsbl
+     C*                  move      'A'           glsblt                         Subledger type
+     C*                  else
+     C*                  move      *blanks       glsbl
+     C*                  move      *blanks       glsblt
+     C*                  z-add     *zeros        wksbl
+     C*                  z-add     *zeros        wksbl8
+     C*                  endif
+      *
+      * only write the record to GL if the amount is not 0
+      *
+     C*                  if        glaa <> 0
+     C*                  write     i0911
+     C*                  endif
+      *
+      * Accumulate Debit Amounts for the Batch Header
+      *
+     C*                  if        glaa > 0
+     C*                  add       glaa          batamt
+     C*                  add       1             batndo
+     C*                  endif
+      *
+     C*                  exsr      $l1dtl
+      *
+     C*                  endsr
+      *eject
+      *---------------------------------------------------------------
+      * Print the detail line
+      *---------------------------------------------------------------
+      *
+     C     $l1dtl        begsr
+      *
+     C   of              except    hdg
+     C                   except    l1dtl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------------------------
+      * Create offsetting company entries for 960 transactions and create new batch
+      * and create new batch  for JDE company 320--> m3 division 490
+      *----------------------------------------------------------------------------------
+      *
+     C     $offsets      begsr
+      *
+      * 1.  Write 3xx Offset Record        ($getglid and $write)
+      * 2.  Write 3xx Batch Record         ($writebatch)
+      *
+      * move 960 stuff to its own subroutine  4/13/17
+      *
+      * 3.  Setup for first 960 record/batch/document # etc.
+      * 4.  Setup generic user name for TF JDE GL batch posting
+      * 5.  Write 960 Offset Record          ($getglid and $write)
+      *
+      *
+      * Write 3xx Batch Record header before batch dtl
+      *
+     C*                  if        batamt <> 0
+     C*                  exsr      $writebatch
+     c*                  endif
+      *
+      * Write 3xx Offset Record
+      *
+     C*                  z-add     *zeros        svglvl                         Save Subledger
+     C*                  move      *blanks       glsbl                          Subledger
+     C*                  move      ' '           glsblt                         Subledger type
+     C*
+      * Do for each that has an offset amount
+     c                   z-add     0             cawka1                           line number
+     c     wkoffset440   ifne      0                                              new 9.13.18
+     C                   eval      wkglcode = 'OFFAR320'
+     c                   z-add     440           wkco960
+     C                   exsr      $getglid
+     c                   z-add     440           XXACCTCO                         NEW 9.13.18
+      *
+      *  retrieve M3 dims based on OFFAR320 and company 440
+      *
+     C     key08         chain     plb8rel5                           92
+     C                   if        *in92 =  *off
+     C                   move      p1b8qpcd      dsdim1            8
+     C                   move      p1b8qqcd      dsdim2            8
+     C                   move      p1b8qrcd      dsdim3            8
+     C                   move      p1b8qscd      dsdim4            8
+     C                   move      p1b8qtcd      dsdim5            8
+     C                   move      p1b8qucd      dsdim6            8
+     C                   move      p1b8qvcd      dsdim7            8
+     C                   movel(p)  p1b8awt1      dsvtxt           40
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     C                   eval      dsvtxt = '*** Invalid Account ***'
+     C                   endif
+     C                   move      'Y'           offset                         offset processing?
+      *
+     C* NEW BATCH FOR 320 --> 490 DUE TO -- DUE FROM  ENTRIES
+      *
+     c                   z-add     wkoffset440   wkoffsetam
+     c                   eval      acttot = (wkoffsetam * -1)
+     C                   if        acttot <> 0
+     c***                exsr      $nextnbr
+     C                   move      svacctco      svc1ny                           Acct Posting CO
+     c                   exsr      $trans
+     c                   movel     m3divi        caqxcd
+     C                   exsr      $write320                                       320-> 490
+     c                   except    l1dtl
+     c                   endif                                                    new end 9.13.18
+     c                   endif                                                    new end 9.13.18
+      *
+      * Do for each that has an offset amount
+     c     wkoffset960   ifne      0                                              new 9.13.18
+     C                   eval      wkglcode = 'OFFAR320'
+     c                   z-add     960           wkco960
+     C                   exsr      $getglid
+     c                   z-add     960           XXACCTCO                         NEW 9.13.18
+      *
+      *  retrieve M3 dims based on OFFAR320 and company 440
+      *
+     C     key08         chain     plb8rel5                           92
+     C                   if        *in92 =  *off
+     C                   move      p1b8qpcd      dsdim1            8
+     C                   move      p1b8qqcd      dsdim2            8
+     C                   move      p1b8qrcd      dsdim3            8
+     C                   move      p1b8qscd      dsdim4            8
+     C                   move      p1b8qtcd      dsdim5            8
+     C                   move      p1b8qucd      dsdim6            8
+     C                   move      p1b8qvcd      dsdim7            8
+     C                   movel(p)  p1b8awt1      dsvtxt           40
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     C                   eval      dsvtxt = '*** Invalid Account ***'
+     C                   endif
+     c                   z-add     wkoffset960   wkoffsetam
+     c                   eval      acttot = (wkoffsetam * -1)
+     C                   if        acttot <> 0
+     c***                exsr      $nextnbr
+     C                   move      svacctco      svc1ny                           Acct Posting CO
+     c                   exsr      $trans
+     c                   movel     m3divi        caqxcd
+     c***                z-add     0             cawka1                           line number
+     C                   exsr      $write320                                       320-> 490
+     c                   except    l1dtl
+     c                   endif                                                    new end 9.13.18
+     c                   endif                                                    new end 9.13.18
+      *
+     c     wkoffset440   add       wkoffset960   acttot                           new 9.13.18
+     c                   eval      acttot = (Acttot * -1)                         reverse sign
+     c                   z-add     acttot        co#amt
+     c                   movel     m3divi        svdivi
+     C***                move      m3cono        svc1ny                           Acct Posting CO
+     C                   exsr      $writeoffset                                   1910
+     C                   exsr      $writebatch                                    490 header
+     C***                endif                                                    comment 9.13.18
+     C******
+     c                   GOTO      ENDOFF
+     C******
+      *  DELETE THE BELOW STUFF IF THIS WORKS!!!!!    960 MOVED TO ITS OWN SUBR $OFFSET960
+     C******
+      *
+      * Setup for first 960 record: get new batch/document number, etc.
+      *
+     C                   close     print132
+     C                   exsr      $first
+     c     bfaic3        ifeq      960
+     C                   move      *blanks       sdusr
+     C                   movel     'TFGLPOST'    sdusr
+     c                   endif
+     C*                  z-add     0             gljeln
+      *
+      * Write the 960 Offset record
+      *
+     C                   eval      wkglcode = 'OFFAR960'
+     C                   exsr      $getglid
+      *
+      *  retrieve M3 dims based on OFFAR960 and company 960
+      *
+     C     key08         chain     plb8rel5                           92
+     C                   if        *in92 =  *off
+     C                   move      p1b8qpcd      dsdim1            8
+     C                   move      p1b8qqcd      dsdim2            8
+     C                   move      p1b8qrcd      dsdim3            8
+     C                   move      p1b8qscd      dsdim4            8
+     C                   move      p1b8qtcd      dsdim5            8
+     C                   move      p1b8qucd      dsdim6            8
+     C                   move      p1b8qvcd      dsdim7            8
+     C                   movel(p)  p1b8awt1      dsvtxt
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     C                   eval      dsvtxt = '*** Invalid Account ***'
+     C                   endif
+      *
+     c                   eval      acttot = wkoffsetam
+     C                   if        acttot <> 0
+     C                   exsr      $writes
+     c                   z-add     wkoffsetam    co#amt
+     C                   endif
+      *
+     C     ENDOFF        TAG
+     C                   endsr
+      *----------------------------------------------------------------------------------
+      * Write the M3 journal entry line to PLCACPP    for 320 offsets -> M3 div 490
+      *----------------------------------------------------------------------------------
+      *
+     C     $write320     begsr
+     C*
+     C                   move      *blanks       dsdim           200
+     c                   movel(p)  m3keyvalue    caait1                         key: yyyymmddnnnn
+     C                   ADD       1             CAWKA1                         LINE NUMBER
+     C*
+     C**  Retrieve new division number with the saved accounting company number retreived
+     C*   from the cross reference table.
+     C*
+     C***                EXSR      $actdivi
+     c***                move      m3adivi       dsdivi
+     c                   exsr      $trans                                       get div f/post comp
+     c                   move      m3divi        dsdivi            3
+      *
+      *  M3  Set values in parameter field
+      *
+     C                   eval      dsamt = %triml(%editc(acttot:'Q'))
+     C                   z-add     0             wkqty             1 0          quantity
+     C                   move      wkqty         dsacqt           17            quantity
+      *
+      *  Move 11.2 vendor (subledger) number into an 8.0 field and ultimately into an 8A.
+      *
+     C                   if        svglvl <> 0
+     C                   movel     svglvl        wksbl             9 0
+     C                   move      wksbl         wksbl8            8 0
+     C                   movel     wksbl8        svsbl             8
+     C                   endif
+      *
+     C                   if        svsbl <> *blanks                             have subledger
+     c                   evalr     dsdim7=%subst(svsbl:%check('0':svsbl))       left adj, remv 00-
+     C                   eval      dsdim7= %triml(dsdim7)
+     c                   endif
+      *
+     C                   eval      dsdim = 'I1'      +                          Identity = I1
+     C                                     (dsrnno) +                           run number
+     C                                     (dsgrnr) +                           grp #/Vchr # = 1
+     C                                     (dsdivi) +                           division
+     C                                     '0'         +                         ext/int, ext=0
+     C                                     (dsdim1) +                           object
+     C                                     (dsdim2) +                           facility
+     C                                     (dsdim3) +                           cost center
+     C                                     (dsdim4) +                           Sub code or AR #
+     C                                     (dsdim5) +                           Customer #
+     C                                     (dsdim6) +                           Product Group
+     C                                     (dsdim7) +                           Subledger
+     C                                     (dsacqt) +                           Quantity
+     C                                             'USD'        +               currency
+     C                                             '1 '        +                exch rt type
+     C                                             '1            ' +            exch rate (13)
+     C                                     (dsamt) +                            Amount
+     C                                     (dsacdt) +                           Accounting Date
+     C                                             '1 '        +                vat code (2)
+     C                                     (dsvtxt)                             Voucher Text
+     C                   movel     dsdim         caplt1                         parameter
+      *
+     C                   movel(p)  sdusr         caabvn                         RS User Added
+     C                   move      wksyssyndt    caabdt                         RS Date added
+     C                   move      wkhhmmss      caabtm                         RS time added
+      *
+     C                   if        acttot <> 0
+     C                   write     @cacpuq                                      M3 plcacpp dtl
+     C                   move      yes           battot                         battot write
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Create Offsetting Company entry for 960 transactions
+      *---------------------------------------------------------------
+      *
+     C     $offset960    begsr
+      *
+      * 1.  Write 960 Offset Record  ($write)
+      *
+      * 4.  Setup generic user name for TF GL batch posting
+      * 5.  Write 960 Offset Record  ($write)
+      *
+      * Write the 960 Offset record
+      *
+     c     bfaic3        ifeq      960
+     C                   eval      wkglcode = 'OFFAR960'                         GL acct Code
+     c                   eval      xxacctco = 960
+     c                   eval      wkoffsetam = wkoffset960                      new 9.13.18
+     c                   endif
+     c     bfaic3        ifeq      440
+     C                   eval      wkglcode = 'OFFAR440'                         GL acct Code
+     c                   eval      xxacctco = 440
+     c                   eval      wkoffsetam = wkoffset440                      new 9.13.18
+     c                   endif
+      *
+     c                   z-add     xxacctco      wkco960
+      *
+      *  retrieve M3 dims based on OFFAR960/440 and company 960/440
+      *
+     C     key08         chain     plb8rel5                           92
+     C                   if        *in92 =  *off
+     C                   move      p1b8qpcd      dsdim1            8
+     C                   move      p1b8qqcd      dsdim2            8
+     C                   move      p1b8qrcd      dsdim3            8
+     C                   move      p1b8qscd      dsdim4            8
+     C                   move      p1b8qtcd      dsdim5            8
+     C                   move      p1b8qucd      dsdim6            8
+     C                   move      p1b8qucd      dsdim6            8
+     C                   move      p1b8qvcd      dsdim7                         sub ledger
+     C                   movel(p)  p1b8awt1      dsvtxt
+     C                   z-add     p1b8xma1      svacctco
+     C                   else
+     C                   move      *blanks       dsdim1
+     C                   move      *blanks       dsdim2
+     C                   move      *blanks       dsdim3
+     C                   move      *blanks       dsdim4
+     C                   move      *blanks       dsdim5
+     C                   move      *blanks       dsdim6
+     C                   move      *blanks       dsdim7
+     C                   eval      dsvtxt = '*** Invalid Account ***'
+     C                   endif
+      *
+     c                   eval      acttot = wkoffsetam
+     C                   if        acttot <> 0
+     C                   exsr      $write320                                     s/b to 960-600
+     C                   endif
+     c*
+     c                   eval      co#amt = wkoffsetam                           starting$ for 960
+     c*
+     C                   except    l1dtl
+      *
+     c                   z-add     0             wkoffsetam
+     c     bfaic3        ifeq      960
+     c                   z-add     0             wkoffset960                     new 9.13.18
+     c                   endif
+     c     bfaic3        ifeq      440
+     c                   z-add     0             wkoffset440                     new 9.13.18
+     c                   endif
+     c                   z-add     0             acttot
+      *
+     C                   endsr
+     C/EJECT
+      *---------------------------------------------------------------
+      * One-time routine for first time through
+      *---------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+     C                   move      no            first
+     C                   move      no            battot                         write hdr if dtl
+     C                   open      print132
+     C                   z-add     0             page
+     C                   move      'N'           offset            1            offset processing?
+      *
+      * Retrieve a Batch Number from JDE
+      *
+     C*                  exsr      $batnbr
+      *
+      * Retrieve the Julian format of the Deposit Date
+      *
+     C** p16169          exsr      $julian
+      *
+      * Convert Deposit Date from CYYMMDD format to MMDDYY format.
+      *
+     C                   exsr      $synondt
+     C                   time                    wkhhmmss
+      *
+      *
+      * Calculate the Period and Fiscal Year for the date
+      *
+     C*                  exsr      $period
+      *
+      * Generate a Document Number from JDE
+      *
+     C*                  exsr      $docnbr
+      *
+      * Retrieve next number  M3 voucher number series
+      *
+     C                   exsr      $nextnbr
+      *
+      *
+     C                   except    hdg
+     C                   except    dochdg
+      *
+     C*                  move      *zeros        glkco
+     C*                  move      bfaic3        glkco
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Convert Synon Deposit Date into MMDDYY format
+      *---------------------------------------------------------------
+      *
+     C     $synondt      begsr
+      *
+     C     *cymd         test(d)                 svdvdt                 92
+     C                   if        *in92 = *off                                 If OK date
+     C     *cymd         move      svdvdt        wkisodate
+     C     *iso          move      wkisodate     wk80dpdt
+     C     *mdy          move      wkisodate     wkmmddyy
+     C                   else
+     C                   z-add     0             wkmmddyy
+     C                   endif                                                  If OK date
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Calculate the Period and Fiscal Year for a date
+      *---------------------------------------------------------------
+      *
+     C*    $period       begsr
+      *
+     C*                  move      *zero         wkco
+     C*                  move      bfaic3        wkco
+     C*                  call      'X09031'
+     C*                  parm      '1'           xxcalc
+     C*                  parm      wkco          xxco
+     C*                  parm      wkmmddyy      wkdate
+     C*    glpn          parm      0             xxpn
+     C*    glfy          parm      0             xxfy
+     C*    glctry        parm      0             xxctry
+     C*                  parm      *blank        xxedt
+     C*                  parm      *blank        xxdgsy
+      *
+     C*                  endsr
+      *eject
+      *---------------------------------------------------------------
+      * Retrieve a Batch Number from JDE
+      *---------------------------------------------------------------
+      *
+     C*    $batnbr       begsr
+      *
+     C*                  call      'X0010 '
+     C*                  parm      '00  '        xxsy
+     C*                  parm      '01'          xxidx
+     C*                  parm      0             xxbatch
+      *
+     C*                  movel     'G'           wktype
+      *
+     C*                  endsr
+      *eject
+      *---------------------------------------------------------------
+      * Retrieve a Document Number from JDE
+      *---------------------------------------------------------------
+      *
+     C*    $docnbr       begsr
+      *
+     C*                  call      'X0010 '
+     C*                  parm      '09  '        xxsy
+     C*                  parm      '02'          xxidx
+     C*    gldoc         parm                    xxdoc
+      *
+     C*                  endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve the Account info
+      *---------------------------------------------------------------
+      *
+     C**   $account      begsr
+      **
+      **Retrieve JDE account ID for the cost center/object/subsidiary
+      **
+     C**                 call      'X0901'
+     C**                 parm                    xxsym
+     C**                 parm      '9'           xxomod
+     C**                 parm      '1'           xximod
+     C*                  parm      svglid        xxani
+     C*                  parm      *blank        xxmcu
+     C*                  parm      *blank        xxobj
+     C*                  parm      *blank        xxsub
+     C*                  parm      *blank        xxerrm
+     C*                  parm                    i0901ds
+      *
+     C*                  if        xxerrm = *blank
+     C*                  movel     xxdl01        wkdesc
+     C*                  movel     xxmcu         glmcu
+     C*                  movel     xxobj         globj
+     C*                  movel     xxsub         glsub
+     C*                  else
+     C*                  eval      wkdesc = '*** Invalid Account ***'
+     C*                  move      *blank        glmcu
+     C*                  move      *blank        globj
+     C*                  move      *blank        glsub
+     C*                  endif
+      *
+     C*                  endsr
+      /EJECT
+      *----------------------------------------------------------------------------------
+      * get the GLID code from PKCWREP for the Account Codes
+      *----------------------------------------------------------------------------------
+      *
+     C     $getglid      begsr
+      *
+      * Get account ID from pkcwrel5  based on the offset accounts
+      *
+     C                   eval      svglid  = *blank
+      *
+      * Retrieve Account I.D. associated with G/L Code.
+      *
+     C                   call      'PKTIXFR'
+     C                   parm                    return
+     C                   parm      wkco960       xxnumco
+     C                   parm      wkglcode      xxglcode
+     C     svglid        parm      *blank        xxaid             8
+     C                   parm      *blank        xxsubtype
+     C                   parm      *blank        xxbalsheet
+     C                   parm      *zeros        xxacctco
+      * Posting company
+     C                   z-add     xxacctco      svacctco
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write the Batch Record to JDE
+      *---------------------------------------------------------------
+      *
+     C*    $writebatch   begsr
+      *
+     C*    key01         chain     f0011                              92
+     C*                  if        *in92 = *off                                 If exists
+     C*                  except    hdg
+     C*                  except    norec
+      *
+     C*                  else
+     C*                  move      xxbatch       icicu
+     C*                  movel     wktype        icicut
+     C*                  move      batamt        icaicu
+     C*                  move      gldicj        icdicj
+     C*                  move      batndo        icndo
+     C*                  move      batamt        icame
+     C*                  move      batndo        icdocn
+     C*                  movel     sdusr         icuser
+     C*                  move      'A'           iciapp
+     C*                  move      'Y'           icbal
+     C*                  move      ' '           icbalj
+     C*                  move      ' '           icist
+     C*                  move      'N'           icpob
+     C*                  move      'Y'           iciboi
+     C*                  write     i0011
+      * reset batndo
+     C*                  z-add     0             batndo
+     C*                  z-add     0             batamt
+     C*                  endif                                                  If exists
+      *
+     C*                  endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm
+      *
+     C     *entry        plist
+     C                   parm                    return
+     C                   parm                    xxtfflag
+     C                   parm                    livewM3           1            Live with M3
+      *
+      * Key Lists
+      *
+     C*    key01         klist
+     C*                  kfld                    wktype
+     C*                  kfld                    xxbatch
+      *
+     C                   time                    rtime
+      *
+      * Put system date into an 8,0 field.
+      * Then, get it into Synon format of CYYMMDD to use in updating AR Detail file.
+      *
+     C     *mdy          movel     udate         wkisodate
+     C                   movel     wkisodate     xxccyymmdd
+     C                   call      'HP8008'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxsyssyndt
+      *
+     C                   move      xxccyymmdd    m3keydt                           M3
+      *
+      *
+      * Get system date into the format required by JDE by calling JDE's routine.
+      * Save the date for populating lots of fields.
+      *
+     C                   time                    wktime
+     C                   move      wkdate        xxsidat
+      *
+      * Put system date into an 7,0 workfield for updating the synon tables
+      *
+     C                   z-add     xxccyymmdd    wkyymmdd          6 0
+     C                   if        xxccyymmdd >= 20000000
+     C     wkyymmdd      add       1000000       wksyssyndt
+     C                   else
+     C                   z-add     wkyymmdd      wksyssyndt
+     C                   endif
+      *
+     C* p16169           call      'X0028'
+     C*                  parm                    xxsidat
+     C*                  parm      *blank        xxedat
+     C*                  parm      '*SYSVAL'     xxffmt
+     C*                  parm      '*JUL   '     xxtfmt
+     C*                  parm      '*NONE  '     xxsep
+     C*                  parm      *blank        xxertst
+     C*                  parm      *blank        xxctryalph
+      *
+     C*                  move      xxsidat       glupmj
+     C*                  move      xxsidat       gldsyj
+      *
+     C*                  time                    glticu
+     C*                  time                    glupmt
+      *
+     C*                  move      sdpgm         glpid
+     C*                  movel     sdjob         gljobn
+      *
+      *
+      * Retrieve JDE cost center/object/sub for JDE account id to use in retrieving M3
+      * equivalent.
+      *
+     C*    key07         klist
+     C*                  kfld                    xxmcu                          jde cost center
+     C*                  kfld                    xxobj                          jde object
+     C*                  kfld                    xxsub                          jde sub
+      *
+      * Retrieve M3 Dims based on company and GL account code
+      *
+     C     key08         klist
+     C                   kfld                    xxacctco
+     C                   kfld                    wkglcode
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oprint132  E            HDG            1 01
+     O                                            8 'M3ARMSC'
+     O                                           63 'ACCOUNTS RECEIVABLE'
+     O                                           70 'SYSTEM'
+     O                       UDATE         Y    131
+     O          E            HDG            1
+     O                       sdusr               10
+     O                                           68 'MISCELLANEOUS POST LIST'
+     O                       RTIME              131 '0 :  :  '
+     O          E            HDG            1
+     O                                          127 'PAGE'
+     O                       PAGE          Z    131
+      *
+     O          E            HDG            2
+      *                                  10 'SELECTION:'
+     O*                                          87 'JDE BATCH # .. :'
+     O*                      wktype              95
+     O*                      xxbatch       z    104
+     O                                           92 'M3 Key Value.. :'
+     O                       m3keyvalue         106
+      *
+     O          E            HDG            1
+     O*                                          18 'DOCUMENT  DEPOSIT'
+     O                                           18 'M3 Series DEPOSIT'
+     O                                           27 'DEPOSIT'
+     O*                                          55 'COST     OBJECT  SUB'
+     O*                                          73 'CODE  DESCRIPTION'
+     O*                                         101 'SUBLEDGER'
+     O*                                         118 'AMOUNT'
+     O                                           59 'Object   Facility CostCntr'
+     O                                           85 'SubAcct  Cust#    ProdGrp'
+     O                                           93 'Subldgr'
+     O                                          105 'Description'
+     O                                          126 'AMOUNT'
+      *
+     O          E            HDG            2
+     O                                           26 'DATE     TIME'
+     O                                           55 'DIM1     DIM2     DIM3'
+     O                                           80 'DIM4     DIM5     DIM6'
+     O                                           90 'DIM7'
+      *
+     O          E            DOCHDG      1  0
+     O*                      gldoc         Z      8
+     O                       m3series             8
+     O                       wkmmddyy            18 '  /  /  '
+     O                       BFYXNX              25 '0 :  '
+      *
+      *-------------------------------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------------------------------
+      *
+     O          e            l1dtl          1
+     O*                      glmcu               40
+     O*                      globj               48
+     O*                      glsub               58
+     O*                      wkdesc              91
+     O*                      GLSBL              101
+     O*                      acttot        j    125
+     O                       dsdim1              41
+     O                       dsdim2              50
+     O                       dsdim3              59
+     O                       dsdim4              68
+     O                       dsdim5              77
+     O                       dsdim6              86
+     O                       dsdim7              95
+     O                       dsvtxt             118
+     O                       ACTTOT        J    131
+     O**                     b8qpcd              41
+     O**                     b8qqcd              50
+     O**                     b8qrcd              59
+     O**                     b8qscd              68
+     O**                     b8qtcd              77
+     O**                     b8qucd              86
+     O**                     b8qvcd              95
+     O*                      dsdescp            118
+      *
+      *-------------------------------------------------------------------------------------
+      * No data message
+      *-------------------------------------------------------------------------------------
+      *
+     O          e            norec       2
+     O                                           33 'No records selected'
+      *

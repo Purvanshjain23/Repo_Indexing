@@ -1,0 +1,1435 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      Triumph Foods
+      * PROGRAM:     TF615
+      * TITLE:       Margin: Volume Adjustment Backup Report
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     10/24/05
+      *
+      * FUNCTION:  Batch program to print the backup to the Volume Adjustment Report.
+      *
+      *            A Volume Adjustment is only applicable to records with a
+      *            TF Class Group Code of CV=Converted.
+      *
+      *            This 'report' is generated:
+      *               1) On-demand
+      *               2) From the Margin Adjustment Close function
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 10/13/06  LeAnne Ramsey
+      *           We now print an "*" beside TFP014 records that have been tweaked with
+      *           Product Exception and/or Product Split stuff.
+      *
+      * 10/26/06  LeAnne Ramsey
+      *           Added 'Produced Margin per Produced Pound' in Section 1.
+      *           Removed 'Item Type' column and shortened 'Description' to make
+      *           room.
+      *
+      * 11/14/06  LeAnne Ramsey
+      *           Changed logic to handle both 'weekly' and 'period' processing by
+      *           using a workfile. We us COPY in the CL to populate the workfile
+      *           with the appropriate records--"weekly" from TFP018 or "period"
+      *           records from TFP118.
+      *
+      * 12/05/06  LeAnne Ramsey
+      *           When Produced Pounds are zero, set Produced Start Weight to zero when
+      *           printing data from the TFP014 file.
+      *
+      * 01/11/06  LeAnne Ramsey
+      *           To prevent abends caused by goofy data,
+      *           we now will allow a Yield Percent up to 999%; prior to this
+      *           we were setting Yield Percent to zero if the calculated value was
+      *           greater than 100%.
+      *
+      * 02/15/07  LeAnne Ramsey
+      *           Changed layout to show each "cost" field.
+      *
+      * 03/21/07  LeAnne Ramsey
+      *           In Detail Section 3, we now want to show "costs" etc. for the NVAs--
+      *           like in Section 1. So, added logic to condition the printing in
+      *           Detail Section 3.
+      *
+      * 04/05/07  LeAnne Ramsey
+      *           Changed the layout to match the layout on the "Mix" report.
+      *           We have gone from 11,2 to 9,0 for pounds/dollars.
+      *           We have added a calculated "produced value per pound' field.
+      *
+      * 04/16/07  LeAnne Ramsey
+      *           We renamed the following flag field:
+      *             1) Exclude from Volume Flag is now Volume Flag
+      *           Before this change Y=Yes meant EXCLUDE the product from processing
+      *           After this change  Y=Yes means INCLUDE the product in processing
+      *
+      * 06/20/07  LeAnne Ramsey
+      *           Moved some of the "condition" logic for TFL014C to the Open Query
+      *           in the CL.
+      *
+      * 11/21/08  LeAnne Ramsey
+      *           As part of synchronizing the LDAs between the TFS Margin Adjustment Close
+      *           and the Meat Costing, we changed the LDA positions.
+      *
+      * 09/05/12  LeAnne Ramsey (E2243)
+      *           Per Damon G. we now write more/special records to TFP014 for the
+      *           Items that receive lbs/dollars from Skirt Meat Items!!  I had to add
+      *           special logic to RO214-Calc Meat Cost-Component Items and TF216-Extract
+      *           Revenue Data for Margin Detail. Damon wants these new special exception
+      *           records to be printed individually instead of being rolled up into a single
+      *           record for the Item.
+      *           To do this printing the way Damon wants, I had to add a new field to TFP014:
+      *                               ADSMSFL-Skirt Meat Split Flag
+      *           And, I had to change the break logic in the $detail subroutines
+      *
+      * 02/08/22  Danny Nguyen   - DO2484 - WI479 STF Variance Reporting
+      *           Recompile only due to TFP014 DBF change. Added the following fields:
+      *             ADXPULB  - STF PRODUCED LBS
+      *             ADXPUSLB - STF PRODUCED START WEIGHT
+      *             ADXYPC   - STF STD YIELD %
+      *             ADXPMPPC - STF PUMP %
+      *             ADXSLLB  - STF SOLD LBS
+      *             ADXSLSLB - STF SOLD START WEIGHT
+      *          ‚The 6 new STF fields will NOT be added to this report per project WI479.
+      *
+      * W105621 RMC 10/10/2022 INCREASE FIELD SIZES TO HANDLE PRICES > 999.99
+      *         COPY @@SPU1MG TO  @@SPU1MG10 SIZE 10.6  -> FIELD TFP014.ADSPU1MG
+      *         COPY @@TPU1MG TO  @@TPU1MG10 SIZE 10.6  -> FIELD TFP014.ADTPU1MG
+      *         COPY @@SSL1MG TO  @@SSL1MG10 SIZE 10.6  -> FIELD TFP014.ADSSL1MG
+      *         COPY @@SSL2MG TO  @@SSL2MG10 SIZE 10.6  -> FIELD TFP014.ADSSL2MG
+      *         COPY @@TSL1MG TO  @@TSL1MG10 SIZE 10.6  -> FIELD TFP014.ADTSL1MG
+      *         COPY @@TSL2MG TO  @@TSL2MG10 SIZE 10.6  -> FIELD TFP014.ADTSL2MG
+      * 05/07/24  Santosh Patil P310149 - Field length is increased
+      *           in TFP014. Function is recompiled only.
+     ‚* 05/24/24  Jagdish Mistry (JM-P310149),Service request number-3009756
+     ‚*           Requirement 1:Exclude items volume flag = N for Triumph
+     ‚*                         from volume calculations Section 2 & 3.
+     ‚*           Requirement 2:
+     ‚*           Include WP items to be printed in Volume adjustment report in section 4 & 5.
+     ‚*           Requirement 3:
+     ‚*           Match WP items weight with Volume adjustment report(TF616).
+      *
+      /EJECT
+      ***********************************************************************************
+      * FILE SPECIFICATIONS
+      ***********************************************************************************
+      *
+     Ftfl014c   if   e           k disk    rename(adrec:adrecc)
+      *  Product margin adjustment transaction detail
+      *  (records selected with open query)
+     ‚* Project-JM-P310149-START
+     ‚* Product Margin Adjustment Transaction Detail, OPNQRYF is in CL
+     FTFL014D   IF   E           K Disk    Rename(adrec:rec14d)
+     ‚* validate FG
+     FTFL014G   IF   E           K Disk    Rename(adrec:rec14g)
+     ‚* TF Margin Adj Group Dtl
+     FPPAOREL1  IF   E           K Disk
+     ‚* Project-JM-P310149-END
+      *
+      *
+     Ftfp318    if   e           k disk
+      *   Workfile: Volume summary
+      *   (records selected with open query)
+      *
+      *
+     Fome8rel0  if   e           k disk
+      *    Product types
+      *
+      *
+     Fppamrel1  if   e           k disk
+      *    TF Classification
+      *
+      *
+     Fombyrel1  if   e           k disk
+      *    Item Default
+      *
+      *
+     Fprint198  o    f  198        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     ‚* Project-JM-P310149-START
+     D Triumph         c                   'T'
+     ‚* Project-JM-P310149-END
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     d rtime           s              6  0
+      *
+      *
+      * Control fields
+      *
+     D gotdata         s              1    inz('N')
+     D got014          s              1    inz('N')
+     D first           s              1    inz('Y')
+     D count           s              5  0
+     D countall        s              5  0
+      *
+     D svtfclcd        s                   like(adtfclcd)
+      *
+      *
+      * Workfields
+      *
+     D wkpc            s             15  4
+      *
+     D wkrmfl          s                   like(adrmfl)
+     D wkvolfl         s                   like(advolfl)
+      *
+     D wkspulb         s                   like(adspulb)
+     D wkspuslb        s                   like(adspuslb)
+     D wkspuam         s                   like(adspuam)
+      *
+     D wktpulb         s                   like(adtpulb)
+     D wktpuslb        s                   like(adtpuslb)
+     D wktpuam         s                   like(adtpuam)
+      *
+     D wkapumam        s                   like(vsspumam)
+     D wkapulam        s                   like(vsspulam)
+     D wkapukam        s                   like(vsspukam)
+     D wkapuiam        s                   like(vsspuiam)
+     D wkapuoam        s                   like(vsspuoam)
+     D wkapupam        s                   like(vsspupam)
+     D wkapumgam       s                   like(vsspumgam)
+      *
+      * Print fields
+      *
+     D dash            s            198    inz(*all'-')
+      *
+     d h1demand        s             35
+     D h1istyds        s             30
+     D h1tfclds        s             30
+      *
+     D h2desc          s             75
+      *
+     D l1tfclcd        s                   like(adtfclcd)
+     D l1prcd          s                   like(adprcd)
+     D l1prds          s             25
+      *
+     D l1pr            s              9  6
+     D l1spulb         s              9  0
+     D l1spuslb        s              9  0
+     D l1spuam         s              9  0
+      *
+     D l1tpulb         s              9  0
+     D l1tpuslb        s              9  0
+     D l1tpuam         s              9  0
+      *
+     D l1star          s                   like(adstar)
+      *
+     D l1apuypc        s                   like(adypc)
+     D l1apumco        s                   like(admco)
+     D l1apulco        s                   like(adlco)
+     D l1apuico        s                   like(adico)
+     D l1apuoco        s                   like(adoco)
+     D l1apukco        s                   like(adkco)
+     D l1apupco        s                   like(adpco)
+     D l1apu1mg        s                   like(adspu1mg)
+      *
+     D t1spulb         s              9  0
+     D t1spuslb        s              9  0
+     D t1spuam         s              9  0
+      *
+     D t1tpulb         s              9  0
+     D t1tpuslb        s              9  0
+     D t1tpuam         s              9  0
+     ‚* Project-JM-P310149-START
+     D wkADITYCD       S                   Like(ADITYCD) Inz('WP')
+     D wkADISTYCD      S                   Like(ADISTYCD)
+     D wkPrtHeader     S              1    Inz
+     D wkFGisFound     S              1    Inz
+     ‚* Project-JM-P310149-END
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+     D arspulb         s             11  2 dim(2)
+     D arspuslb        s             11  2 dim(2)
+     D arspuam         s             11  2 dim(2)
+      *
+     D artpulb         s             11  2 dim(2)
+     D artpuslb        s             11  2 dim(2)
+     D artpuam         s             11  2 dim(2)
+      *
+      *
+      * Array index
+      *
+     d x               s              1  0
+      *
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+     D  ldyr                   2      5  0
+     D  ldwk                   6      7  0
+      *
+     D  ldwemdy               44     49  0
+      *
+     D  ldpe                  51     52  0
+     D  ldpbmdy               61     66  0
+     D  ldpemdy               75     80  0
+      *
+     D  ldwpfl               134    134
+      *
+     D  ldtfcgcd             139    140
+     D  ldtfcgds             141    155
+      *
+     D  ldtfclcd             156    158
+     D  ldtfclds             159    188
+      *
+     D  ldistycd             189    191  0
+     D  ldistyds             192    221
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * MAINLINE
+      ***************************************************************************************
+      *
+      * A Volume Adjustment is only applicable to records with a TF Class Group Code of
+      * CV=Converted. Only "CV" records are written to the Volume Summary file.
+      *
+     C     *loval        setll     tfp318
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      tfp318                                 90
+     C                   if        *in90 = *off                                 If not EOF
+     ‚* Project-JM-P310149-START
+     C                   ExSr      $processFGonly
+     C                   If        wkFGisFound = 'N'
+     C                   Iter
+     C                   EndIf
+     ‚* Project-JM-P310149-END
+      *
+     C                   move      yes           gotdata
+      *
+      * Retrieve description for TF Classification Code
+      *
+     C     vstfclcd      chain     ppamrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      h1tfclds = amq0na
+     C                   else
+     C                   move      *blank        h1tfclds
+     C                   endif
+      *
+      * Retrieve description for Item Structure Type Code
+      *
+     C     vsistycd      chain     ome8rel0                           92
+     C                   if        *in92 = *off
+     C                   eval      h1istyds = e8dctx
+     C                   else
+     C                   move      *blank        h1istyds
+     C                   endif
+      *
+     C                   exsr      $h1hdr
+      *
+      * Print 3 detail sections:
+      *   1) Exclude is NO
+      *   2) Exclude is YES and Raw Converted is YES
+      *   3) Exclude is YES and Raw Converted is NO
+      *
+     C                   exsr      $detail1
+     C                   exsr      $detail2
+     C                   exsr      $detail3
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+     ‚* Project-JM-P310149-START
+     ‚* Below logic should be executed only once for Work in Process Items
+     C                   Eval      h2desc = 'Section 4: Exclude from Volume +
+     C                                       = No:Work in Process'
+     C                   Eval      wkvolfl = Yes
+     C                   ExSr      $detail4WP
+     C                   Eval      h2desc = 'Section 5: Exclude from Volume +
+     C                                       = Yes:Work in Process'
+     C                   Eval      wkvolfl = No
+     C                   ExSr      $detail4WP
+     ‚* Project-JM-P310149-END
+      *
+      * Print a heading and the standard 'no data' message if you had
+      * no data.
+     C                   if        gotdata = no
+     C                   except    nodata
+     C                   endif
+      *
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * Detail logic 1: Exlude is No
+      *---------------------------------------------------------------
+      *
+      * Read/print all Detail records where:
+      *    Item Structure Type Code = Item Structure Type Code from Summary record
+      *    TF Class Group Code is not OT or BP
+      *    Item Type is Finished Goods
+      *    SBF or TF Produced Pounds are not zero
+      *    Volume Flag = Yes
+      *
+     C     $detail1      begsr
+      *
+     ‚* Project-JM-P310149-START
+     C***                   eval      h2desc = 'Section 1: Exclude from Volume +
+     C***                                       = No'
+     C                   Eval      H2Desc = 'Section 1: Volume Flag = Yes'
+     ‚* Project-JM-P310149-END
+     C                   exsr      $h2hdr
+      *
+     C                   seton                                        87
+     C                   z-add     0             count
+     C                   z-add     1             x
+      *
+     C                   move      *blank        wkrmfl
+     C                   move      yes           wkvolfl
+     C                   move      yes           first
+      *
+     C     key01         setll     tfl014c
+      *
+     C                   dou       *in91 = *on                                  Do detail
+     C     key01         reade     tfl014c                                91
+     ‚* Project-JM-P310149-START
+     C***                   if        *in91 = *off                                 If not EOF
+     C                   if        *in91 = *off And                             If not EOF
+     C                             ADITYCD = 'FG'
+     ‚* Project-JM-P310149-END
+      *
+     C                   move      yes           got014
+      * Break logic
+     C                   select
+      *     1) first time
+     C                   when      first = yes
+     C                   move      no            first
+     C                   z-add     adprcd        l1prcd
+     C                   move      adtfclcd      l1tfclcd
+      *     2) item
+     C                   when      adprcd <> l1prcd
+     C                   exsr      $l1dtl
+      *     3) skirt meat
+     C                   when      adprcd = l1prcd and adsmsfl = yes
+     C                   exsr      $l1dtl
+     C                   endsl
+      * Detail logic
+     C                   if        adstar <> *blank
+     C                   move      adstar        l1star
+     C                   endif
+      * Accumulate
+     C                   exsr      $accum
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do detail
+      *
+      * Print last detail line if you had Margin Detail data
+      *
+     C                   if        got014 = yes
+     C                   exsr      $l1dtl
+     C                   endif
+      *
+      * Print Total Line (if you had more than 1 product)
+      *
+     C                   if        count > 1
+     C                   exsr      $t1tot
+     C                   else
+     C                   except    blank
+     C                   except    blank
+     C                   endif
+      *
+      * Clear array occurrence
+      *
+     C                   exsr      $clear
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Detail logic 2: Exlcuded and Raw Converted
+      *---------------------------------------------------------------
+      *
+      * Retrieve/print all records where:
+      *    Item Structure Type Code = Item Structure Type Code from Summary record
+      *    TF Class Group Code is not OT or BP
+      *    Item Type is Finished Goods
+      *    SBF or TF Produced Pounds are not zero
+      *    Volume Flag = No
+      *    Converted Raw Material   = C (ie: Yes)
+      *
+     C     $detail2      begsr
+      *
+     ‚* Project-JM-P310149-START
+     C***                   eval      h2desc = 'Section 2: Exclude from Volume +
+     C***                                       = Yes AND Converted Raw Material +
+     C***                                       = C'
+     C                   Eval      h2desc = 'Section 2: Volume Flag = No And +
+     C                                       Converted Raw Material = C'
+     ‚* Project-JM-P310149-END
+     C                   exsr      $h2hdr
+      *
+     C                   setoff                                       87
+     C                   move      'C'           wkrmfl
+     C                   move      no            wkvolfl
+     C                   z-add     0             count
+     C                   move      no            got014
+     C                   move      yes           first
+      *
+     C                   except    blank
+     C     key02         setll     tfl014c
+      *
+     C                   dou       *in91 = *on                                  Do Exclude/C
+     C     key02         reade     tfl014c                                91
+     ‚* Project-JM-P310149-START
+     C***                   if        *in91 = *off and                             If not EOF
+     C***                             adrmfl = wkrmfl
+     C                   if        *in91 = *off And                             If not EOF
+     C                             adrmfl = wkrmfl And
+     C                             ADITYCD = 'FG'
+     ‚* Project-JM-P310149-END
+     ‚* Project-JM-P310149-START
+     ‚* Exclude vol flag = 'N' items from calculations
+     C     Key04         Chain     PPAOREL1
+     C                   If        %Found(PPAOREL1) And
+     C                             AOSXSX = No And AOD3TX = Triumph
+     C                   Iter
+     C                   EndIf
+     ‚* Project-JM-P310149-END
+      *
+     C                   move      yes           got014
+      * Break logic
+     C                   select
+      *     1) first time
+     C                   when      first = yes
+     C                   move      no            first
+     C                   z-add     adprcd        l1prcd
+     C                   move      adtfclcd      l1tfclcd
+      *     2) item
+     C                   when      adprcd <> l1prcd
+     C                   exsr      $l1dtl
+      *     3) skirt meat
+     C                   when      adprcd = l1prcd and adsmsfl = yes
+     C                   exsr      $l1dtl
+     C                   endsl
+      * Detail logic
+     C                   if        adstar <> *blank
+     C                   move      adstar        l1star
+     C                   endif
+      * Accumulate
+     C                   exsr      $accum
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do Exclude/C
+      *
+      * Print last detail line if you had Margin Detail data
+      *
+     C                   if        got014 = yes
+     C                   exsr      $l1dtl
+     C                   endif
+      *
+      * Print subtotal
+     C                   z-add     1             x
+     C                   if        count > 1
+     C                   exsr      $t1tot
+     C                   endif
+      *
+      * Clear array occurrence
+      *
+     C                   exsr      $clear
+      *
+      * Print Subtotal for first 2 sections
+      *
+     C                   z-add     2             x
+     C                   if        count <> 0
+     C                   exsr      $t1tot
+     C                   else
+     C                   except    blank
+     C                   except    blank
+     C                   endif
+      *
+      * Clear array occurrence
+     C                   exsr      $clear
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Detail logic 3: Exlcuded and Not Raw Converted
+      *---------------------------------------------------------------
+      *
+      * Retrieve/print all records where:
+      *    Item Structure Type Code = Item Structure Type Code from Summary record
+      *    TF Class Group Code is not OT or BP
+      *    Item Type is Finished Goods
+      *    SBF or TF Produced Pounds are not zero
+      *    Volume Flag = No
+      *    Converted Raw Material = No
+      *
+     C     $detail3      begsr
+      *
+     ‚* Project-JM-P310149-START
+     C***                   eval      h2desc = 'Section 3: Exclude from Volume +
+     C***                                       = Yes AND Converted Raw Material +
+     C***                                       = N'
+     C                   Eval      h2desc = 'Section 3: Volume Flag = No And +
+     C                                       Converted Raw Material = N'
+     ‚* Project-JM-P310149-END
+     C                   exsr      $h2hdr
+      *
+     C                   move      'N'           wkrmfl
+     C                   move      no            wkvolfl
+     C                   z-add     0             count
+     C                   z-add     0             countall
+     C                   move      no            got014
+     C                   move      yes           first
+     C                   except    blank
+     C                   setoff                                       87
+      *
+     C     key02         setll     tfl014c
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     key02         reade     tfl014c                                91
+     ‚* Project-JM-P310149-START
+     C***                   if        *in91 = *off and                             If not EOF
+     C***                             adrmfl = wkrmfl
+     C                   if        *in91 = *off And                             If not EOF
+     C                             adrmfl = wkrmfl And
+     C                             ADITYCD = 'FG'
+     ‚* Project-JM-P310149-END
+      *
+     ‚* Project-JM-P310149-START
+     ‚* Exclude Vol flag = 'N' items from calculations
+     C     Key04         Chain     PPAOREL1
+     C                   If        %Found(PPAOREL1) And
+     C                             AOSXSX = No And AOD3TX = Triumph
+     C                   Iter
+     C                   EndIf
+     ‚* Project-JM-P310149-END
+     C                   move      yes           got014
+      *
+     C                   select
+      *     1) First time
+     C                   when      first = yes
+     C                   move      no            first
+     C                   move      adtfclcd      svtfclcd
+     C                   z-add     adprcd        l1prcd
+     C                   move      adtfclcd      l1tfclcd
+      *
+     C                   if        adtfclcd = 'NVA'
+     C                   seton                                        87
+     C                   else
+     C                   setoff                                       87
+     C                   endif
+      *     2) Classification
+     C                   when      adtfclcd <> svtfclcd
+     C                   exsr      $l1dtl
+     C                   exsr      $subtot3
+      *     3) Item
+     C                   when      adprcd <> l1prcd
+     C                   exsr      $l1dtl
+      *     4) Skirt meat
+     C                   when      adprcd = l1prcd and adsmsfl = yes
+     C                   exsr      $l1dtl
+     C                   endsl
+      *
+      * Detail logic
+     C                   if        adstar <> *blank
+     C                   move      adstar        l1star
+     C                   endif
+      * Accumulate
+     C                   exsr      $accum
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+      * Print last detail line if you had Margin Detail data
+      *
+     C                   if        got014 = yes
+     C                   exsr      $l1dtl
+     C                   endif
+      *
+      * Print Subtotal for last Type
+      *
+     C                   exsr      $subtot3
+      *
+      * Print Subtotal for Exclude/Not Raw Converted section
+      *
+     C                   z-add     2             x
+     C                   if        countall <> 0
+     C                   exsr      $t1tot
+     C                   endif
+      *
+      * Clear array occurence
+      *
+     C                   exsr      $clear
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Accumulate values
+      *---------------------------------------------------------------
+      *
+     C     $accum        begsr
+      *
+      * Always accumulate (for ALL sections)
+      *
+     C                   add       adspulb       wkspulb
+     C                   add       adspuslb      wkspuslb
+     C                   add       adspuam       wkspuam
+      *
+     C                   add       adtpulb       wktpulb
+     C                   add       adtpuslb      wktpuslb
+     C                   add       adtpuam       wktpuam
+      *
+      * Accumulate conditonally. Indicator 87 is on for:
+      *  1) Section 1
+      *  2) NVAs in Section 3
+      *
+     C                   if        *in87 = *on                                  If need
+     C                   add       adspumam      wkapumam
+     C                   add       adtpumam      wkapumam
+      *
+     C                   add       adspulam      wkapulam
+     C                   add       adtpulam      wkapulam
+      *
+     C                   add       adspukam      wkapukam
+     C                   add       adtpukam      wkapukam
+      *
+     C                   add       adspuiam      wkapuiam
+     C                   add       adtpuiam      wkapuiam
+      *
+     C                   add       adspuoam      wkapuoam
+     C                   add       adtpuoam      wkapuoam
+      *
+     C                   add       adspupam      wkapupam
+     C                   add       adtpupam      wkapupam
+      *
+     C                   add       adspumgam     wkapumgam
+     C                   add       adtpumgam     wkapumgam
+     C                   endif                                                  If need
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print subtotal for breaks in Section 3
+      *---------------------------------------------------------------
+      *
+     C     $subtot3      begsr
+      *
+     C                   z-add     1             x
+     C                   if        count > 1
+     C                   exsr      $t1tot
+     C                   else
+     C                   except    blank
+     C                   endif
+      *
+      * Clear array occurence
+      *
+     C                   exsr      $clear
+      *
+     C                   move      adtfclcd      svtfclcd
+     C                   z-add     0             count
+      *
+     C                   if        adtfclcd = 'NVA'
+     C                   seton                                        87
+     C                   else
+     C                   setoff                                       87
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print detail line
+      *---------------------------------------------------------------
+      *
+     C     $l1dtl        begsr
+      *
+      * Get some fields into print fields with no decimals
+      *
+     C                   z-add(h)  wkspulb       l1spulb
+     C                   z-add(h)  wkspuslb      l1spuslb
+     C                   z-add(h)  wkspuam       l1spuam
+      *
+     C                   z-add(h)  wktpulb       l1tpulb
+     C                   z-add(h)  wktpuslb      l1tpuslb
+     C                   z-add(h)  wktpuam       l1tpuam
+      *
+      * When Produced Pounds are zero, override Produced Start Weight values to zero.
+      *
+     C                   if        wkspulb = 0
+     C                   z-add     0             l1spuslb
+     C                   endif
+      *
+     C                   if        wktpulb = 0
+     C                   z-add     0             l1tpuslb
+     C                   endif
+      *
+      * Accumulate into arrays for Totals
+      *
+     C                   add       wkspulb       arspulb
+     C                   add       wkspuslb      arspuslb
+     C                   add       wkspuam       arspuam
+      *
+     C                   add       wktpulb       artpulb
+     C                   add       wktpuslb      artpuslb
+     C                   add       wktpuam       artpuam
+      *
+      * Retrieve Product Description
+      *
+     C     l1prcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      l1prds = byavna
+     C                   else
+     C                   move      *blank        l1prds
+     C                   endif
+      *
+      * Produced Yield Percent:
+      *       (produced pounds / produced start weight) * 100
+      *
+     C                   if        (wkspuslb + wktpuslb) <> 0
+     C                   eval(h)   wkpc = ((wkspulb + wktpulb) /
+     C                                        (wkspuslb + wktpuslb)) * 100
+     C                   if        wkpc <= 999
+     C                   z-add     wkpc          l1apuypc
+     C                   endif
+     C                   endif
+      *
+      * Per pound values are only calculated/printed for:
+      *    1) Section 1
+      *    2) NVAs in Section 3
+      *
+     C                   if        *in87 = *on
+     C                   exsr      $perlb
+     C                   endif
+      *
+      * Print headings if necessary
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   add       1             count
+     C                   add       1             countall
+     C                   except    l1dtl
+      * Save fields
+     C                   move      adtfclcd      l1tfclcd
+     C                   move      adprcd        l1prcd
+      *
+      * Clear accumulators and fields that are printed conditionally
+      *
+     C                   z-add     0             wkapumam
+     C                   z-add     0             wkapulam
+     C                   z-add     0             wkapukam
+     C                   z-add     0             wkapuiam
+     C                   z-add     0             wkapuoam
+     C                   z-add     0             wkapupam
+     C                   z-add     0             wkapumgam
+      *
+     C                   z-add     0             wkspulb
+     C                   z-add     0             wkspuslb
+     C                   z-add     0             wkspuam
+      *
+     C                   z-add     0             wktpulb
+     C                   z-add     0             wktpuslb
+     C                   z-add     0             wktpuam
+      *
+     C                   z-add     0             l1apumco
+     C                   z-add     0             l1apulco
+     C                   z-add     0             l1apukco
+     C                   z-add     0             l1apuico
+     C                   z-add     0             l1apuoco
+     C                   z-add     0             l1apupco
+      *
+     C                   z-add     0             l1apu1mg
+     C                   z-add     0             l1spuam
+     C                   z-add     0             l1tpuam
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Per Pound calcs (Section 1 and NVAs in Section 3 only)
+      *---------------------------------------------------------------
+      *
+     C     $perlb        begsr
+      *
+      * Costs
+     C                   if        (wkspulb + wktpulb) <> 0
+      *
+     C                   eval(h)   l1apumco = wkapumam /                         Meat
+     C                                        (wkspulb + wktpulb)
+      *
+     C                   eval(h)   l1apulco = wkapulam /                         Labor
+     C                                        (wkspulb + wktpulb)
+      *
+     C                   eval(h)   l1apuico = wkapuiam /                         Ingredient
+     C                                        (wkspulb + wktpulb)
+      *
+     C                   eval(h)   l1apuoco = wkapuoam /                         Other
+     C                                        (wkspulb + wktpulb)
+      *
+     C                   eval(h)   l1apukco = wkapukam /                         Packaging
+     C                                        (wkspulb + wktpulb)
+      *
+     C                   eval(h)   l1apupco = wkapupam /                         Total
+     C                                        (wkspulb + wktpulb)
+     C                   endif
+      *
+      * If you have Produced Pounds, calc more stuff:
+      *
+     C                   if        (wkspulb + wktpulb) <> 0                     If prod lbs
+      *
+      * Produced Margin per Produced Pounds:
+      *    Aggregate Produced Margin Amount / Aggregate Produced Pounds
+      *
+     C                   eval(h)   l1apu1mg = wkapumgam / (wkspulb + wktpulb)
+      *
+      * Produced Value per Produced Pounds:
+      *    Aggregate Produced Value Amount / Aggregate Produced Pounds
+      *
+     C                   eval(h)   l1pr   = (wkspuam + wktpuam) /
+     C                                      (wkspulb + wktpulb)
+     C                   endif                                                  If prod lbs
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print total line
+      *---------------------------------------------------------------
+      *
+     C     $t1tot        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   z-add(h)  arspulb(x)    t1spulb
+     C                   z-add(h)  arspuslb(x)   t1spuslb
+     C   87              z-add(h)  arspuam(x)    t1spuam
+      *
+     C                   z-add(h)  artpulb(x)    t1tpulb
+     C                   z-add(h)  artpuslb(x)   t1tpuslb
+     C   87              z-add(h)  artpuam(x)    t1tpuam
+      *
+     C                   except    t1tot
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print report headings
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print section heading
+      *---------------------------------------------------------------
+      *
+     C     $h2hdr        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   except    h2hdr
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Clear occurrence in arrays
+      *---------------------------------------------------------------
+      *
+     C     $clear        begsr
+      *
+     C                   z-add     0             arspulb  (x)
+     C                   z-add     0             arspuslb (x)
+     C                   z-add     0             arspuam  (x)
+      *
+     C                   z-add     0             artpulb  (x)
+     C                   z-add     0             artpuslb (x)
+     C                   z-add     0             artpuam  (x)
+      *
+     C                   endsr
+      *---------------------------------------------------------------
+     ‚* Project-JM-P310149-START
+     ‚* Only for Work in Process Items...
+      *---------------------------------------------------------------
+     ‚* Read/print all Detail records where:
+     ‚*    Item Structure Type Code = Item Structure Type Code from Summary record
+     ‚*    TF Class Group Code is not OT or BP
+     ‚*    Item Type is Work in Process
+     ‚*    SBF or TF Produced Pounds are not zero
+     C     $detail4WP    BegSr
+     ‚*
+     C                   Eval      *In87 = *On
+     C                   Z-Add     0             count
+     C                   Z-Add     1             x
+     ‚*
+     C                   Eval      got014    = No
+     C                   Eval      wkrmfl    = No
+     C                   Eval      first     = Yes
+     C                   Eval      svtfclcd  = *Blanks
+     C                   Eval      wkADISTYCD= *Zeros
+     C                   Eval      l1prcd    = *Zeros
+     C                   Eval      l1tfclcd  = *Blanks
+     ‚*
+     C     Key03         SetLL     TFL014D
+     ‚*
+     C                   DoU       *In91 = *On                                  Do detail
+     C     Key03         ReadE     TFL014D                                91
+     C                   If        *In91   = *Off    And                        If not EOF
+     C                             ADVOLFL = wkvolfl And                        Yes Or No
+     C                             ADMIXFL = Yes                                Mix Flag
+     ‚*
+     C                   Eval      got014    = Yes
+     ‚* print Next header & previous total
+     C                   Eval      wkPrtHeader = *Blanks
+     C                   If        (svtfclcd   <> ADTFCLCD And
+     C                              svtfclcd   <> *Blanks)     Or
+     C                             (wkADISTYCD <> ADISTYCD And
+     C                              wkADISTYCD <> *Zeros)
+     C                   Eval      wkPrtHeader = Yes
+     C                   EndIf
+     ‚* Break logic
+     C                   Select
+     ‚*     1) first time
+     C                   When      First = yes
+     C                   ExSr      $prtHeader
+     C                   Eval      First = No
+     C                   Eval      l1prcd   = adprcd
+     C                   Eval      l1tfclcd = adtfclcd
+     ‚*     2) Item
+     C                   When      adprcd <> l1prcd
+     C                   ExSr      $l1dtl
+     C                   If        wkPrtHeader = Yes
+     C                   ExSr      $prtHeader
+     C                   EndIf
+     ‚*     3) skirt meat
+     C                   When      adprcd = l1prcd and adsmsfl = yes
+     C                   ExSr      $l1dtl
+     C                   If        wkPrtHeader = Yes
+     C                   ExSr      $prtHeader
+     C                   EndIf
+     C                   EndSl
+     ‚* Detail logic
+     C                   If        adstar <> *Blanks
+     C                   Move      adstar        l1star
+     C                   EndIf
+     ‚* Accumulate
+     C                   ExSr      $accum
+     C                   Eval      svtfclcd   = ADTFCLCD
+     C                   Eval      wkADISTYCD = ADISTYCD
+     ‚*
+     C                   EndIf                                                  If not EOF
+     C                   EndDo                                                  Do detail
+     ‚*
+     ‚* Print last detail line if you had Margin Detail data
+     C                   If        got014 = yes
+     C                   ExSr      $l1dtl
+     C                   EndIf
+     ‚*
+     ‚* Print Total Line (if you had more than 1 product)
+     C                   If        count > 1
+     C                   ExSr      $t1tot
+     C                   Else
+     C                   Except    Blank
+     C                   Except    Blank
+     C                   EndIf
+     ‚* Clear array occurrence
+     C                   ExSr      $clear
+     ‚*
+     C                   EndSr
+      *---------------------------------------------------------------
+     ‚* print header for Work in Process section
+      *---------------------------------------------------------------
+     C     $prtHeader    BegSr
+     ‚*
+     ‚* Print total of previous
+     C                   ExSr      $t1tot
+     C                   ExSr      $clear
+     ‚*
+     ‚* Header for current item
+     C                   Eval      h1tfclds = *Blanks
+     C                   Eval      vstfclcd = ADTFCLCD
+     C     ADTFCLCD      Chain     PPAMREL1                           92
+     C                   If        *In92 = *Off
+     C                   Eval      h1tfclds = amq0na
+     C                   EndIf
+     ‚* Retrieve description for Item Structure Type Code
+     C                   Eval      h1istyds = *Blanks
+     C                   Eval      vsistycd = ADISTYCD
+     C     ADISTYCD      Chain     OME8REL0                           92
+     C                   If        *In92 = *Off
+     C                   Eval      h1istyds = e8dctx
+     C                   EndIf
+     ‚*
+     C                   If        *InOf = *Off
+     C                   ExSr      $h1hdr
+     C                   EndIf
+     C                   ExSr      $h2hdr
+     C                   EndSr
+      *---------------------------------------------------------------
+     ‚* check if FG is present
+      *---------------------------------------------------------------
+     C     $processFGonlyBegSr
+     C                   Eval      wkFGisFound ='N'
+     C     Key05         SetLL     TFL014G
+     C     Key05         ReadE     TFL014G
+     C                   DoW       Not %EoF(TFL014G)
+     C                   If        ADITYCD = 'FG'
+     C                   Eval      wkFGisFound ='Y'
+     C                   Leave
+     C                   EndIf
+     C     Key05         ReadE     TFL014G
+     C                   EndDo
+     C                   EndSr
+     ‚* Project-JM-P310149-END
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    vsistycd
+     C                   kfld                    wkvolfl
+      *
+     C     key02         klist
+     C                   kfld                    vsistycd
+     C                   kfld                    wkvolfl
+     C                   kfld                    wkrmfl
+     ‚* Project-JM-P310149-START
+     C     key03         klist
+     C                   kfld                    wkADITYCD
+     C     Key04         KList
+     C                   KFld                    ADTFCLCD                       TF CLASSIFICATION
+     C                   KFld                    ADISTYCD                       ITEM STRUC TYPE CODE
+     C                   KFld                    ADISGRCD                       ITEM STRUC GROUP COD
+     C                   KFld                    ADISCLCD                       ITEM STRUC CLASS COD
+     C     Key05         KList
+     C                   KFld                    VSEDT
+     C                   KFld                    VSISTYCD                       ITEM STRUCTURE TYPE
+     C                   KFld                    VSISGRCD                       CODE STRUC TYPE CODE
+     C                   KFld                    VSISCLCD                       ITEM STRUCTURE GROUP
+     C                   KFld                    VSTFCGCD                       TF CLASS GROUP CODE
+     C                   KFld                    VSTFCLCD                       TF CLASSIFICATION
+     ‚* Project-JM-P310149-END
+      *
+      *
+      * Retrieve time for report heading.
+      *
+     C                   time                    rtime
+      *
+      *
+      * This report can be generated for "weekly" data or "period" data.
+      *
+     C                   select
+     C                   when      ldwpfl = 'W'
+     C                   seton                                        88
+     C                   when      ldwpfl = 'P'
+     C                   seton                                        89
+     C                   endsl
+      *
+      *
+      * This report is generated on-demand and also from the
+      * Margin Adjustment Close function.
+      *
+     C                   select
+     C                   when      ldpfcd = 'D'
+     C                   eval      %subst(h1demand:13:9) = 'On-Demand'
+      *
+     C                   when      ldpfcd = 'F'
+     C                   eval      %subst(h1demand:4:29) =
+     C                             'Final Margin Adjustment Close'
+      *
+     C                   when      ldpfcd = 'P'
+     C                   eval      %subst(h1demand:1:35) =
+     C                             'Preliminary Margin Adjustment Close'
+     C                   endsl
+      *
+      * When the report is generated on-demand, the user can enter selections.
+      *
+      * TF class group code
+      *
+     C                   if        ldtfcgcd = *blank
+     C                   seton                                        95
+     C                   endif
+      *
+      * TF classification code
+      *
+     C                   if        ldtfclcd = *blank
+     C                   seton                                        96
+     C                   endif
+      *
+      * Item structure type code
+      *
+     C                   if        ldistycd = 0
+     C                   seton                                        97
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report lines
+      *-------------------------------------------------------------
+      *
+     Oprint198  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           96 'Volume Adjustment'
+     O                                          110 ' Backup Report'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                       h1demand           113
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+     O          e            h1hdr          1
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+      *
+     O          e    88      h1hdr          1
+     O                                           25 'Year/week:'
+     O                       ldyr          z     31
+     O                       ldwk          z     35
+      *
+     O          e    88      h1hdr          1
+     O                                           25 'Week-ending date:'
+     O                       ldwemdy             35 '  /  /  '
+      *
+     O          e    89      h1hdr          1
+     O                                           25 'Year/period:'
+     O                       ldyr          z     31
+     O                       ldpe          z     35
+     O                       ldpbmdy             46 '  /  /  '
+     O                                           49 'to'
+     O                       ldpemdy             58 '  /  /  '
+      *
+      *
+     O          e            h1hdr          1
+     O                                           25 'TF classification code:'
+     O                       vstfclcd            30
+     O                       h1tfclds            68
+      *
+      *
+     O          e            h1hdr          2
+     O                                           25 'Item structure type code:'
+     O                       vsistycd      z     30
+     O                       h1istyds            68
+      *
+      *
+      *-------------------------------------------------------------
+      * Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr       2  1
+     O                                           80 '------ Standard Costs per '
+     O                                           93 'Pound -------'
+     O          e            h1hdr          1
+     O                                            2 'TF'
+     O                                           64 'Meat'
+     O                                           76 'Labor'
+     O                                           88 'Pkg'
+     O                                          106 'Prod'
+     O                                          119 'Prod'
+     O                                          132 'SBF'
+     O                                          145 'SBF Prod'
+     O                                          158 'SBF'
+     O                                          171 'TF'
+     O                                          184 'TF Prod'
+     O                                          197 'TF'
+      *
+     O          e            h1hdr          1
+     O                                            5 'Class'
+     O                                           18 'Description'
+     O                                           41 'Item'
+     O                                           52 'STD Yield'
+      *
+     O                                           69 'Ing'
+     O                                           81 'Other'
+     O                                           93 'Total'
+      *
+     O                                          106 'Value/lb'
+     O                                          119 'Margin/lb'
+      *
+     O                                          132 'Prod LBS'
+     O                                          145 'Start LBS'
+     O                                          158 'Prod Value'
+     O                                          171 'Prod LBS'
+     O                                          184 'Start LBS'
+     O                                          197 'Prod Value'
+      *
+     O          e            h1hdr          1
+     O                       dash               198
+      *
+      *
+      *-------------------------------------------------------------
+      * Section headings
+      *-------------------------------------------------------------
+      *
+     O          e            h2hdr       0  0
+     O                       h2desc              75
+      *
+     O          e            h2hdr          1
+     O                       h2desc              75
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       1
+     O                       l1tfclcd       b     3
+     O                       l1prds         b    32
+     O                       l1prcd        z     41
+     O                       l1star         b    43
+      *
+     O                       l1apuypc       b    53 '   .    %'
+     O               87      l1apumco      kb    65
+     O               87      l1apulco      kb    77
+     O               87      l1apukco      kb    89
+      *
+     O               87      l1pr          kb   107
+     O               87      l1apu1mg      kb   120
+      *
+     O                       l1spulb       kb   133
+     O                       l1spuslb      kb   146
+     O               87      l1spuam       kb   159
+      *
+     O                       l1tpulb       kb   172
+     O                       l1tpuslb      kb   185
+     O               87      l1tpuam       kb   198
+      *
+      *
+     O          e    87      l1dtl       1
+     O                       l1apuico      kb    70
+     O                       l1apuoco      kb    82
+     O                       l1apupco      kb    94
+      *
+      *-------------------------------------------------------------
+      * Total line 1
+      *-------------------------------------------------------------
+      *
+     O          e            t1tot       1  1
+     O                                          132 '-----------'
+     O                                          145 '-----------'
+     O               87                         158 '-----------'
+      *
+     O                                          171 '-----------'
+     O                                          184 '-----------'
+     O               87                         197 '-----------'
+      *
+     O          e            t1tot
+     O                       t1spulb       kb   133
+     O                       t1spuslb      kb   146
+     O               87      t1spuam       kb   159
+      *
+     O                       t1tpulb       kb   172
+     O                       t1tpuslb      kb   185
+     O               87      t1tpuam       kb   198
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank       1
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata         1 01
+     O                       sdpgm               10
+     O                                           98 'Volume Adjustment Backup'
+     O                                          105 ' Report'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+      *
+     O          e            nodata         1
+     O                       sdusr               10
+     O                       h1demand           108
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+     O          e            nodata         1
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+     O          e    88      nodata         1
+     O                                           25 'Year/week:'
+     O                       ldyr          z     31
+     O                       ldwk          z     35
+     O                                           55 'Week-ending date:'
+     O                       ldwemdy             64 '  /  /  '
+      *
+     O          e    89      nodata         1
+     O                                           25 'Year/period:'
+     O                       ldyr          z     31
+     O                       ldpe          z     35
+     O                       ldpbmdy             46 '  /  /  '
+     O                                           49 'to'
+     O                       ldpemdy             58 '  /  /  '
+      *
+      *
+     O          e            nodata         1
+     O                                           25 'TF class group code:'
+     O               95                          30 'All'
+     O              n95      ldtfcgcd            29
+     O              n95      ldtfcgds            53
+      *
+     O          e            nodata         1
+     O                                           25 'TF classification code:'
+     O               96                          30 'All'
+     O              n96      ldtfclcd            30
+     O              n96      ldtfclds            68
+      *
+     O          e            nodata         2
+     O                                           25 'Item structure type code:'
+     O               97                          30 'All'
+     O              n97      ldistycd      z     30
+     O              n97      ldistyds            68
+      *
+     O          e            nodata         1
+     O                       dash               198
+      *
+      *
+     O          e            nodata
+     O                                           19 'No data meets your'
+     O                                           39 'selection criteria.'
+      /eject

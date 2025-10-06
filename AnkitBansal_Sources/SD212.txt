@@ -1,0 +1,411 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Margin Management
+      * PROGRAM:     SD212 - Signal Demand: Sales History
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     03/28/08
+      *
+      * FUNCTION: This program builds the Sales History files to be sent to
+      *           Signal Demand.
+      *
+      *           Signal Demand has specified that they DO NOT WANT credit/debit memo data.
+      *
+      *           We intentionally do not populate:
+      *               Requested ship date
+      *               Scheduled ship date
+      *               Block order flag
+      *
+      *
+      * NOTE: After the initial load for Signal Demand, we will only send the
+      *       "last 10 days" of data. If we need to resend the entire file:
+      *       1) reinstate the commented out code in the Initialization Subroutine
+      *          so that we get all data from 2003 forward
+      *       2) change the FTP CL for file SDP200 to say "TOTAL" instead of "DELTA"
+      *       (After the run, you must revert to the "10 day" code.)
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * Date      Programmer
+      *
+      * 04/03/08  LeAnne Ramsey
+      *           Removed all "cost" fields/logic.
+      *
+      * 06/19/08  LeAnne Ramsey
+      *           Added code to populate existing Price Method Code field with
+      *           value from field "SH Sale Price Method" in the new Synon file
+      *           Sales History Extension.
+      *
+      * 02/04/09  LeAnne Ramsey
+      *           Recompile only. We got a level check in last night's run
+      *           over file PMD0PCL1- Sales History Extension.
+      *
+      * 09/03/09  LeAnne Ramsey
+      *           Recompile only. File PMD0PCL1-Sales History Extension was changed.
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fcaadrel1  if   e           k disk
+      *   Warehouse master
+      *
+      *
+     Fcabzrel1  if   e           k disk
+      *   Item master
+      *
+      *
+     Fomhstpod  if   e           k disk
+      *  Sales history (LF selects only Orders)
+      *
+      *
+     Fpmd0cpl1  if   e           k disk
+      *  Sales history extension
+      *
+      *
+     Fsdp001    if   e           k disk
+      *   Price method override (used in deriving data for Signal Demand)
+      *
+      *
+     Fsdp212    o    e           k disk
+      *   Signal Demand: Sales history header
+      *
+      *
+     Fsdp213    o    e           k disk
+      *   Signal Demand: Sales history detail
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *---------------------------------------------------------------
+      *  Standalone fields
+      *---------------------------------------------------------------
+      *
+      * Control fields
+      *
+     D first           s              1    inz('Y')
+     D svcono          s                   like(shscono)
+     D svorno          s                   like(shorno)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkisodate       s               d   datfmt(*iso)
+     D wkdt            s              7  0
+      *
+      *
+      * Parm fields
+      *
+     D xxitem          s              7  0
+     D xxuom           s              2
+     D xxpr            s             11  4
+     D xxsynondt       s              7  0
+     D xxcocd          s              3  0
+     D xxreturn        s              7a
+      *
+      ****************************************************************
+      * Data Structures
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ***************************************************************************************
+      * Mainline
+      ***************************************************************************************
+      *
+      * Process order records from the Synon Sales History File.
+      * We process data with Actual Ship Date within 10 days prior to the system date.
+      * This is Seaboard/Triumph data--not Dailys. (controlled by library list)
+      * The LF selects:   Order type = OR (Order)
+      *
+     C     wkdt          setll     omhstpod
+      *
+     C                   dou       *in90 = *on                                  Main do loop
+     C                   read      omhstpod                               90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Write a Header Record for each Company/Order
+      *
+     C                   select
+     C                   when      first = yes
+     C                   move      no            first
+     C                   exsr      $header
+      *
+     C                   when      f4aic3 <> svcono or
+     C                             f4c4nb <> svorno
+     C                   exsr      $header
+     C                   endsl
+      *
+      * Write a detail record for each Sales History record
+      *
+     C                   exsr      $detail
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do loop
+      *
+     C                   seton                                        lr
+      /eject
+      *--------------------------------------------------------------------------------
+      * Write Sales History Header record
+      *--------------------------------------------------------------------------------
+      *
+     C     $header       begsr
+      *
+     C                   clear                   shrec
+      * Company data
+     C                   z-add     f4r8nb        shscono                        Shipping Company
+     C                   z-add     f4aic3        shacono                        Accounting Comp
+      *
+      * Order data
+     C                   move      'C'           shhdsts                        Order status
+     C                   move      f4jncd        shtycd                         Order type
+     C                   z-add     f4c4nb        shorno                         Order number
+     C                   move      f4ajcd        shwhcd                         Warehouse
+      *
+      * Fresh/Frozen Flag
+     C                   exsr      $fresh
+      *
+      * Customer data
+     C                   z-add     f4bkc7        shshcuno                       Ship to Cust
+     C                   move      f4hnna        shshcity                       Ship to City
+     C                   move      f4dbcd        shshstate                      Ship to State
+     C                   move      f4cktx        shshzipcd                      Ship to Zip
+      * Other data
+     C                   move      f4r4cd        shorspcd                       Orig salesman
+     C                   z-add     f4rmnb        shloadno                       Load number
+     C                   move      f4q2cd        shsmcd                         Shipping method
+     C                   move      f4bzna        shcrcd                         Carrier code
+     C                   move      f4u2st        shexfl                         Export flag
+     C                   move      f4umcd        shexcntry                      Export country
+      * Order date
+      *
+     C     *cymd         test(d)                 f4a0dt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      f4a0dt        wkisodate
+     C                   move      wkisodate     shordt
+     C                   endif
+      *
+      * Actual ship date
+      *
+     C     *cymd         test(d)                 f4gndt                 92
+     C                   if        *in92 = *off                                 If good date
+     C     *cymd         move      f4gndt        wkisodate
+     C                   move      wkisodate     shacdt
+     C                   endif                                                  If good date
+      *
+      * Write record
+     C                   write     shrec
+      *
+      * Save break fields
+     C                   z-add     f4aic3        svcono
+     C                   z-add     f4c4nb        svorno
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------
+      * Write a Detail record for each Datamart Sales History record read
+      *--------------------------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+      * Order/Item info
+     C                   z-add     f4c4nb        sdorno
+     C                   z-add     f4dpnb        sdseqno
+     C                   z-add     f4uenb        sdsecno
+     C                   z-add     f4s5nb        sditcd
+      *
+      * Billed quantity and weight are populated based on the yes/no value
+      * in the OMS field 'affect sales pnds status'.
+      *
+     C                   select
+     C                   when      f4vast = no
+     C                   z-add     0             sdshqt
+     C                   z-add     0             sdshwt
+     C                   other
+     C                   z-add     f4exqt        sdshqt
+     C                   z-add     f4bywg        sdshwt
+     C                   endsl
+      *
+      * Weights (ordered/scheduled)
+      *
+     C                   z-add     f4d0wg        sdorwt
+     C                   z-add     f4auwg        sdscwt
+      *
+      * Quantities (ordered/scheduled)
+      *
+     C                   z-add     f4avqt        sdorqt
+     C                   z-add     f4ccqt        sdscqt
+      *
+      * Amounts
+     C                   z-add     f4uova        sdbkam
+     C                   z-add     f4kdva        sdgram                             bill dtl gross
+     C     f4d9pr        add       f4unva        sdmaam                             tot MKT accr
+     C                   z-add     f4ulva        sdafam                             abs fgt
+     C                   z-add     f4utva        sdsoam                             std ovg
+      *
+      * Net FOB Amount = gross - mkt accrual amt - broker commission amt -
+      *                    absorbed freight amt
+      *
+     C                   eval      sdntam = sdgram - sdmaam - sdbkam - sdafam
+      *
+      * Calculate Commodity Market Amount as:
+      *       Price per CWT * Weight Billed
+      *
+     C                   call      'POS2XFR'
+     C                   parm                    xxreturn
+     C                   parm      f4aic3        xxcocd
+     C                   parm      f4agcd        xxuom
+     C                   parm      f4s5nb        xxitem
+     C                   parm      f4gndt        xxsynondt
+     C                   parm      0             xxpr
+      *
+     C     xxpr          mult      f4bywg        sdcmam
+      *
+      *
+      * Prices/lb
+     C                   if        sdshwt <> 0                                  If weight
+     C     sdgram        div       sdshwt        sdgrpr                            gross
+     C     sdmaam        div       sdshwt        sdmapr                            mkt accrual
+     C     sdcmam        div       sdshwt        sdcmpr                            commodity mkt
+     C     sdafam        div       sdshwt        sdafpr                            abs fgt
+     C     sdntam        div       sdshwt        sdntpr                            net FOB
+     C     sdbkam        div       sdshwt        sdbkpr                            broker comm
+     C     sdsoam        div       sdshwt        sdsopr                            std ovg
+     C                   endif                                                  If weight
+      *
+      *
+      * Contract Price/LB
+     C                   z-add     f4bzpr        sdcppr
+      *
+      * Market Price Date
+      *
+     C     *cymd         test(d)                 f4exdt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      f4exdt        wkisodate
+     C     *iso          move      wkisodate     sdmpdt
+     C                   endif
+      *
+      * Price Date
+      *
+     C     *cymd         test(d)                 f4gidt                 92
+     C                   if        *in92 = *off
+     C     *cymd         move      f4gidt        wkisodate
+     C     *iso          move      wkisodate     sdprdt
+     C                   endif
+      *
+      * Pricing Codes:
+      *   Commodity Market
+      *   Date Method
+     C                   move      f4lqcd        sdcmcd
+     C                   move      f4rdcd        sddmcd
+      *   Price Method
+     C                   move      f4q7cd        sdpmcd
+      *
+      * Check for a Price Method Override value for this Ship To Customer
+      * in the Override file.
+      *
+     C     f4bkc7        chain     sdp001                             92
+     C                   if        *in92 = *off and popmcd <> *blank
+     C                   move      popmcd        sdpmcd
+     C                   endif
+      *
+      * Check for a Price Method Override value in the new Sales History
+      * Extension file.
+      *
+     C     key02         chain     pmd0cpl1                           92
+     C                   if        *in92 = *off and d0jxaa <> *blank
+     C                   move      d0jxaa        sdpmcd
+     C                   endif
+      *
+      * Write record
+     C                   write     sdrec
+     C                   clear                   sdrec
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------------
+      * Determine whether the item is fresh or frozen
+      *--------------------------------------------------------------------------------------
+      *
+     C     $fresh        begsr
+      *
+      * Make two attempts to determine fresh/frozen:
+      *  1) check the 'sld fzn flag' in the Company/Item file
+      *  2) if the item is not a frozen item, then
+      *     Use the Warehouse Code from the OMS Sales History record to access
+      *     the Warehouse file. Move the  'warehouse type' from the retrieved
+      *     warehouse record to the fresh/frozen flag field.
+      *
+     C     key01         chain     cabzrel1                           92
+     C                   if        *in92 = *off and                             If frozen
+     C                             bzs4st = 'Y'
+     C                   move      'FZ'          shfffl
+     C                   else
+      *
+      * Check the Warehouse file
+      *
+     C     f4ajcd        chain     caadrel1                           92
+     C                   if        *in92 = *off
+     C                   move      adwpst        shfffl
+     C                   endif
+     C                   endif                                                  If frozen
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    f4aic3
+     C                   kfld                    f4s5nb
+      *
+     C     key02         klist
+     C                   kfld                    f4aic3
+     C                   kfld                    f4c4nb
+     C                   kfld                    f4dpnb
+     C                   kfld                    f4uenb
+      *
+      *
+      * Find the "date" that is 10 days prior to the System Date.
+      * Put it into a Synon format (CYYMMDD)
+      *
+     C                   move      *date         wkisodate
+     C     wkisodate     subdur    10:*d         wkisodate
+     C     *cymd         move      wkisodate     wkdt
+      *
+      *
+      * When/if we must send the entire file (instead of just the last 10 days),
+      * reinstate the line of code below. (You must also change the FTP CL to say
+      * "TOTAL" instead of "DELTA".)
+      *
+     C*****************  z-add     1030101       wkdt
+      *
+     C                   endsr
+      /EJECT

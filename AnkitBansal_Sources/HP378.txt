@@ -1,0 +1,346 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      Hog Production System
+      * PROGRAM:     HP378
+      * TITLE:       Build Workfiles for Closed/Disposed Group Summary
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     05/15/01
+      *
+      *  FUNCTION:   This program builds two workfiles for use in the closed group
+      *              and disposed group summaries:
+      *
+      *              HSP378-Workfile for Summary Level
+      *                     This file contains 1 record per level value. Each
+      *                     record contains the level value and the number of closed
+      *                     hog groups included in the data.  The file is used as the
+      *                     primary input in the print program
+      *
+      *              HSP379-Workfile of Report Codes for each record in HSP378
+      *                     This file contains report code records for the group or farm
+      *                     or cell or business...whatever the records are in the primary
+      *                     file.
+      *
+      *           This program is submitted by HP478CL which is called from HP478 through
+      *           QCMDEXC.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 06/05/01  LeAnne Fedor
+      *           Recompile only. New field 'multisite' added to Farm Site file.
+      *
+      * 06/28/01  LeAnne Fedor
+      *           Recompile only.
+      *           Three fields (manager/supervisor/multisite) renamed in Farm Site file.
+      *           Manager and supervisor fields removed from Hog Group file.
+      *
+      * 09/04/01  LeAnne Fedor
+      *           Recompile only. New 'square feet' fields added to Farm Site file.
+      *
+      * 08/21/06  LeAnne Fedor
+      *           Added Production Manager Code to the Summary Level workfile. User can now
+      *           elect to sort/print by Production Manager on the Farm/Group versions.
+      *
+      * 07/06/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 10/16/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp033    if   e           k disk    usropn
+      *    Closed hog group
+      *
+      *
+     Fhsj018g   if   e           k disk
+      *    Farm site + hog group
+      *    (records selected by open query)
+      *
+      *
+     Fhsp378    o    e           k disk
+      *    Workfile of summary level values
+      *
+      *
+     Fhsp379    uf a e           k disk
+      *    Workfile of report codes
+      *
+      *
+     Fhsp390    if   e           k disk    usropn rename(cgrec:cgreca)
+      *    Workfile for disposed group reports
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Control fields
+      *
+     d first           s              1    inz('Y')
+     d svfscd          s                   like(fsfscd)
+     d svpmgcd         s                   like(fspmgcd)
+     d svcell          s                   like(fscell)
+      *
+      *
+      * Work fields
+      *
+     D wknbhg          s              5  0
+     d wklevel         s                   like(whlevel)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldslcd                49     49
+     D  ldgscd                62     63
+     D  ldpmgfl               69     69
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+     C     *loval        setll     hsj018g
+      *
+      * Process each hog group selected by the open query.
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsj018g                                90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   if        first = yes
+     C                   exsr      $first
+     C                   endif
+      *
+      * Break logic when you are generating the CELL or FARM version,
+      *   write the workfile header record with the total number of
+      *   closed hog groups included in the accumulations.
+      *
+     C                   if        (ldslcd = 'C' and fscell <> svcell) or
+     C                             (ldslcd = 'F' and fsfscd <> svfscd)
+     C                   exsr      $header
+     C                   endif
+      *
+      * Detail processing of each hog group
+      *
+     C                   exsr      $group
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *--------------------------------------------------------------
+      * EOF processing
+      *--------------------------------------------------------------
+      *
+      * If you had data and are summarizing at any 'level' other than 'Group',
+      * then write out the last header record.
+      *
+     C                   if        first = no and ldslcd <> 'G'                 If data
+     C                   exsr      $header
+     C                   endif                                                  If data
+      *
+     C                   seton                                        lr
+      /EJECT
+      *----------------------------------------------------------------
+      * Write the header workfile record with the number of groups
+      *----------------------------------------------------------------
+      *
+     C     $header       begsr
+      *
+      * If the user has overridden the Production Manager sort/print sequence,
+      * store key field values in the file:
+      * (Note: this override is only available for Group and Farm summary levels.)
+      *
+     C                   select
+     C                   when      ldpmgfl = yes and ldslcd = 'G'
+     C                   move      fspmgcd       whpmgcd
+     C                   z-add     fsfscd        whfscd
+     C                   move      hgblcd        whblcd
+      *
+     C                   when      ldpmgfl = yes and ldslcd = 'F'
+     C                   move      svpmgcd       whpmgcd
+     C                   z-add     svfscd        whfscd
+     C                   endsl
+      *
+      * For 'Group' summary level
+      *
+     C                   if        ldslcd = 'G'
+     C                   move      hgppcd        whppcd
+     C                   move      hghgcd        whhgcd
+     C                   endif
+      *
+     C                   move      ldslcd        whslcd
+     C                   z-add     wklevel       whlevel
+     C                   z-add     wknbhg        whnbhg
+      *
+     C                   write     whrec
+     C                   clear                   whrec
+      *
+      * Save new fields
+     C                   if        ldslcd = 'C'
+     C                   z-add     fscell        svcell
+     C                   z-add     fscell        wklevel
+     C                   endif
+      *
+     C                   if        ldslcd = 'F'
+     C                   move      fspmgcd       svpmgcd
+     C                   z-add     fsfscd        svfscd
+     C                   z-add     fsfscd        wklevel
+     C                   endif
+      *
+      * Clear accumulator
+     C                   z-add     0             wknbhg
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------
+      * Process the closed group records for a group
+      *--------------------------------------------------------------
+      *
+     C     $group        begsr
+      *
+      * If you are generating the GROUP version, set up the level key field.
+      *
+     C                   if        ldslcd = 'G'
+     C                   z-add     hghgsn        wklevel
+     C                   endif
+      *
+      * Increment the counter for the number of groups for the summary level
+      *
+     C                   add       1             wknbhg
+      *
+      * For each group, read each record in the closed or the disposed group
+      * file and accumulate its values by summary level.
+      *
+     C                   select
+     C                   when      ldgscd = 'CL'
+     C     hghgsn        setll     hsp033
+     C                   when      ldgscd = 'DS'
+     C     hghgsn        setll     hsp390
+     C                   endsl
+      *
+     C                   dou       *in91 = *on                                  Do group
+      *
+     C                   select
+     C                   when      ldgscd = 'CL'
+     C     hghgsn        reade     hsp033                                 91
+     C                   when      ldgscd = 'DS'
+     C     hghgsn        reade     hsp390                                 91
+     C                   endsl
+      *
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      * Determine if a record for this particular report code already
+      * exists for this summary level--either udpate an existing record
+      * or write a new summary level/report code record.
+      *
+     C     key01         chain     hsp379                             92
+     C                   if        *in92 = *off                                 If exists
+     C                   add       cgcgam        wrcgam
+     C                   add       cgcghd        wrcghd
+     C                   add       cgcglb        wrcglb
+     C                   add       cgcrlb        wrcrlb
+     C                   add       cgcgqt        wrcgqt
+     C                   add       cgcdhd        wrcdhd
+     C                   add       cgcdlb        wrcdlb
+     C                   add       cgydhd        wrydhd
+     C                   add       cgydlb        wrydlb
+     C                   update    wrrec
+     C                   else
+     C                   z-add     wklevel       wrlevel
+     C                   movel     cgcacd        wrcacd
+     C                   movel     cgrpcd        wrrpcd
+     C                   z-add     cgcgam        wrcgam
+     C                   z-add     cgcghd        wrcghd
+     C                   z-add     cgcglb        wrcglb
+     C                   z-add     cgcrlb        wrcrlb
+     C                   z-add     cgcgqt        wrcgqt
+     C                   z-add     cgcdhd        wrcdhd
+     C                   z-add     cgcdlb        wrcdlb
+     C                   z-add     cgydhd        wrydhd
+     C                   z-add     cgydlb        wrydlb
+     C                   write     wrrec
+     C                   endif                                                  If exists
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do group
+      *
+      * If you are generating the GROUP version, just go ahead and write
+      * the workfile header record here instead of in the control break section.
+      *
+     C                   if        ldslcd = 'G'
+     C                   exsr      $header
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------
+      * First time
+      *--------------------------------------------------------------
+      *
+     C     $first        begsr
+      *
+     C                   move      no            first
+      *
+     C                   select
+     C                   when      ldslcd = 'F'
+     C                   move      fspmgcd       svpmgcd
+     C                   z-add     fsfscd        svfscd
+     C                   z-add     fsfscd        wklevel
+      *
+     C                   when      ldslcd = 'C'
+     C                   z-add     fscell        svcell
+     C                   z-add     fscell        wklevel
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------
+      * Initialization subroutine
+      *--------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C                   select
+     C                   when      ldgscd = 'CL'
+     C                   open      hsp033
+     C                   when      ldgscd = 'DS'
+     C                   open      hsp390
+     C                   endsl
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    wklevel
+     C                   kfld                    cgrpcd
+      *
+     C                   endsr
+      /eject

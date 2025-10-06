@@ -1,0 +1,231 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER  -> HPEVCHCL  - MOVED TO E1IDEVMDL              */
+/*                                                                 */
+/*  PROGRAM NAME    -> CALL PROGRAMS TO RUN VOUCHER EDIT/POST      */
+/*                                                                 */
+/*  PROGRAM PURPOSE -> THIS CLP IS USED TO CALL THE PROGRAMS TO    */
+/*                     DO AND EDIT AND POST.  IF THE EDIT SENDS    */
+/*                     BACK 'Y' IN THE ERR FIELD, THE RECORDS      */
+/*                     WILL BE WRITTEN TO JDE AS UNPOSTED.         */
+/*                                                                 */
+/*  PROGRAMMER      -> BARB GUTIERREZ           06/27/95           */
+/*******************************************************************/
+/*   RMC  5/2/17  T8163 FOR M3, PASS PARM TO PROCESS INTERNAL ONLY FOR 360  */
+/*   RMC  6/29/20 P16169  ADDED E1 PROCESSING  --- IN HPEVCH:              */
+/*                IF LIVE OR PARALLEL WITH E1 THEN CALL HPEVCHE1 ELSE HPEVCHW */
+/*                CRT WORKFILE E1B9CPP IN TEMP TO USE TO PUSH BATCHES TO E1  */
+/*                FOR NOW- ONLY INTERNAL GL ENTRIES FOR CO 350 GO TO E1  */
+/*   RMC  10/15/21 SDN440  EMAIL BATCHES TO DIST LIST FOR CO-E1HPEST CO VALUE */
+/*                LIKE WE DO FOR M3                                        */
+/*                ADDED TO LDA BATCH4 FOR INTCO 360 BATCH IF INTCO NE Y  */
+/*   RMC  2/15/22 SDN440  ON EMAIL, ADD PAY TYPE DESC, AND CO          */
+/*                GET IT FROM PWOMXFR                                  */
+/*   JTB 11/08/24 SHPEPAY chgjob to log the CL durring processing      */
+/*                                                                     */
+/*******************************************************************/
+HPVCHCL:     PGM   (&RETRN &CO &BATCH &INTCO)
+
+             DCL        VAR(&RETRN) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&CO) TYPE(*DEC) LEN(3 0)
+             DCL        VAR(&BATCH) TYPE(*DEC) LEN(5 0)
+             DCL        VAR(&ACO) TYPE(*CHAR) LEN(3)
+             DCL        VAR(&ABAT) TYPE(*CHAR) LEN(5)
+             DCL        VAR(&EMAIL) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&MSGB) TYPE(*CHAR) LEN(40)
+             DCL        VAR(&MSGC) TYPE(*CHAR) LEN(25)   /* PAYEE TYPE DESC */
+             DCL        VAR(&ERR) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&BAT1) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&BAT2) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&BAT3) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&BAT4) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&INTCO) TYPE(*CHAR) LEN(1)    /*Y =INTERNAL ONLY */
+             DCL        VAR(&LIVEE1) TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&LIVEE1INT) TYPE(*CHAR) LEN(1) VALUE('N')
+
+             DCL        VAR(&USER) TYPE(*CHAR) LEN(10)
+/*                                                                   */
+             RTVJOBA    USER(&USER)
+/*                                                                   */
+/* turn on job log                                                   */
+             CHGJOB     LOG(4 0 *SECLVL) LOGCLPGM(*YES)
+/*                                                                   */
+/*                                                                   */
+/*  CHANGE COMPANY AND BATCH TO ALPHA                                */
+/*                                                                   */
+             CHGVAR     VAR(&ACO) VALUE(&CO)
+             CHGVAR     VAR(&ABAT) VALUE(&BATCH)
+/*-------------------------------------------------------------------*/
+             CALL       PGM(POMTXFR) PARM(&RETRN &CO 'E1LIVE ' &LIVEE1)
+
+             IF         COND(&ACO *EQ '360'  ) THEN(DO)
+             CALL       PGM(POMTXFR) PARM(&RETRN X'350F' 'E1LIVE    +
+                          ' &LIVEE1INT)
+                          ENDDO
+
+             IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1INT *EQ 'Y') +
+                          THEN(DO)
+             CRTDUPOBJ  OBJ(E1B9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+                          ENDDO
+/*-------------------------------------------------------------------*/
+/*  GET EMAIL BATCH DIST LIST                                        */
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+             CALL       PGM(POMTXFR) PARM(&RETRN &CO 'E1HPEDST' &EMAIL)
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*  EXECUTE THE PROGRAM TO RUN THE EDIT                              */
+/*                                                                   */
+             CALL       PGM(HPEVCHE) PARM(&RETRN &ACO &ABAT &ERR)
+/*                                                                   */
+/*  EXECUTE THE PROGRAM TO WRITE THE BATCH TO JDE                    */
+/*                                                                   */
+             CALL       PGM(HPEVCH) PARM(&RETRN &ACO &ABAT &ERR &INTCO)
+
+  /*  GET THE BATCH NUMBERS FROM THE LDA           */
+
+             CHGVAR     VAR(&BAT1) VALUE(%SST(*LDA 1 8))
+             CHGVAR     VAR(&BAT2) VALUE(%SST(*LDA 10 8))
+             CHGVAR     VAR(&BAT3) VALUE(%SST(*LDA 19 8))
+             CHGVAR     VAR(&BAT4) VALUE(%SST(*LDA 28 8))
+/*                                                                  */
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*/
+/*                                                                  */
+/*  Send Completion Messages based upon error condition.            */
+/*                  AND BATCHES    10/15/21                         */
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*/
+
+             CALL       PGM(PWOMXFR) PARM(' ' &CO &ABAT  &MSGC)
+
+    IF COND(&ERR *EQ 'Y')  THEN(DO)
+
+    IF COND(&BAT1 *NE '00000000')  THEN(DO)
+
+             SNDMSG    MSG('Voucher Batch ' |> &BAT1 |> ' has errors. +
+                          Batch written to JD Edwards as unposted.') +
+                          TOUSR(&USER)
+    IF COND(&EMAIL *NE '        ')  THEN(DO)
+             CHGVAR     VAR(&MSGB) VALUE(&MSGC *BCAT 'Batch:' *BCAT +
+                          &BAT1)
+             RUNSCRIPT  SCRIPT(JDEBATCH.S) SETVAR((&BATCH &BAT1) +
+                          (&EMAIL &EMAIL) (&MSGB &MSGB))
+    ENDDO
+    ENDDO
+
+    IF COND(&BAT2 *NE '00000000')  THEN(DO)
+
+             SNDMSG     MSG('Journal Entry Batch ' |> &BAT2 |> ' +
+                          Has errors.  Batch written to JD Edwards +
+                          as unposted.') TOUSR(&USER)
+    IF COND(&EMAIL *NE '        ')  THEN(DO)
+             CHGVAR     VAR(&MSGB) VALUE(&MSGC *BCAT 'Batch:' *BCAT +
+                          &BAT2)
+             RUNSCRIPT  SCRIPT(JDEBATCH.S) SETVAR((&BATCH &BAT2) +
+                          (&EMAIL &EMAIL) (&MSGB &MSGB))
+    ENDDO
+    ENDDO
+
+    IF COND(&BAT3 *NE '00000000')  THEN(DO)
+
+             SNDMSG     MSG('Manual Check Batch ' |> &BAT3 |> ' +
+                          Has errors.  Batch written to JD Edwards +
+                          as unposted.') TOUSR(&USER)
+    IF COND(&EMAIL *NE '        ')  THEN(DO)
+             CHGVAR     VAR(&MSGB) VALUE(&MSGC *BCAT 'Batch:' *BCAT +
+                          &BAT3)
+             RUNSCRIPT  SCRIPT(JDEBATCH.S) SETVAR((&BATCH &BAT3) +
+                          (&EMAIL &EMAIL) (&MSGB &MSGB))
+    ENDDO
+    ENDDO
+
+    IF COND(&BAT4 *NE '00000000')  THEN(DO)
+
+             SNDMSG     MSG('Journal Entry Batch ' |> &BAT4 |> ' Has +
+                          errors.  Batch written to JD Edwards as +
+                          unposted.') TOUSR(&USER)
+    IF COND(&EMAIL *NE '        ')  THEN(DO)
+             CHGVAR     VAR(&MSGB) VALUE(&MSGC *BCAT 'Batch:' *BCAT +
+                          &BAT4)
+             RUNSCRIPT  SCRIPT(JDEBATCH.S) SETVAR((&BATCH &BAT4) +
+                          (&EMAIL &EMAIL) (&MSGB &MSGB))
+    ENDDO
+    ENDDO
+
+    ENDDO
+    ELSE DO
+
+    IF COND(&BAT1 *NE '00000000')  THEN(DO)
+
+             SNDMSG     MSG('Voucher batch ' |> &BAT1 |> ' posted +
+                          successfully to JD Edwards.  +
+                          Checks are ready to be processed.') +
+                          TOUSR(&USER)
+    IF COND(&EMAIL *NE '        ')  THEN(DO)
+             CHGVAR     VAR(&MSGB) VALUE(&MSGC *BCAT 'Batch:' *BCAT +
+                          &BAT1)
+             RUNSCRIPT  SCRIPT(JDEBATCH.S) SETVAR((&BATCH &BAT1) +
+                          (&EMAIL &EMAIL) (&MSGB &MSGB))
+    ENDDO
+    ENDDO
+
+    IF COND(&BAT2 *NE '00000000')  THEN(DO)
+
+             SNDMSG     MSG('Journal Entry Batch ' |> &BAT2 |> ' +
+                          posted successfully to JD Edwards.')  +
+                          TOUSR(&USER)
+    IF COND(&EMAIL *NE '        ')  THEN(DO)
+             CHGVAR     VAR(&MSGB) VALUE(&MSGC *BCAT 'Batch:' *BCAT +
+                          &BAT2)
+             RUNSCRIPT  SCRIPT(JDEBATCH.S) SETVAR((&BATCH &BAT2) +
+                          (&EMAIL &EMAIL) (&MSGB &MSGB))
+    ENDDO
+    ENDDO
+
+    IF COND(&BAT3 *NE '00000000')  THEN(DO)
+
+             SNDMSG     MSG('Manual Check Batch ' |> &BAT3 |> ' +
+                          posted successfully to JD Edwards.')  +
+                          TOUSR(&USER)
+    IF COND(&EMAIL *NE '        ')  THEN(DO)
+             CHGVAR     VAR(&MSGB) VALUE(&MSGC *BCAT 'Batch:' *BCAT +
+                          &BAT3)
+             RUNSCRIPT  SCRIPT(JDEBATCH.S) SETVAR((&BATCH &BAT3) +
+                          (&EMAIL &EMAIL) (&MSGB &MSGB))
+    ENDDO
+    ENDDO
+
+    IF COND(&BAT4 *NE '00000000')  THEN(DO)
+
+             SNDMSG     MSG('Journal Entry Batch ' |> &BAT4 |> ' +
+                          posted successfully to JD Edwards.') +
+                          TOUSR(&USER)
+    IF COND(&EMAIL *NE '        ')  THEN(DO)
+             CHGVAR     VAR(&MSGB) VALUE(&MSGC *BCAT 'Batch:' *BCAT +
+                          &BAT4)
+             RUNSCRIPT  SCRIPT(JDEBATCH.S) SETVAR((&BATCH &BAT4) +
+                          (&EMAIL &EMAIL) (&MSGB &MSGB))
+    ENDDO
+    ENDDO
+
+    ENDDO
+
+/**********************************************************************/
+/*  EXECUTE THE PROGRAM TO READ THE QTEMP RUN LOG HEADER         */
+/*      E1B9CPP AND PUSH THE BATCHES TO E1                      */
+/**********************************************************************/
+/*                                                                   */
+             IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1INT *EQ 'Y') +
+                          THEN(DO)
+             CALL       PGM(E1LDXFR) PARM(&RETRN)
+             DLTF       FILE(QTEMP/E1B9CP*)
+             MONMSG     MSGID(CPF2105 CPF2125)
+             ENDDO
+
+/*                                                                  */
+ EXIT:       ENDPGM
+

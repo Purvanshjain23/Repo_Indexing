@@ -1,0 +1,1523 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      Triumph Foods / JD Edwards
+      * PROGRAM:     TFJDE270SV - SAVED ON 01-17-2017 BY PURVA BEFORE GL IN M3 CHANGES
+      * TITLE:       Upload Revenue Adjustment to JDE
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     02/09/06
+      *
+      *  FUNCTION:   This program uploads Revenue Adjustment data to JDE.
+      *
+      *              The program is called from the Weekly Revenue Close function when
+      *              it is a "Final" run.
+      *
+      *              Seaboard is Company 360
+      *              Triumph  is Company 960
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 02/24/06  Barb Gutierrez
+      *           Fixed problem of not populating the service tax date in F0911
+      *
+      * 11/30/06  LeAnne Ramsey
+      *           Added a "week" parm on the call to the generic "calendar" program.
+      *
+      * 06/04/07  LeAnne Ramsey
+      *           Added logic to handle new "CoOwned" situation.
+      *
+      * 07/03/07  Alice Brownfield
+      *           Changed some of the logic to handle new "CoOwned" situation.
+      *
+      * 07/30/07  LeAnne Ramsey
+      *           Aubri Cannon wants a listing printed showing the records
+      *           written to JDE along with Batch Numbers, etc.
+      *
+      * 01/21/08  LeAnne Ramsey
+      *           Added a parm of A=Accounting on the call to generic program TF815
+      *           so that we will get back the Accounting Year/Period instead of the
+      *           Production (HPS) Year/Period. (The program will return zero for the
+      *           Accounting week---which we don't use.)
+      *
+      * 06/11/08  LeAnne Ramsey
+      *           We weren't printing the "no data" message. There is really never
+      *           a time when there is "no data"...but added it anyway.
+      *
+      * 06/04/09  LeAnne Ramsey
+      *           Users wanted different Accounts for CoOwned vs Not-CoOwned.
+      *           We added another workfile (TFP310) to accomplish this.
+      *           Also, added SBF and TF columns/logic for "Units" (sold lbs).
+      *           Units applies only to CoOwned stuff. And, we don't use them in the
+      *           Offset logic.
+      *
+      * 07/13/09  LeAnne Ramsey
+      *           The "pounds" logic added on 06/04/09 for CoOwned stuff was not
+      *           populating "units" correctly in JDE...changed the logic to z-add
+      *           instead of multiplying by 100.
+      *
+      * 07/22/09  LeAnne Ramsey
+      *           RE: Contract sales (aka: Affiliated Sales)
+      *           To handle the "contract sales" with Mexico, we now process Synon Sales
+      *           Accrual data into our workfiles. We want to handle/keep/report this
+      *           Contract Sales Accrual data separate from our normal data. So, we
+      *           added a field to all the workfiles call "affiliated sales company".
+      *           For "normal/regular" data, the Affiliated Sales Company will be zero.
+      *           For the Affiliated Sales data, the Affiliated Sales Company will be 360/960.
+      *           We will use this value to control our logic/printing of the Affiliated
+      *           Sales Data after the "normal/regular" data.
+      *           (Note: These changes did not get installed until October.)
+      *
+      * 12/28/10  LeAnne Ramsey  (C1226)
+      *           RE: Contract sales (aka: Affiliated Sales)
+      *           Apparently, the JDE batches were out of balance because of Contract Sales.
+      *           Jeff Sherbondy had me change the signs on some values before I put them
+      *           into the JDE batch file. I DID NOT change any of the signs on the values
+      *           printing on the report. (I will keep a copy of TFJDE270 (before changes) in
+      *           my library awhile....don't know if we have it right yet.)
+      *           Basically, Jeff S. had me change:
+      *             360.5043.120 to a credit
+      *             360.5041.134 to a debit
+      *             960.5041.134 to a credit
+      /EJECT
+      ****************************************************************
+      * File specifications
+      ****************************************************************
+      *
+     Ftfl309b   if   e           k disk
+      *    Workfile: Revenue Report by GL Sub--GL Sub Summary
+      *
+      *
+     Ftfp310    if   e           k disk
+      *    Workfile: Revenue Report by GL Sub--Journal Entries
+      *
+      *
+     Ff0011     uf a e           k disk
+      *   JDE Batch control record
+      *
+      *
+     Ff0901     if   e             disk
+      *   JDE Account master
+      *
+      *
+     Ff0911     uf a e             disk
+      *   JDE Account ledger
+      *
+      *
+     Fprint198  o    f  198        printer oflind(*inof)
+      *
+      /EJECT
+      ****************************************************************
+      * Definition specifications
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+     D h1sbd           c                   '-----------------------+
+     D                                      ----------------- Seaboard +
+     D                                      -----------------+
+     D                                      ------------------------'
+      *
+     D h1tf            c                   '-----------------+
+     D                                      -------- Triumph ---------+
+     D                                      -----------------'
+      *
+      *---------------------------------------------------------------------
+      * Standalone fields
+      *---------------------------------------------------------------------
+      *
+      * Control fields
+      *
+     d return          s              7
+     d firstreg        s              1    inz('Y')
+     d firstcon        s              1    inz('Y')
+     d count           s              1  0
+     d svprdcmp        s                   like(w4prdcmp)
+     d svascono        s                   like(w3ascono)
+      *
+      *
+      * Standard fields
+      *
+     d dash            s            198    inz(*all'-')
+     d rtime           s              6  0
+      *
+      *
+      * Workfields
+      *
+     d wkascono        s                   like(w3ascono) inz(0)
+     d wkam            s                   like(w4snjam)
+     d wkcolb          s                   like(w4scolb)
+     d wkoffnjam       s                   like(w4snjam)
+     d wks960am        s                   like(w4snjam)
+     d wkt960am        s                   like(w4snjam)
+     d wksbatam        s                   like(w4snjam)
+     d wktbatam        s                   like(w4snjam)
+      *
+     d wkuser          s                   like(gluser)
+     d wkbatcnt        s              5  0
+     d wkdoccnt        s              5  0
+     d wkaid           s              8
+     D wkmcu           s                   like(gmmcu)
+     D wksub           s                   like(gmsub)
+     D wkglsub         s                   like(w3glsub)
+     D wkobj           s                   like(gmobj)
+     d wkani           s             29
+      *
+     d wkbatval        s             15  0
+      *
+     d wknumco         s              3  0
+     d wkbatnbr        s                   like(glicu)
+     d wkglcode        s                   like(xxglcode)
+      *
+     d wksco5a         s              5
+     d wksbatnbr       s                   like(glicu)
+     d wksdocnbr       s                   like(gldoc)
+      *
+     d wktco5a         s              5
+     d wktbatnbr       s                   like(glicu)
+     d wktdocnbr       s                   like(gldoc)
+      *
+     d wktime          s             12  0
+     d wkdate          s              6  0
+      *
+      *
+      * Parm fields
+      *
+     D xxacctco        s              3  0
+     D xxnumco         s              3  0
+      *
+     d xxsubtype       s              1
+     d xxbalsheet      s              1
+      *
+     d xxapfl          s              1
+     D xxdt            s              8  0
+     D xxyr            s              4  0
+     D xxpe            s              2  0
+     D xxwk            s              2  0
+      *
+      * For call to JDE date routine
+      *
+     d xxsidat         s              6
+     d xxedat          s              8
+     d xxffmt          s              7
+     d xxtfmt          s              7
+     d xxsep           s              7
+     d xxertst         s              1
+     d xxctry          s              2
+      *
+      * For call to JDE account routine
+      *
+     d xxbatnbr        s                   like(glicu)
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxerrm          s              4
+      *
+     d xxglcode        s              8
+     d xxani           s                   like(glani)
+     d xxicu           s                   like(glicu)
+     d xxdocnbr        s                   like(gldoc)
+      *
+      *
+      * Print fields
+      *
+     d h2desc          s             33
+      *
+     d l1snjam         s                   like(w4snjam)
+     d l1scolb         s                   like(w4scolb)
+     d l1sacct         s             28
+     d l1sdesc         s             30
+      *
+     d l1tnjam         s                   like(w4tnjam)
+     d l1tcolb         s                   like(w4tcolb)
+     d l1tacct         s             28
+      *
+     d t1stotam        s                   like(w4tnjam)
+     d t1scolb         s                   like(w4tsllb)
+      *
+     d t1ttotam        s                   like(w4tnjam)
+     d t1tcolb         s                   like(w4tsllb)
+      *
+     d t2desc          s             40
+     d t2soffam        s                   like(w4tnjam)
+     d t2soffacct      s             28
+     d t2soffdesc      s             30
+      *
+     d t2toffam        s                   like(w4tnjam)
+     d t2toffacct      s             28
+     d t2toffdesc      s             30
+      *
+      ****************************************************************
+      * Arrays and Tables
+      ****************************************************************
+      *
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+     d i0901ds         ds           500
+     d xxco                                like(gmco)
+     d xxaid                               like(gmaid)
+     d xxmcu                               like(gmmcu)
+     d xxobj                               like(gmobj)
+     d xxsub                               like(gmsub)
+     d xxans                               like(gmans)
+     d xxdl01                              like(gmdl01)
+     d xxlda                               like(gmlda)
+     d xxbpc                               like(gmbpc)
+     d xxpec                               like(gmpec)
+     d xxbill                              like(gmbill)
+     d xxcrcd                              like(gmcrcd)
+     d xxum                                like(gmum)
+     d xxr001                              like(gmr001)
+     d xxr002                              like(gmr002)
+     d xxr003                              like(gmr003)
+     d xxr004                              like(gmr004)
+     d xxr005                              like(gmr005)
+     d xxr006                              like(gmr006)
+     d xxr007                              like(gmr007)
+     d xxr008                              like(gmr008)
+     d xxr009                              like(gmr009)
+     d xxr010                              like(gmr010)
+     d xxr011                              like(gmr011)
+     d xxr012                              like(gmr012)
+     d xxr013                              like(gmr013)
+     d xxr014                              like(gmr014)
+     d xxr015                              like(gmr015)
+     d xxr016                              like(gmr016)
+     d xxr017                              like(gmr017)
+     d xxr018                              like(gmr018)
+     d xxr019                              like(gmr019)
+     d xxr020                              like(gmr020)
+     d xxr021                              like(gmr021)
+     d xxr022                              like(gmr022)
+     d xxr023                              like(gmr023)
+     d xxobja                              like(gmobja)
+     d xxsuba                              like(gmsuba)
+     d xxwcmp                              like(gmwcmp)
+     d xxcct                               like(gmcct)
+     d xxerc                               like(gmerc)
+     d xxhtc                               like(gmhtc)
+     d xxqlda                              like(gmqlda)
+     d xxccc                               like(gmccc)
+     d xxfmod                              like(gmfmod)
+     d xxuser                              like(gmuser)
+     d xxpid                               like(gmpid)
+     d xxjobn                              like(gmjobn)
+     d xxupmj                              like(gmupmj)
+     d xxupmt                              like(gmupmt)
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Break CCYY into CC and YY fields
+      *---------------------------------------------------------------
+      *
+     D wkyear          ds
+     D   wkccyy                       4  0
+     D   wkcc                         2  0 overlay(wkccyy:1)
+     D   wkyy                         2  0 overlay(wkccyy:3)
+      *
+      *----------------------------------------------------------------
+      * LDA - local data area
+      *----------------------------------------------------------------
+      *
+     d lda            uds                  dtaara(*lda)
+     D  ldwedt                22     29  0
+     D  ldwemdy               45     50  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      *-------------------------------------------------------------------------------------
+      * MAINLINE
+      *-------------------------------------------------------------------------------------
+      *
+      * Print report headings
+      *
+     C                   exsr      $h1hdr
+      *
+      * Process the Normal/Regular data
+      * Process the Affiliated Sales (Contract Sales) data
+      * Write out batch records
+      *
+     C                   exsr      $regular
+     C                   exsr      $contract
+     C                   exsr      $batch
+      *
+     C                   seton                                        lr
+      /eject
+      *----------------------------------------------------------------
+      * Process the Regular/Normal Data
+      *----------------------------------------------------------------
+      *
+     C     $regular      begsr
+      *
+      * Read the workfile of data summarized from the Weekly Product Revenue file
+      * and write JDE records for each record that has a Seaboard or Triumph
+      * adjustment.
+      *
+     C     *loval        setll     tfp310
+      *
+     C                   dou       *in91 = *on                                  Do regular
+     C                   read      tfp310                                 91
+     C                   if        *in91 = *off and w4jfl = yes                 If not EOF
+      *
+      * Control Break Logic
+      *
+     C                   select
+     C                   when      firstreg = yes
+     C                   move      no            firstreg
+     C                   exsr      $regsave
+      *
+     C                   when      w4prdcmp <> svprdcmp
+     C                   exsr      $regt1tot
+     C                   exsr      $regsave
+     C                   endsl
+      *
+      * Execute Seaboard and then Triumph logic for each record.
+      *
+     C                   move      w4glsub       wkglsub
+     C                   exsr      $regsbd
+     C                   exsr      $regtf
+      *
+      * Print detail line
+      *
+     C                   exsr      $regl1dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do regular
+      *
+      * Print Total Line for last record
+      *
+     C                   if        firstreg = no
+     C                   exsr      $regt1tot
+     C                   endif
+      *
+      *---------------------------------
+      * End of Regular/Normal processing
+      *---------------------------------
+     C                   if        firstreg = yes
+     C                   except    nodatareg
+     C                   else
+     C                   exsr      $regoffset
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Regular/Normal: Seaboard
+      *----------------------------------------------------------------
+      *
+     C     $regsbd       begsr
+      *
+      * Set up some defaults
+      *
+     C                   eval      gluser = sdusr
+     C                   eval      gltorg = sdusr
+      * Net
+     C                   if        w4snjam <> 0                                 If adjust
+     C                   add       w4snjam       wkoffnjam
+     C                   z-sub     w4snjam       l1snjam
+      *
+     C                   if        l1snjam >= 0
+     C                   z-sub     w4scolb       l1scolb
+     C                   else
+     C                   z-add     w4scolb       l1scolb
+     C                   endif
+      *
+      * Write a JDE Account Ledger record
+      *
+     C                   z-add     360           wknumco
+     C                   z-add     l1scolb       wkcolb
+     C                   z-add     l1snjam       wkam
+     C                   exsr      $wrt911
+      *
+      * Set up Seaboard print fields
+      *
+     C                   select
+     C                   when      wkaid = *blank
+     C                   eval      l1sacct = 'Error-Account ID retrieval'
+      *
+     C                   when      xxerrm = *blank
+     C                   eval      l1sacct = %trim(wkmcu) + '.' +
+     C                                      %trim(wkobj) + '.' +
+     C                                      %trim(wksub)
+     C                   move      xxdl01        l1sdesc
+     C                   other
+      *
+     C                   eval      l1sacct = 'Error-Cost Center/Obj/Sub'
+     C                   endsl
+     C                   endif                                                  If adjust
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Regular/Normal: Triumph
+      *----------------------------------------------------------------
+      *
+     C     $regtf        begsr
+      *
+     C                   eval      gluser = 'TFGLPOST'
+     C                   eval      gltorg = 'TFGLPOST'
+      * Net
+     C                   if        w4tnjam <> 0                                 If adjust
+     C                   z-sub     w4tnjam       l1tnjam
+      *
+     C                   if        l1tnjam >= 0
+     C                   z-sub     w4tcolb       l1tcolb
+     C                   else
+     C                   z-add     w4tcolb       l1tcolb
+     C                   endif
+      *
+      * Write a JDE Account Ledger record
+      *
+     C                   z-add     960           wknumco
+     C                   z-add     l1tcolb       wkcolb
+     C                   z-add     l1tnjam       wkam
+     C                   exsr      $wrt911
+      *
+      * Setup Triumph print fields
+      *
+     C                   select
+     C                   when      wkaid = *blank
+     C                   eval      l1tacct = 'Error-Account ID retrieval'
+      *
+     C                   when      xxerrm = *blank
+     C                   eval      l1tacct = %trim(wkmcu) + '.' +
+     C                                      %trim(wkobj) + '.' +
+     C                                      %trim(wksub)
+     C                   other
+     C                   eval      l1tacct = 'Error-Cost Center/Obj/Sub'
+     C                   endsl
+      *
+     C                   endif                                                  If adjust
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------------------------------
+      * Regular/Normal: Save break fields;
+      *                 Setup the hardcoded "code" that will be used to retrieve Accounts
+      *---------------------------------------------------------------------------------------
+      *
+     C     $regsave      begsr
+      *
+      * Setup save field and print heading
+      *
+     C                   move      w4prdcmp      svprdcmp
+     C                   exsr      $h2hdr
+      *
+      * Hardcode a "GL code"
+     C                   select
+     C                   when      w4coownfl = no
+     C                   move      'TFAJRV  '    wkglcode
+      *
+     C                   when      w4prdcmp = 'SBF'
+     C                   move      'TFRVSHSB'    wkglcode
+      *
+     C                   when      w4prdcmp = 'TF '
+     C                   move      'TFRVSHTF'    wkglcode
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Regular/Normal: Print detail line
+      *---------------------------------------------------------------
+      *
+     C     $regl1dtl     begsr
+      *
+      * Accumulate for Totals
+      *
+     C                   add       l1snjam       t1stotam
+     C                   add       l1tnjam       t1ttotam
+      *
+     C                   add       l1scolb       t1scolb
+     C                   add       l1tcolb       t1tcolb
+      *
+      * Print detail line
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+      *
+     C                   except    l1dtlreg
+      *
+      * Just to give some white space to the report, print a blank line after
+      * every 5 records.
+      *
+     C                   add       1             count
+     C                   if        count = 5
+     C                   except    blank
+     C                   z-add     0             count
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Regular/Normal: Print Total line
+      *---------------------------------------------------------------
+      *
+     C     $regt1tot     begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+      *
+      * Accumulate for "batch" totals
+      *
+     C                   add       t1stotam      wksbatam
+     C                   add       t1ttotam      wktbatam
+      * Print
+     C                   except    t1totreg
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Regular/Normal: Write offset records
+      *--------------------------------------------------------------------------------------
+      *
+     C     $regoffset    begsr
+      *
+      * Net Adjustment
+     C                   eval      glexa = 'TF Revenue Net Adjust--Offset'
+     C                   move      'TFAJRVOF'    wkglcode
+      *
+      * Seaboard
+     C                   z-add     360           wknumco
+     C                   z-add     wkoffnjam     wkam
+     C                   z-add     wkoffnjam     t2soffam
+     C                   exsr      $wrt911
+      *
+      * SBF Print fields
+     C                   select
+     C                   when      wkaid = *blank
+     C                   eval      t2soffacct = 'Error on Account ID retrieval'
+      *
+     C                   when      xxerrm = *blank
+     C                   eval      t2soffacct = %trim(wkmcu) + '.' +
+     C                                          %trim(wkobj) + '.' +
+     C                                          %trim(wksub)
+     C                   eval      t2soffdesc = xxdl01
+     C                   other
+      *
+     C                   eval      t2soffacct = 'Cost Center/Obj/Sub error'
+     C                   endsl
+      *
+      * Triumph
+     C                   z-add     960           wknumco
+     C                   z-sub     wkoffnjam     wkam
+     C                   z-sub     wkoffnjam     t2toffam
+     C                   exsr      $wrt911
+      *
+      * Triumph Print fields
+     C                   select
+     C                   when      wkaid = *blank
+     C                   eval      t2toffacct = 'Error on Account ID retrieval'
+      *
+     C                   when      xxerrm = *blank
+     C                   eval      t2toffacct = %trim(wkmcu) + '.' +
+     C                                          %trim(wkobj) + '.' +
+     C                                          %trim(wksub)
+     C                   eval      t2toffdesc = xxdl01
+     C                   other
+      *
+     C                   eval      t2toffacct = 'Cost Center/Obj/Sub error'
+     C                   endsl
+      *
+      * Print Offset line
+     C                   evalr     t2desc = 'OFFSET FOR COOWNED/NOT +
+     C                                       COOWNED'
+      *
+     C                   exsr      $t2off
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Contract: Process Affiliated Sales data
+      *----------------------------------------------------------------
+      *
+     C     $contract     begsr
+      *
+     C                   z-add     0             count
+     C                   z-add     0             wkcolb
+     C                   z-add     0             wkam
+     C                   z-add     0             wkoffnjam
+      *
+      * Read the records that have an Affiliated Sales Company in the workfile
+      * that is summed to the Affiliated Sales Company/GL Sub level. If there is
+      * an Adjustment, process.
+      *
+     C     wkascono      setgt     tfl309b
+      *
+     C                   dou       *in91 = *on                                  Do contract
+     C                   read      tfl309b                                91
+     C                   if        *in91 = *off and w3jfl = yes                 If not EOF
+      *
+      * Control Break Logic
+      *
+     C                   select
+     C                   when      firstcon = yes
+     C                   move      no            firstcon
+     C                   z-add     w3ascono      svascono
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   else
+     C                   except    blank3
+     C                   endif
+     C                   exsr      $h2hdr
+     C                   exsr      $h3hdr
+      *
+     C                   when      w3ascono  <> svascono
+     C                   exsr      $cont1tot
+     C                   z-add     w3ascono      svascono
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   endif
+     C                   exsr      $h3hdr
+     C                   endsl
+      *
+      * Execute Seaboard and then Triumph logic for each record.
+      *
+     C                   move      w3glsub       wkglsub
+      *
+     C                   select
+     C                   when      w3ascono = 360 and w3snjam <> 0
+     C                   exsr      $consbd
+      *
+     C                   when      w3ascono = 960
+     C                   exsr      $contf
+     C                   endsl
+      *
+      * Print detail line
+     C                   exsr      $conl1dtl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do contract
+      *
+      * Print Total Line for last record
+      *
+     C                   if        firstcon = no
+     C                   exsr      $cont1tot
+     C                   endif
+      *
+      *---------------------------------------------
+      * End of Contract/Affiliated Sales processing
+      *---------------------------------------------
+     C                   select
+     C                   when      firstcon = yes
+     C                   except    nodatacon
+     C                   other
+      *
+      * We only print an "offset" for Company 960. So, if you did not have any Affiliated
+      * Sales dollars for 960, we will not execute this Offset logic.
+      *
+     C                   if        wks960am = 0 and wkt960am = 0
+     C                   else
+     C                   exsr      $conoff960
+     C                   endif
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Contract Sales: Seaboard is the Affiliated Sales Company
+      *----------------------------------------------------------------
+      *
+     C     $consbd       begsr
+      *
+     C                   eval      gluser = sdusr
+     C                   eval      gltorg = sdusr
+     C                   z-add     360           wknumco
+      *
+      * Write a JDE Account Ledger record  (this is the debit...per Jeff Sherbondy)
+      * We will: 1) print it with its sign reversed on the report
+      *          2) BUT, put it into the JDE batch without flipping the sign
+      *
+     C                   move      'TFAARV  '    wkglcode
+     C                   z-sub     w3snjam       l1snjam
+     C                   z-add     w3snjam       wkam
+     C                   exsr      $wrt911
+      *
+      * Set up Seaboard print fields
+      *
+     C                   select
+     C                   when      wkaid = *blank
+     C                   eval      l1sacct = 'Error-Account ID retrieval'
+      *
+     C                   when      xxerrm = *blank
+     C                   eval      l1sacct = %trim(wkmcu) + '.' +
+     C                                      %trim(wkobj) + '.' +
+     C                                      %trim(wksub)
+     C                   move      xxdl01        l1sdesc
+     C                   other
+      *
+     C                   eval      l1sacct = 'Error-Cost Center/Obj/Sub'
+     C                   endsl
+      *
+      * Write the JDE Account Ledger record for the Offset; we do NOT print this one.
+      * Per Jeff S., this is the Credit side; he wants the sign flipped.
+      *
+     C                   move      'TFAARVOF'    wkglcode
+     C                   z-sub     w3snjam       wkam
+     C                   exsr      $wrt911
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Contract Sales: Triumph is the Affiliated Sales Company
+      *----------------------------------------------------------------
+      *
+     C     $contf        begsr
+      *
+     C                   seton                                        88
+      *
+     C                   eval      gluser = sdusr
+     C                   eval      gltorg = sdusr
+      *
+      * Write a JDE Account Ledger record  (this is a credit....per Jeff Sherbondy)
+      * We will print it and put it into the JDE Batch with its sign reversed.
+      *
+     C                   move      'TFAJRVCS'    wkglcode
+     C                   z-sub     w3snjam       l1snjam
+     C                   z-sub     w3snjam       wkam
+     C                   z-add     360           wknumco
+     C                   exsr      $wrt911
+      *
+      * Set up Seaboard print fields
+      *
+     C                   select
+     C                   when      wkaid = *blank
+     C                   eval      l1sacct = 'Error-Account ID retrieval'
+      *
+     C                   when      xxerrm = *blank
+     C                   eval      l1sacct = %trim(wkmcu) + '.' +
+     C                                      %trim(wkobj) + '.' +
+     C                                      %trim(wksub)
+     C                   move      xxdl01        l1sdesc
+     C                   other
+      *
+     C                   eval      l1sacct = 'Error-Cost Center/Obj/Sub'
+     C                   endsl
+      *
+      * Write a Triumph JDE Account Ledger record. We will flip the signs for
+      * printing. BUT, put it in the JDE batch as positive.
+      *
+     C                   move      'TFAJRVCS'    wkglcode
+     C                   z-sub     w3tnjam       l1tnjam
+     C                   z-add     l1tnjam       wkam
+     C                   z-add     960           wknumco
+     C                   exsr      $wrt911
+      *
+      * Set up Triumph print fields
+      *
+     C                   select
+     C                   when      wkaid = *blank
+     C                   eval      l1tacct = 'Error-Account ID retrieval'
+      *
+     C                   when      xxerrm = *blank
+     C                   eval      l1tacct = %trim(wkmcu) + '.' +
+     C                                      %trim(wkobj) + '.' +
+     C                                      %trim(wksub)
+     C                   other
+      *
+     C                   eval      l1tacct = 'Error-Cost Center/Obj/Sub'
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Contract: Print detail line
+      *---------------------------------------------------------------
+      *
+     C     $conl1dtl     begsr
+      *
+      * Accumulate for Totals (the signs have already been flipped on these print fields).
+      *
+     C                   add       l1snjam       t1stotam
+     C                   add       l1tnjam       t1ttotam
+      *
+      * Print detail line
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   exsr      $h3hdr
+     C                   endif
+      *
+     C                   except    l1dtlcon
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Contract: Print Total Line
+      *---------------------------------------------------------------
+      *
+     C     $cont1tot     begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   exsr      $h2hdr
+     C                   exsr      $h3hdr
+     C                   endif
+      *
+      * If you are printing the total line for Company 960, save the "total" amounts,
+      * to use in creating the Company 960 offset. (The signs have already been flipped
+      * on these total fields.)
+      *
+     C                   if        svascono = 960
+     C                   z-add     t1stotam      wks960am
+     C                   z-add     t1ttotam      wkt960am
+     C                   endif
+      *
+      * Accumulate for "batch" totals
+      *
+     C                   add       t1stotam      wksbatam
+     C                   add       t1ttotam      wktbatam
+      * Print
+     C                   except    t1totcon
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Contract: Write offset record for Company 960 for the Affiliated Sales
+      *--------------------------------------------------------------------------------------
+      *
+     C     $conoff960    begsr
+      *
+      * Seaboard
+     C                   eval      glexa = 'Due From TF Mkt Accrual      '
+     C                   move      'OMACR362'    wkglcode
+      *
+     C                   z-add     360           wknumco
+     C                   z-add     wkt960am      wkam
+     C                   z-add     wkt960am      t2soffam
+     C                   exsr      $wrt911
+      *
+     C                   select
+     C                   when      wkaid = *blank
+     C                   eval      t2soffacct = 'Error on Account ID retrieval'
+      *
+     C                   when      xxerrm = *blank
+     C                   eval      t2soffacct = %trim(wkmcu) + '.' +
+     C                                          %trim(wkobj) + '.' +
+     C                                          %trim(wksub)
+     C                   eval      t2soffdesc = xxdl01
+     C                   other
+      *
+     C                   eval      t2soffacct = 'Cost Center/Obj/Sub error'
+     C                   endsl
+      *
+      * Triumph
+     C                   eval      glexa = 'Due To SBF Mkt Accrual      '
+     C                   move      'OMACRBAL'    wkglcode
+      *
+     C                   z-add     960           wknumco
+     C                   z-add     wks960am      wkam
+     C                   z-add     wks960am      t2toffam
+     C                   exsr      $wrt911
+      *
+     C                   select
+     C                   when      wkaid = *blank
+     C                   eval      t2toffacct = 'Error on Account ID retrieval'
+      *
+     C                   when      xxerrm = *blank
+     C                   eval      t2toffacct = %trim(wkmcu) + '.' +
+     C                                          %trim(wkobj) + '.' +
+     C                                          %trim(wksub)
+     C                   eval      t2toffdesc = xxdl01
+     C                   other
+      *
+     C                   eval      t2toffacct = 'Cost Center/Obj/Sub error'
+     C                   endsl
+      *
+      * Print Offset line
+     C                   evalr     t2desc = 'OFFSET FOR COMPANY 960 +
+     C                                       AFFILIATED SALES'
+     C                   exsr      $t2off
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Retrieve Account info and write a JDE Account Ledger Record
+      *----------------------------------------------------------------
+      *
+     C     $wrt911       begsr
+      *
+      * Clear workfields.
+      *
+     C                   move      *blank        wkani                          Structured Acct Nbr
+     C                   move      *blank        wkaid                          Account ID
+     C                   move      *blank        wkmcu                          Cost Center
+     C                   move      *blank        wkobj                          Object
+     C                   move      *blank        wksub                          Sub Code
+      *
+      * Retrieve the Account I.D. for this "Code" from the Cross Apps file.
+      *
+     C                   call      'PKTIXFR'
+     C                   parm                    return
+     C                   parm      wknumco       xxnumco
+     C                   parm      wkglcode      xxglcode
+     C     wkaid         parm      *blank        xxaid
+     C                   parm      *blank        xxsubtype
+     C                   parm      *blank        xxbalsheet
+     C                   parm      *zero         xxacctco
+      *
+      * Retrieve the JDE cost center/object/sub associated with Account ID just retrieved
+      * from the Cross Apps file.
+      * (1 = Short Act I.D., 9 = Individual cost center/object/sub.)
+      *
+     C                   call      'X0901'
+     C                   parm                    xxsym
+     C                   parm      '9'           xxomod
+     C                   parm      '1'           xximod
+     C                   parm      wkaid         xxani
+     C     wkmcu         parm      *blank        xxmcu
+     C     wkobj         parm      *blank        xxobj
+     C     wksub         parm      *blank        xxsub
+     C                   parm      *blank        xxerrm
+     C                   parm                    i0901ds
+      *
+      * We are now going to overlay the "SUB" we just retrieved with the one we are
+      * processing.  When doing the Cross Apps setup, the user picks one GL Account
+      * to assign to his "code". So, the GL Sub on that one GL Account (the one we just
+      * retrived using our Cross Apps Account ID) is not the one we are processing.
+      * So, now we need the JDE Account ID that goes with our real "sub".
+      * So, when "sub-type" is "I":
+      *  1) replace the SUB with the GL Sub Code of the record you are writing
+      *  2) go back to JDE with the new combination of Cost Center/Object/Sub
+      *     to get the Account ID associated with that combination
+      *
+     C                   if        xxsubtype = 'I'
+     C                   movel     wkglsub       wksub
+      *
+     C                   call      'X0901'
+     C                   parm                    xxsym
+     C                   parm      '1'           xxomod
+     C                   parm      '9'           xximod
+     C     wkaid         parm      *blank        xxani
+     C                   parm      wkmcu         xxmcu
+     C                   parm      wkobj         xxobj
+     C                   parm      wksub         xxsub
+     C                   parm      *blank        xxerrm
+     C                   parm                    i0901ds
+     C                   endif
+      *
+      * Company number needs to be the company that is associated with this cost center/
+      * object/sub code.
+      *
+     C                   move      xxco          glco
+      *
+      * Retrieve the JDE "structured" Account Number.
+      *
+     C                   call      'X0901'
+     C                   parm                    xxsym
+     C                   parm      '2'           xxomod
+     C                   parm      '9'           xximod
+     C     wkani         parm                    xxani
+     C                   parm      wkmcu         xxmcu
+     C                   parm      wkobj         xxobj
+     C                   parm      wksub         xxsub
+     C                   parm                    xxerrm
+     C                   parm                    i0901ds
+      * Account Nbr
+     C                   if        xxerrm = *blank
+     C                   movel     wkani         glani
+     C                   else
+     C                   move      *blank        glani
+     C                   endif
+      *
+      * Write a JDE Account Ledger record
+      *
+     C                   select
+     C                   when      wknumco = 360
+     C                   z-add     wksbatnbr     glicu
+     C                   z-add     wksdocnbr     gldoc
+     C                   move      wksco5a       glkco
+      *
+     C                   when      wknumco = 960
+     C                   z-add     wktbatnbr     glicu
+     C                   z-add     wktdocnbr     gldoc
+     C                   move      wktco5a       glkco
+     C                   endsl
+      *
+      * Get Amount and Units into the JDE non-decimal format by multiplying by 100.
+      *
+     C     100           mult      wkam          glaa
+     C                   z-add(h)  wkcolb        glu
+      *
+     C                   move      wkmcu         glmcu
+     C                   move      wkobj         globj
+     C                   move      wksub         glsub
+     C                   move      wkaid         glaid
+      *
+      * Increase the journal entry line number
+      *
+     C                   add       1             wkdoccnt
+     C                   z-add     wkdoccnt      gljeln
+      *
+     C                   write     i0911
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print report headings
+      *---------------------------------------------------------------
+      *
+     C     $h1hdr        begsr
+      *
+     C                   except    h1hdr
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print a sub-heading
+      *---------------------------------------------------------------
+      *
+     C     $h2hdr        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   select
+     C                   when      svascono <> 0
+     C                   eval      h2desc = 'AFFILIATED SALES:'
+      *
+     C                   when      svprdcmp = *blank
+     C                   eval      h2desc = 'Not CoOwned'
+      *
+     C                   when      svprdcmp = 'SBF'
+     C                   eval      h2desc = 'CoOwned: Producing Company is SBF'
+      *
+     C                   when      svprdcmp = 'TF '
+     C                   eval      h2desc = 'CoOwned: Producing Company is TF'
+     C                   endsl
+      *
+     C                   except    h2hdr
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print on-page Company Heading in the Affiliated Sales Section
+      *---------------------------------------------------------------
+      *
+     C     $h3hdr        begsr
+      *
+     C                   except    h3hdr
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print Offset line
+      *---------------------------------------------------------------
+      *
+     C     $t2off        begsr
+      *
+     C                   if        *inof = *on
+     C                   exsr      $h1hdr
+     C                   endif
+      *
+     C                   except    t2off
+      *
+     C                   endsr
+      /eject
+      *--------------------------------------------------------------------------------------
+      * Write 2 JDE Batch Control records: 1 for Seaboard, 1 for Triumph
+      *--------------------------------------------------------------------------------------
+      *
+      * NOTE: Multiply dollars by 100 to get the value into JDE's non-decimal field
+      *
+     C     $batch        begsr
+      *
+      * Write a JDE Batch Control record for Triumph
+      *
+     C                   z-add     wktbatnbr     wkbatnbr
+     C     100           mult      wktbatam      wkbatval
+     C                   eval      wkuser = 'TFGLPOST'
+     C                   exsr      $wrtbat
+      *
+      * Write a JDE Batch Control record for Seaboard
+      *
+     C                   z-add     wksbatnbr     wkbatnbr
+     C     100           mult      wksbatam      wkbatval
+     C                   eval      wkuser = sdusr
+     C                   exsr      $wrtbat
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a batch record
+      *---------------------------------------------------------------
+      *
+     C     $wrtbat       begsr
+      *
+      * Write a batch header record to batch control file
+      *
+     C     key01         chain     f0011                              92
+     C                   if        *in92 = *on                                  If no hit
+     C                   z-add     wkbatcnt      icndo
+     C                   z-add     wkbatcnt      icdocn
+     C                   z-add     wkbatval      icaicu
+     C                   z-add     wkbatval      icame
+      *
+     C                   z-add     wkbatnbr      icicu
+     C                   move      *blank        icist
+     C                   movel     wkuser        icuser
+     C                   move      glicut        icicut
+     C                   move      gldicj        icdicj
+     C                   move      'A'           iciapp
+     C                   move      'Y'           icbal
+     C                   move      ' '           icbalj
+     C                   move      'N'           icpob
+     C                   move      'Y'           iciboi
+      *
+     C                   write     i0011
+     C                   endif                                                  If no hit
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Get dates into JDE format
+      *---------------------------------------------------------------
+      *
+     C     $date         begsr
+      *
+     C                   call      'X0028'
+     C                   parm                    xxsidat
+     C                   parm      *blank        xxedat
+     C                   parm                    xxffmt
+     C                   parm      '*JUL   '     xxtfmt
+     C                   parm      '*NONE'       xxsep
+     C                   parm      *blank        xxertst
+     C                   parm      *blank        xxctry
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    glicut
+     C                   kfld                    wkbatnbr
+      *
+     C                   time                    rtime
+      *
+      * Retrieve/save a batch Number for:
+      *   1) Seaboard
+      *   2) Triumph
+     C                   call      'TFJDE800'
+     C     wksbatnbr     parm      0             xxbatnbr
+      *
+     C                   call      'TFJDE800'
+     C     wktbatnbr     parm      0             xxbatnbr
+      *
+      *
+      * Retrieve/save a Document Number for:
+      *   1) Seaboard
+      *   2) Triumph
+     C                   call      'TFJDE801'
+     C     wksdocnbr     parm      0             xxdocnbr
+      *
+     C                   call      'TFJDE801'
+     C     wktdocnbr     parm      0             xxdocnbr
+      *
+      *
+      * Set up/save company numbers as both 3,0 numberic and 5 alpha fields.
+      *
+     C                   move      *zero         wksco5a
+     C                   move      '360'         wksco5a
+      *
+     C                   move      *zero         wktco5a
+     C                   move      '960'         wktco5a
+      *
+      * Set up defaults for records in F0911-Account Ledger File
+      *
+      * Get system date into the format required by JDE by calling JDE's routine.
+      *
+     C                   time                    wktime
+     C                   move      wktime        wkdate
+     C                   move      wkdate        xxsidat
+     C                   move      '*SYSVAL'     xxffmt
+      *
+     C                   exsr      $date
+     C                   move      xxsidat       glupmj
+     C                   move      xxsidat       gldsyj
+     C                   move      xxsidat       gldicj
+      *
+      * Retrieve the Accounting Year/Period associated with the Ending Date.
+      *
+     C                   call      'TF815'
+     C                   parm      ldwedt        xxdt
+     C                   parm      'A'           xxapfl
+     C                   parm      0             xxyr
+     C     glpn          parm      0             xxpe
+     C                   parm      0             xxwk
+      *
+     C                   z-add     xxyr          wkccyy
+     C                   z-add     wkcc          glctry
+     C                   z-add     wkyy          glfy
+      *
+      * Get Week-ending Date into JDE format by calling JDE date routine.
+      *
+     C                   move      ldwedt        xxsidat
+     C                   move      '*YMD   '     xxffmt
+     C                   exsr      $date
+     C                   move      xxsidat       gldgj
+     C                   move      xxsidat       gldsvj
+      *
+      * Set up some defaults
+      *
+     C                   eval      glexa = 'TF Revenue Adjustment'
+      *
+     C                   movel     sdjob         gljobn
+     C                   time                    glticu
+     C                   time                    glupmt
+      *
+     C                   move      '2'           glam
+     C                   move      'AA'          gllt
+     C                   move      '00000'       glpkco
+     C                   move      '00000'       glokco
+     C                   move      '000'         glpsfx
+     C                   move      'JE'          gldct
+     C                   move      'G '          glicut
+     C                   move      'R'           glrcnd
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oprint198  e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                          101 'TF REVENUE ADJUSTMENT '
+     O                                          112 'POST REPORT'
+     O                                          188 'DATE'
+     O                       udate         y    198
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                                          103 'JOURNAL ENTRIES'
+     O                                          188 'TIME'
+     O                       rtime              198 '  :  :  '
+      *
+      *
+     O          e            h1hdr          2
+     O                                          188 'PAGE'
+     O                       page          z    198
+      *
+     O          e            h1hdr          2
+     O                                           17 'Week-ending date:'
+     O                       ldwemdy             27 '  /  /  '
+      *
+      *-------------------------------------------------------------
+      * Column headings
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr       0  1
+     O                       h1sbd              128
+     O                       h1tf               198
+      *
+     O          e            h1hdr       0  1
+     O                                            3 'GL '
+     O                                          112 'Sold Lbs'
+     O                                          128 'Net Adj'
+     O                                          181 'Sold Lbs'
+     O                                          197 'Net Adj'
+      *
+     O          e            h1hdr       0  1
+     O                                            3 'Sub'
+     O                                           16 'Description'
+     O                                           56 'Account Description'
+     O                                           83 'Account Number'
+     O                                          112 '(Units)'
+     O                                          128 'Amount'
+      *
+     O                                          152 'Account Number'
+     O                                          181 '(Units)'
+     O                                          197 'Amount'
+      *
+     O          e            h1hdr       0  2
+     O                       dash               198
+      *
+      *-------------------------------------------------------------
+      * Batch headers
+      *-------------------------------------------------------------
+      *
+     O          e            h1hdr       0  0
+     O                                           51 'JDE Batch Nbr:'
+     O                       wksbatnbr     z     60
+     O                                           80 'JDE Document Nbr:'
+     O                       wksdocnbr     z     89
+      *
+     O                                          152 'JDE Batch Nbr:'
+     O                       wktbatnbr     z    161
+     O                                          180 'JDE Document Nbr:'
+     O                       wktdocnbr     z    189
+      *
+     O          e            h1hdr       0  2
+     O                                           51 'JDE Batch Nbr:'
+     O                       wksbatnbr     z     60
+     O                                           80 'JDE Document Nbr:'
+     O                       wksdocnbr     z     89
+      *
+     O                                          152 'JDE Batch Nbr:'
+     O                       wktbatnbr     z    161
+     O                                          180 'JDE Document Nbr:'
+     O                       wktdocnbr     z    189
+      *
+      *
+      *-------------------------------------------------------------
+      * Subheading
+      *-------------------------------------------------------------
+      *
+     O          e            h2hdr       0  0
+     O                       h2desc              33
+      *
+     O          e            h2hdr       0  1
+     O                       h2desc              33
+      *
+      *-------------------------------------------------------------
+      * On-page header for Affiliated Sales
+      *-------------------------------------------------------------
+      *
+     O          e            h3hdr       1  0
+     O                                            8 'Company:'
+     O                       svascono            13
+      *
+     O          e            h3hdr       0  1
+     O                                            8 'Company:'
+     O                       svascono            13
+      *
+      *-------------------------------------------------------------
+      * Detail line (used for Regular/Normal data)
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtlreg    0  1
+     O                       w4glsub              3
+     O                       w4desc              35
+     O                       l1sdesc        b    67
+     O                       l1sacct        b    97
+     O                       l1scolb       kb   113
+     O                       l1snjam       kb   129
+      *
+     O                       l1tacct        b   166
+     O                       l1tcolb       kb   182
+     O                       l1tnjam       kb   198
+      *
+      *
+      *-------------------------------------------------------------
+      * Detail line (used for Affiliated Sales data)
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtlcon    0  1
+     O                       w3glsub              3
+     O                       w3desc              35
+     O                       l1sdesc        b    67
+     O                       l1sacct        b    97
+     O                       l1snjam       kb   129
+      *
+     O                       l1tacct        b   166
+     O                       l1tcolb       kb   182
+     O                       l1tnjam       kb   198
+      *
+      *-------------------------------------------------------------
+      * Regular/Normal: Total line
+      *-------------------------------------------------------------
+      *
+     O          e            t1totreg    0  1
+     O                                          112 '--------------'
+     O                                          128 '--------------'
+     O                                          181 '--------------'
+     O                                          197 '--------------'
+      *
+     O          e            t1totreg    0  2
+     O                                           96 'Total:'
+     O                       t1scolb       kb   113
+     O                       t1stotam      kb   129
+     O                       t1tcolb       kb   182
+     O                       t1ttotam      kb   198
+      *
+      *
+      *-------------------------------------------------------------
+      * Contract: Total Line
+      *-------------------------------------------------------------
+      *
+     O          e            t1totcon    0  1
+     O                                          128 '--------------'
+     O               88                         197 '--------------'
+      *
+     O          e            t1totcon    0  2
+     O                                           96 'Total:'
+     O                       t1stotam      kb   129
+     O               88      t1ttotam      kb   198
+      *
+      *-------------------------------------------------------------
+      * Offset line
+      *-------------------------------------------------------------
+      *
+     O          e            t2off       1  0
+     O                       t2desc              40
+      *
+     O          e            t2off       0  1
+     O                       t2desc         b    40
+      *
+     O          e            t2off       0  1
+     O                       t2soffacct     b    97
+     O                       t2soffam      kb   129
+      *
+     O                       t2toffacct     b   166
+     O                       t2toffam      kb   198
+      *
+     O          e            t2off       0  1
+     O                       t2soffdesc     b    99
+     O                       t2toffdesc     b   168
+      *
+      *-------------------------------------------------------------
+      * Blank line
+      *-------------------------------------------------------------
+      *
+     O          e            blank       0  1
+      *-------------------------------------------------------------
+      * Blank lines (3)
+      *-------------------------------------------------------------
+      *
+     O          e            blank3      3  1
+      *
+      *-------------------------------------------------------------
+      * Regular/Normal: No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodatareg      1
+     O                                           14 'There were no '
+     O                                           34 'adjustments to post.'
+      *
+      *-------------------------------------------------------------
+      * Contract: No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodatacon      1
+     O                                           14 'There were no '
+     O                                           38 'Affilated Sales to post.'
+      *

@@ -1,0 +1,689 @@
+      *****************  RPG PROGRAM HEADING  ************************
+     h option(*SRCSTMT:*NODEBUGIO)
+      ****************************************************************
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      Resource Optimization
+      * PROGRAM:     RO709
+      * TITLE:       View Byproduct Values
+      * PROGRAMMER:  LeAnne Ramsey
+      * CREATED:     02/13/07
+      *
+      * FUNCTION: This is a View that displays the Detail records
+      *           in the Byproduct details file.
+      *
+      *           Restrictors:
+      *               Company
+      *               Week-ending date
+      *               Byproduct group code
+      *               Byproduct subgroup code
+      *
+      *           Positioners:
+      *               Item code
+      *
+      *           Selectors:
+      *               None
+      *
+      *************************************************************************************
+      * MODIFICATIONS:
+      *************************************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 04/11/07  LeAnne Ramsey
+      *           Changed to display "produced" values instead of "sold" values.
+      *
+      * 10/04/07  LeAnne Ramsey
+      *           Recompile only. New field 'Produced Start Weight' added to
+      *           Credit Item Group Meat Cost file.
+      *
+      * 11/12/07  LeAnne Ramsey
+      *           Added F7 to print the Credit Item Values Report.
+      *
+      * 12/21/07  Alice Brownfield
+      *           Minor changes when we combined the Credit item Meat Cost files with
+      *           the Byproduct MIX processing files.
+      *
+      * 06/16/08  LeAnne Ramsey
+      *           Added TF Classification Code as output in the Control Record.
+      *           Added Exception Flag and Product Exception Number to subfile record.
+      *
+      * 11/21/08  LeAnne Ramsey
+      *           As part of synchronizing the LDAs between the TFS Margin Adjustment Close
+      *           and the Meat Costing, we changed the LDA positions.
+      *           Replaced RO709CL on the SUBMIT with RO412CL.  All RO709CL did was
+      *           call RO412CL.  It was too confusing...
+      *
+      * 04/02/09  LeAnne Ramsey
+      *           Recompile only. Field 'Producing Company' added to Byproduct Detail.
+      *
+      * 05/12/09  LeAnne Ramsey
+      *           Added 'out LDA' in the Initialization Subroutine.
+      * 02/01/24  Jagdish Mistry (CM-S009004),Service request number-3009004
+      *           Damon called to say that we need to take items which has include in mix
+      *           flag as N out of Meat Cost calculations. Exclude from UI also.
+      /EJECT
+      *************************************************************************************
+      * FILE SPECIFICATION
+      *************************************************************************************
+      *
+     Frod709    cf   e             workstn sfile(ro709s1:hdrrn1)
+     F                                     infds(iofeed)
+      *
+      *
+     Fombyrel1  if   e           k disk
+      *  Item default
+      *
+      *
+     frol101a   if   e           k disk    rename(gmrec:gmreca)
+      *  ByProduct Values Summary
+      *
+      *
+     frol122d   if   e           k disk
+      *  Byproduct Detail
+      *
+     ‚* Project-S009004-START
+     FPPAOREL1  IF   E           K Disk
+     ‚* Project-S009004-END
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D set1            c                   'SET1  '
+     D scrn1           c                   'SCRN1 '
+     D exit            c                   'EXIT  '
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Compile time array for SBMJOB used in QCMDEXC
+      *---------------------------------------------------------------
+     D cmd             s              1    dim(80) ctdata perrcd(80)
+      *
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D pgm             s             10
+     D msgfl           s             10
+     D maxmsg          s              2  0  inz(20)
+     D routne          s              6
+     D maxrrn          s              4  0
+     D reset           s              1    inz('N')
+     D norecs          s              1    inz('N')
+     D count           s              2  0
+     D wkflow          s                   like(idflow)
+     D rtncd           s              2
+     D svrrn1          s                   like(hdrrn1)
+      *
+      *
+      * Workfields required for subfile paging--see initialization
+      * subroutine.
+      *
+     D wkplin          s              2  0
+     D wkrlin          s              2  0
+      *
+      *
+      * Save fields for restrictors, positioners and selectors
+      *
+     D svitcd          s                   like(c1itcd)
+      *
+      *
+      * Parm fields
+      *
+     D xxwedt          s                   like(gmwedt)
+      *
+      *
+      *  Parms for use with QCMDEXC.  'LENGTH' is the length of the
+      *  command that will be issued with QCMDEXC.  QCMDEXC requires
+      *  the field containing length to be defined as 15 with 5 decimal
+      *  positions.  The field 'CMDSBM' will hold the values of the
+      *  submit job command when passed as a parm on the call to
+      *  QCMDEXC.
+      *
+     D length          s             15  5 inz(80)
+     D cmdsbm          s             80
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('ROMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard workstation information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTWSFR (record format: UTIDFRR)
+     D iofeed        e ds                  extname(utwsfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldpfcd                 1      1
+      *
+     D  ldwedt                29     36  0
+     D  ldwemdy               44     49  0
+      *
+     D  ldcono                82     84  0
+      *
+     D  lddsfl               135    135
+      *
+     D  lditcd               222    228  0
+     D  lditds               229    258
+      *
+     D  ldcgcd               295    298
+      *
+     D  ldoutq               401    410
+     D  ldhold               411    414
+     D  ldsave               415    418
+     D  ldcopy               419    419  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+     C                   eval      routne = set1
+      *
+     C     *inlr         doweq     *off                                         Main do loop
+     C     routne        caseq     set1          $set1
+     C     routne        caseq     scrn1         $scrn1
+     C     routne        caseq     exit          $exit
+     C                   endcs
+     C                   enddo                                                  Main do loop
+      /EJECT
+      *----------------------------------------------------------------
+      * Set environment for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $set1         begsr
+      *
+      * Clear and fill the subfile
+      *
+     C                   exsr      $clr1
+     C                   exsr      $frsh1
+      *
+      * Set routine to display screen
+      *
+     C                   eval      routne = scrn1
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Perform operator I/O for screen 1
+      *----------------------------------------------------------------
+      *
+     C     $scrn1        begsr
+      *
+      * Write the error messages from the error arrays to the
+      * error message subfile
+      *
+     C                   exsr      $wrmsg
+      *
+      * This subfile has Fold/Unfold capabilities.  The DDS uses the keywords
+      * (SFLDROP, SFLFOLD) to determine whether the user is folded or unfolded
+      * and to redisplay the screen in the same mode as when he last saw it.
+      * Indicators 78 and 79 are assigned in the DDS to the keywords.
+      *
+     C                   setoff                                       7879
+     C                   if        fold = '0'
+     C                   seton                                        78
+     C                   else
+     C                   seton                                        79
+     C                   endif
+      *
+      * Write screen 1 to crt
+      *
+     C                   write     ro709k1
+     C                   write     ro709ec
+     C                   exfmt     ro709c1
+      *
+      * Save the value of the lowest subfile rrn on the screen for
+      * later repositioning of the subfile
+      *
+     C                   eval      wkflow = idflow
+      *
+      * Clear the messages from the message data structures and
+      * program message queue
+      *
+     C                   exsr      $clmsg
+      *
+      * Get user's entry and set next routine
+      *
+     C                   select
+     C                   when      *in03 = *on                                  F3-exit
+     C                   eval      rtncd = '03'
+     C                   eval      routne = exit
+      *
+     C                   when      *in05 = *on                                  F5-refresh
+     C                   movel     yes           reset
+     C                   eval      routne = set1
+      *
+     C                   when      *in07 = *on                                  F7=Report
+     C                   exsr      $list
+      *
+     C                   when      *in17 = *on                                  F17-print options
+     C                   call      'RO890'
+     C                   eval      routne = scrn1
+      *
+     C                   when      *in20 = *on                                  F20-wrksplf
+     C                   call      'QEZOUTPT'                                       API
+     C                   z-add     wkflow        hdpag1
+     C                   eval      routne = scrn1
+      *
+      *
+      * Reposition the subfile if the user has changed any of the positioners
+      * or selectors in the control record.
+      *
+     C                   when      svitcd <> c1itcd                              Selections
+     C                   exsr      $chksv
+      *
+     C                   when      *in25 = *on                                  F25-rollup
+     C                   exsr      $load1
+     C                   other
+      *
+      * User has pressed enter
+      *
+     C                   movel     scrn1         routne
+     C                   endsl
+      *
+      * Bring in the LDA to pick up any printer changes the user may
+      * have made from called programs
+      *
+     C                   in        lda
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Save the control record positioners/selectors
+      *----------------------------------------------------------------
+      *
+     C     $chksv        begsr
+      *
+     C                   movel     no            reset
+     C                   eval      routne = set1
+      *
+     C                   z-add     c1itcd        svitcd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Clear subfile for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $clr1         begsr
+      *
+     C                   z-add     0             svrrn1
+      *
+     C                   clear                   ro709s1
+     C                   seton                                        83        sflclr
+     C                   write     ro709c1
+     C                   setoff                                       818283
+      *                                                    81=sfldsp
+      *                                                    82=sflend
+      *                                                    83=sflclr
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Refresh/fill the subfile for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $frsh1        begsr
+      *
+      * Set position in file
+      *
+     C     key01         setll     rol122d
+      *
+      *
+      * The field 'reset' is a flag field to indicate whether you are
+      * attempting to reposition the user close to where he was in the
+      * subfile.
+      * The lowest subfile RRN on the screen from the DSPF feedback
+      * area (IDFLOW) was retrieved earlier and put in WKFLOW.
+      * Add to WKFLOW the number of lines on your subfile page or the
+      * number less 1 to determine a subfile RRN to reposition to.
+      *
+      *
+     C                   if        reset = yes
+     C                   eval      maxrrn = wkflow + wkrlin
+     C                   else
+      *
+      * Don't try to reposition the user, just start the subfile over
+      *
+     C                   eval      maxrrn = wkplin
+     C                   endif
+      *
+      * Load the subfile until you have the required number of records.
+      * The number will depend on whether uou are repositioning the
+      * subfile or not. Stop if you get to the end of the subfile.
+      *
+     C                   dou       svrrn1 >= maxrrn or *in82 = *on
+     C                   exsr      $load1
+     C                   enddo
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Load subfile for screen 1
+      *---------------------------------------------------------------
+      *
+     C     $load1        begsr
+      *
+     C                   z-add     svrrn1        hdrrn1
+      *
+      * Set the count of records on the subfile page to zero.
+      *
+     C                   z-add     0             count
+      *
+      * Fill the subfile until the end of the database file or
+      * you have filled all the lines on the subfile page.
+      *
+     C                   setoff                                       82
+     C                   dou       *in82 = *on or count >= wkplin               Do fill
+     C     key03         reade     rol122d                                82
+     C                   if        *in82 = *off                                 If read
+     ‚* Project-S009004-START
+     ‚* Skip Co-owned Item from Meat costs calculations
+     C     Key04         Chain     PPAOREL1                           70
+     C                   If        %Found(PPAOREL1) And AOSWSX ='N'
+     C                   Iter
+     C                   EndIf
+     ‚* Project-S009004-END
+      *
+      * Retrieve Item Description
+      *
+     C     yditcd        chain     ombyrel1                           92
+     C                   if        *in92 = *off                                 If ok
+     C                   eval      d1itds = byavna
+     C                   else
+     C                   eval      d1itds = 'Unknown'
+     C                   endif                                                  If ok
+      *
+     C                   add       1             count
+     C                   add       1             hdrrn1
+     C                   z-add     yditcd        d1itcd
+     C                   z-add     ydapulb       d1pulb
+     C                   z-add     ydpupr        d1pupr
+     C                   z-add     ydnpupr       d1npupr
+     C                   z-add     ydpco         d1pco
+     C                   z-add     ydlco         d1lco
+     C                   z-add     ydico         d1ico
+     C                   z-add     ydoco         d1oco
+     C                   move      ydexfl        d1exfl
+     C                   z-add     ydpesn        d1pesn
+      *
+     C                   write     ro709s1
+     C                   seton                                        81
+      *
+      * For positioning, place the subfile relative record number into
+      * the sflrcdnbr field (hdpag1)
+      *
+     C                   z-add     hdrrn1        hdpag1
+      *
+     C                   endif                                                  If read
+     C                   enddo                                                  Do fill loop
+      *
+      * If no records were written to the subfile, then issue
+      * the standard message 'No data to Display'.
+      *
+     C                   if        hdrrn1 = 0                                   If no recs
+     C                   movel     yes           norecs
+      *
+     C                   if        error < maxmsg
+     C                   add       1             error
+     C                   eval      mgid(e) = 'RO09002'
+     C                   endif
+      *
+     C                   else
+     C                   movel     no            norecs
+     C                   endif                                                  If no recs
+      *
+     C                   z-add     hdrrn1        svrrn1
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Print Byproduct Values Report selected Meat Cost Group
+      *---------------------------------------------------------------
+      *
+     C     $list         begsr
+      *
+     C                   move      'D'           ldpfcd
+     C                   move      'D'           lddsfl
+      *
+     C                   z-add     c1cono        ldcono
+     C                   z-add     c1wemdy       ldwemdy
+     C                   z-add     xxwedt        ldwedt
+     C                   move      c1cgcd        ldcgcd
+     C                   z-add     0             lditcd
+     C                   move      *blank        lditds
+      *
+      * Move the 80-character compile time array 'CMD' to an
+      * 80-character field for passing as a parm with QCMDEXC.
+      *
+     C                   out       lda
+     C                   movea     cmd           cmdsbm
+     C                   call      'QCMDEXC'
+     C                   parm                    cmdsbm
+     C                   parm                    length
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Set on last record and end job
+      *---------------------------------------------------------------
+      *
+     C     $exit         begsr
+     C                   seton                                        LR
+     C                   endsr
+      *
+      /EJECT
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on. So, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      *
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C                   call      'UT80045J'                           43
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      sdpgm         pgm
+     C                   parm      msgfil        msgfl
+      *
+      * If call to UT80045J failed, a message hardcoded in the DSPF
+      * command line format will be set on; so, redisplay screen.
+      *
+     C                   if        *in43 = *on
+     C                   eval      routne = set1
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Initialization subroutine
+      *----------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *
+     C     *entry        plist
+     C                   parm                    c1cono
+     C                   parm                    c1wemdy
+     C                   parm                    xxwedt
+     C                   parm                    c1cgcd
+     C                   parm                    c1sgcd
+     C                   parm                    rtncd
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    xxwedt
+     C                   kfld                    c1cgcd
+     C                   kfld                    c1sgcd
+     C                   kfld                    c1itcd
+      *
+     C     key02         klist
+     C                   kfld                    c1cono
+     C                   kfld                    xxwedt
+     C                   kfld                    c1cgcd
+     C                   kfld                    c1sgcd
+      *
+     C     key03         klist
+     C                   kfld                    xxwedt
+     C                   kfld                    c1cgcd
+     C                   kfld                    c1sgcd
+     ‚* Project-S009004-START
+     C     Key04         KList
+     C                   KFld                    YDTFCLCD
+     C                   KFld                    YDISTYCD
+     C                   KFld                    YDISGRCD
+     C                   KFld                    YDISCLCD
+     ‚* Project-S009004-END
+      *
+      * Retrieve Byproduct Values Summary data
+      *
+     C     key02         chain     rol101a                            92
+     C                   if        *in92 = *off
+     C                   z-add     gmpulb        c1pulb
+     C                   z-add     gmpuam        c1puam
+     C                   z-add     gmpupr        c1pupr
+     C                   z-add     gmnpupr       c1npupr
+     C                   z-add     gmsypc        c1sypc
+     C                   z-add     gmmupc        c1mupc
+     C                   z-add     gmpco         c1pco
+     C                   z-add     gmlco         c1lco
+     C                   z-add     gmico         c1ico
+     C                   z-add     gmoco         c1oco
+     C                   endif
+      *
+      * Retrieve/initialize "printer" fields in the LDA
+      *
+     C                   call      'RO891CL'
+     C                   in        lda
+      *
+      * Initialize LDA fields
+      *
+     C                   z-add     0             ldcono
+     C                   z-add     0             ldwedt
+     C                   z-add     0             ldwemdy
+     C                   out       lda
+      *
+      * To support F5-Refresh, logic requires the number of lines on
+      * the subfile page and also the number of lines less 1.  By
+      * setting these values up as constant work fields, the processing
+      * logic can be standardized between programs.
+      *
+     C                   z-add     8             wkplin                         sflpag
+     C     wkplin        sub       1             wkrlin                         sflpag - 1
+      *
+      *
+      * The following standard code must be included to make the
+      * standard error message handling program function properly.
+      * This code sets and clears the program message queue.
+      *
+     C                   movel     '*'           msgpgm
+     C                   exsr      $clmsg
+      *
+     C                   endsr
+      /EJECT
+      *****************************************************************
+      * COMPILE TIME ARRAY 'CMD' USED IN QCMDEXC
+      *****************************************************************
+** CMD table 'CMD' submits listing when F8 selected
+SBMJOB CMD(CALL PGM(RO412CL))  JOB(CIVREPRT) JOBQ(*JOBD)

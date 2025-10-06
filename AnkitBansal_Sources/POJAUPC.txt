@@ -1,0 +1,294 @@
+/*********************************************************************/
+/*     Program: POJAUPC                                              */
+/*       Title: VALIDATE LOCKBOX TRANSMISSION FILE                   */
+/*        Date: 09/13/00                                             */
+/* PROGRAMMER : PURVA DROGE                                          */
+/* Description: - Called by PC Auto Scheduler after it retrieves     */
+/*                the lockbox file from the NationsBank bulletin bd  */
+/*              - Validates the incoming date for accuracy and       */
+/*                successful transmission.                           */
+/*              - CREATE A NEW MEMBER IN THE BALCKBOX FILE FOR THE   */
+/*                DEPOSIT DATE.                                      */
+/*                                                                   */
+/*  PRKLCKBOX DISTRIBUTION LIST:                                     */
+/*     TIM WOOD   BIGBYTE                                            */
+/*     LISA H     BIGBYTE                                            */
+/*     PURVAD     BIGBYTE                                            */
+/*                                                                   */
+/*  ADDING NEW LOCKBOX INSTRUCTIONS                                  */
+/*  1)  CREATE DUPLICATE OBJECT OF TXLCKBOX WITH NEW LOCATION CODE   */
+/*      AS THE FIRST TWO CHARACTERS.                                 */
+/*  2)  ADD NEW LOCATION CODE TO LOCKBOX STATUS FIELD IN THE MODEL.  */
+/*      CONVERT CONDITIONS, RECOMPILE AND INSTALL                    */
+/*      SCREENS THAT USE THE LOCKBOX STATE CODE STATUS FIELD.        */
+/*********************************************************************/
+/* Modifications:                                                    */
+/*                                                                   */
+/*   Date     Pgmr     Description                                   */
+/* -------- ---------- --------------------------------------------  */
+/* 8/15/02    RMC      USE SNDPGRMSG A LIEU SNDDST                   */
+/* 4/06/05    RMC      CHANGES FOR MULTIPLE LOCKBOX PER DAY:         */
+/*                      REMOVED COMPANY AND ADDED DEPOSIT TIME TO KEY,*/
+/*                      CREATE MEMBER WITH TIME ... SO CHANGE        */
+/*                      MEMBER NAME FROM : ZCHCYYMMDD TO ZCMMDDHHMM  */
+/*                      FOR EXAMPLE: ZCH1050406 TO ZC04061000        */
+/*                      FOR A CHICAGO 4/6/05 10:00 DEPOSIT.          */
+/* 6/27/07    SAZ      ADD SL & MT DIST LIST HANDLING.               */
+/* 5/24/10    BLG      MIGRATING TO BANK OF NEW YORK FOR LOCKBOX     */
+/*                     PROCESSING.  NEED TO KEEP CURRENT UMB PROCESS */
+/*                     IN TACT UNTIL WE KNOW IT HAS BEEN TURNED OFF  */
+/*                     AT THE BANK.                                  */
+/*                                                                   */
+/*                     ALSO, DAILYS LOCKBOXES ARE NOW GOING TO BE    */
+/*                     COMBINED INTO ONE INSTEAD OF INDIVIDUAL FOR   */
+/*                     EACH COMPANY.                                 */
+/*  MODIFIED    :  BARB GUTIERREZ  02/12/18                          */
+/*                 BNYM is mandating we switch from FTP over         */
+/*                 the VPN to SFTP over the internet.  The           */
+/*                 AS/400 doesn't work well with SFTP so we are      */
+/*                 going to utilize Informatica to pick up the       */
+/*                 Lockbox from BNYM and push it to the AS/400.      */
+/*                 Informatica will be passing in &file. (PDLCKBOX)  */
+/*                             E012064                               */
+/*                                                                   */
+/*********************************************************************/
+             PGM        PARM(&LOC &FILE)
+/*--*----------------------------------------------------------------*/
+/* DECLARE VARIABLES                                                 */
+/*-------------------------------------------------------------------*/
+             DCL        VAR(&LOC) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&LOC1) TYPE(*CHAR) LEN(1) /* 1st loc letter */
+
+
+             DCL        VAR(&USRCLS) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&DIST) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&RECS) TYPE(*DEC) LEN(10 0)
+             DCL        VAR(&MSG) TYPE(*CHAR) LEN(132)
+             DCL        VAR(&DEPDTE) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&MM) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&DD) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&YY) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&MMDD) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&HH) TYPE(*CHAR) LEN(2)   /* HOURS  */
+             DCL        VAR(&NN) TYPE(*CHAR) LEN(2)   /* MINUTES */
+             DCL        VAR(&CHKS) TYPE(*CHAR) LEN(132)
+             DCL        VAR(&DEPAMT) TYPE(*CHAR) LEN(11)
+             DCL        VAR(&DEPAMTNBR) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&DEPAMTDEC) TYPE(*CHAR) LEN(2)
+             DCL        VAR(&MMDDYY) TYPE(*CHAR) LEN(6)
+             DCL        VAR(&CYYMMDD) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&MBR) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&ZMBR) TYPE(*CHAR) LEN(10)
+  /*         DCL        VAR(&CO) TYPE(*DEC) LEN(3 0) VALUE(360) */
+             DCL        VAR(&LCKBOX) TYPE(*DEC) LEN(7 0)
+             DCL        VAR(&LCKBOXX) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&RCDSTS) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&DATE) TYPE(*DEC) LEN(7 0)
+             DCL        VAR(&TIME) TYPE(*DEC) LEN(4 0)
+             DCL        VAR(&TIMEX) TYPE(*CHAR) LEN(4)
+             DCL        VAR(&TIMEF) TYPE(*CHAR) LEN(5) /* format HH:MM */
+             DCL        VAR(&TR) TYPE(*CHAR) LEN(1) /* TEST         */
+
+             DCL        VAR(&DEPDATE) TYPE(*DEC) LEN(7 0) VALUE(0)
+             DCL        VAR(&DEPDATEX) TYPE(*CHAR) LEN(7)
+             DCL        VAR(&FILE) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&ERRMSG) TYPE(*CHAR) LEN(132)
+
+             DCLF       FILE(BALCKBOX)
+
+/*--*----------------------------------------------------------------*/
+/* INITIALIZE                                                        */
+/*-------------------------------------------------------------------*/
+/* RETRIEVE USER CLASS */
+             RTVUSRPRF  USRCLS(&USRCLS)
+
+             IF COND(&USRCLS *EQ '*PGMR') THEN(DO)
+                CHGVAR VAR(&DIST) VALUE('PRKDEV')
+                ENDDO
+             ELSE (DO)
+
+ /* UMB LOCKBOXES.. */
+
+  /*PORK CH OR TX */
+/*           IF         COND((&LOC = 'CH') *OR (&LOC = 'TX')) THEN(DO) */
+/*           CHGVAR     VAR(&DIST) VALUE('PRKLCKBX')                   */
+/*           ENDDO                                                     */
+
+  /*DAILYS SLC  */
+/*           IF         COND(&LOC = 'SL') THEN(DO)                     */
+/*           CHGVAR VAR(&DIST) VALUE('DLYLCKBXS')                      */
+/*           ENDDO                                                     */
+
+  /*DAILYS MMT  */
+ /*          IF         COND(&LOC = 'MT') THEN(DO)        */
+ /*          CHGVAR VAR(&DIST) VALUE('DLYLCKBXM')         */
+ /*          ENDDO                                        */
+
+ /* BNY LOCKBOXES.. */
+
+             IF         COND(&LOC = 'PD') THEN(DO)
+             CHGVAR VAR(&DIST) VALUE('PDVLCKBX')
+             ENDDO
+
+ /*          IF         COND(&LOC = 'DF') THEN(DO)    */
+ /*          CHGVAR VAR(&DIST) VALUE('DPMLCKBX')      */
+ /*          ENDDO                                    */
+
+                ENDDO
+
+/* COPY DATA TO QTEMP */  /* Informatica sending in file name */
+/*           CHGVAR     VAR(&FILE) VALUE(&LOC *TCAT 'LCKBOX') */
+
+             CPYF       FROMFILE(&FILE) TOFILE(QTEMP/QBALCKBOX) +
+                          MBROPT(*ADD) CRTFILE(*YES)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CPYF1))
+             OVRDBF     FILE(BALCKBOX) TOFILE(QTEMP/QBALCKBOX) +
+                          MBR(*FIRST)
+/*--*----------------------------------------------------------------*/
+/* MAINLINE                                                          */
+/*-------------------------------------------------------------------*/
+/* DELETE ALL RECORDS IN THE QTEMP FILE EXCEPT FOR RECORD TYPE 8 */
+/*  4/6/05 dont delete record type 1 now either. it has the time */
+             DELETE     SQL('FROM QBALCKBOX WHERE +
+                          SUBSTR(TRANS,1,1)<>"8" and +
+                          substr(trans,1,1)<>"1"')
+
+/* CHECK IF RECORD TYPE 8 RECORD EXIST IN THE QTEMP FILE */
+             RTVMBRD    FILE(QBALCKBOX) NBRCURRCD(&RECS)
+
+/* IF RECORDS DO NOT EXIST THEN THE FILE WAS NOT RECEIVED SUCCESSFULLY */
+             IF   COND(&RECS *EQ 0) THEN(DO)
+             CHGVAR     VAR(&MSG) VALUE(&LOC *BCAT 'Lock Box:  +
+                          RECEIVED with no TOTALS ***ERROR***.')
+             SNDPGRMSG  TOPGR(&DIST) MSG(&MSG) CONFMSG(*NO)
+                 ENDDO
+/* IF RECORDS DO EXIST THEN CREATE A NEW MEMBER FOR DEPOSIT DATE AND time */
+/*  and Send SUCCESSFUL COMPLETION MESSAGE                     */
+             ELSE (DO)
+LOOP:
+                 RCVF
+                 MONMSG     MSGID(CPF0864) EXEC(GOTO CMDLBL(CRTMBR))
+                 /* BUILD MESSAGE */
+
+ RCD1:       IF         COND(%SST(&TRANS 1 1) = '1') THEN(DO)
+             CHGVAR     VAR(&HH) VALUE(%SST(&TRANS 30 2))
+             CHGVAR     VAR(&NN) VALUE(%SST(&TRANS 32 2))
+             CHGVAR     VAR(&TIMEX) VALUE(&HH *CAT &NN)          /* alpha */
+             CHGVAR     VAR(&TIMEF) VALUE(&HH *CAT ':' *CAT &NN) /* HH:MM  */
+             CHGVAR     VAR(&TIME) VALUE(&TIMEX)                /* numeric */
+ ERCD1:      ENDDO
+
+ RCD8:       IF         COND(%SST(&TRANS 1 1) = '8') THEN(DO)
+                 CHGVAR     VAR(&LCKBOXX) VALUE(%SST(&TRANS 8 7))
+                 CHGVAR     VAR(&YY) VALUE(%SST(&TRANS 15 2))
+                 CHGVAR     VAR(&MM) VALUE(%SST(&TRANS 17 2))
+                 CHGVAR     VAR(&DD) VALUE(%SST(&TRANS 19 2))
+                 CHGVAR     VAR(&DEPDTE) VALUE(&MM *CAT '/' *CAT &DD +
+                            *CAT '/' *CAT &YY)
+                 CHGVAR     VAR(&CHKS) VALUE(%SST(&TRANS 21 4))
+                 CHGVAR     VAR(&DEPAMTNBR) VALUE(%SST(&TRANS 25 8))
+                 CHGVAR     VAR(&DEPAMTDEC) VALUE(%SST(&TRANS 33 2))
+                 CHGVAR     VAR(&DEPAMT) VALUE(&DEPAMTNBR *CAT '.' *CAT +
+                            &DEPAMTDEC)
+ ENDRCD8:    ENDDO
+                 /* CHECK IF LOCKBOX DEPOSIT ALREADY EXISTS */
+                 CHGVAR     VAR(&MMDDYY) VALUE(&MM *CAT &DD *CAT &YY)
+ DATE1:      IF         COND(&MMDDYY  *NE '  ') THEN(DO)
+             CVTDAT     DATE(&MMDDYY) TOVAR(&CYYMMDD) FROMFMT(*MDY) +
+                          TOFMT(*CYMD) TOSEP(*NONE)
+             CHGVAR     VAR(&DATE) VALUE(&CYYMMDD)
+             CHGVAR     VAR(&LCKBOX) VALUE(&LCKBOXX)
+             CALL       PGM(POIIXFR) PARM(' ' &LCKBOX &DATE &TIME +
+                          &RCDSTS)
+                 IF   COND(&RCDSTS *EQ 'Y') THEN(GOTO CMDLBL(DUPDEP))
+
+                 /* SEND SUCCESSFUL COMPLETION MESSAGE */
+                 CHGVAR     VAR(&MSG) VALUE(&LOC *BCAT &LCKBOXX *CAT ' +
+                          Lock Box: RECEIVED Deposit Date' *BCAT +
+                &DEPDTE *BCAT &TIMEF *BCAT 'with' *BCAT &CHKS *BCAT +
+                          'Checks and $' *CAT &DEPAMT *BCAT +
+                          'Deposit Amount.')
+             SNDPGRMSG  TOPGR(&DIST) MSG(&MSG) CONFMSG(*NO)
+
+                 IF   COND(&DATE *GT &DEPDATE) THEN(DO)
+                       CHGVAR     VAR(&DEPDATE) VALUE(&DATE)
+                 ENDDO
+ EDATE1:     ENDDO
+                 GOTO       CMDLBL(LOOP)
+
+/* CREATE MEMBER FOR DEPOSIT DATE */
+CRTMBR:
+                 DLTOVR     FILE(*ALL)
+                 CHGVAR     VAR(&DEPDATEX) VALUE(&DEPDATE)
+                 CHGVAR     VAR(&MBR) VALUE(&LOC *CAT &DEPDATEX)
+             CHGVAR     VAR(&ZMBR) VALUE('Z' *CAT &LOC *CAT &DEPDATEX)
+
+                 RMVM       FILE(BALCKBOX) MBR(&ZMBR)
+                 MONMSG     MSGID(CPF0000)
+ADDPFM:
+
+                 ADDPFM     FILE(BALCKBOX) MBR(&MBR)
+                 MONMSG     MSGID(CPF7306) EXEC(DO)
+                   RMVM       FILE(BALCKBOX) MBR(&MBR)
+                   GOTO       CMDLBL(ADDPFM)
+                 ENDDO
+                 MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(ADDMBR))
+
+                 CPYF       FROMFILE(&FILE) TOFILE(BALCKBOX) +
+                        FROMMBR(*FIRST) TOMBR(&MBR) MBROPT(*REPLACE)
+                 MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(CPYF2))
+
+             ENDDO
+
+             GOTO       CMDLBL(END)
+/*--*----------------------------------------------------------------*/
+/* ERROR PROCESSING                                                  */
+/*-------------------------------------------------------------------*/
+CPYF1:
+             RCVMSG     MSG(&ERRMSG)
+             SNDPGRMSG  TOPGR(&DIST) MSG(&ERRMSG) CONFMSG(*NO)
+             CHGJOB     LOG(4 00 *SECLVL) LOGCLPGM(*YES)
+             CHGVAR     VAR(&MSG) VALUE(&LOC *BCAT &LCKBOXX *CAT ' +
+                          Lock Box:  Copy of ' *CAT &FILE *BCAT 'to +
+                          QTEMP/QBALCKBOX failed.')
+             SNDPGRMSG  TOPGR(&DIST) MSG(&MSG) CONFMSG(*NO)
+             CHGJOB     LOG(4 00 *SECLVL) LOGCLPGM(*YES)
+             GOTO       CMDLBL(END)
+
+CPYF2:
+             RCVMSG     MSG(&ERRMSG)
+             SNDPGRMSG  TOPGR(&DIST) MSG(&ERRMSG) CONFMSG(*NO)
+             CHGVAR     VAR(&MSG) VALUE(&LOC *BCAT &LCKBOXX *CAT ' +
+                          Lock Box:  Copy of' *BCAT &FILE *BCAT +
+                          '*FIRST member to BALCKBOX member' *BCAT +
+                          &MBR *BCAT 'failed.')
+             SNDPGRMSG  TOPGR(&DIST) MSG(&MSG) CONFMSG(*NO)
+             CHGJOB     LOG(4 00 *SECLVL) LOGCLPGM(*YES)
+             GOTO       CMDLBL(END)
+
+ADDMBR:
+             RCVMSG     MSG(&ERRMSG)
+             SNDDST     TYPE(*MSG) TOUSRID((&DIST BIGBYTE)) +
+                          DSTD('Pork Error: AR') MSG(&ERRMSG)
+             CHGVAR     VAR(&MSG) VALUE(&LOC *BCAT &LCKBOXX *CAT ' +
+                          Lock Box:  ADDPFM ' *CAT &MBR *CAT 'to +
+                          BALCKBOX failed.')
+             SNDPGRMSG  TOPGR(&DIST) MSG(&MSG) CONFMSG(*NO)
+             CHGJOB     LOG(4 00 *SECLVL) LOGCLPGM(*YES)
+             GOTO       CMDLBL(END)
+
+DUPDEP:
+             RCVMSG     MSG(&ERRMSG)
+             SNDPGRMSG  TOPGR(&DIST) MSG(&ERRMSG) CONFMSG(*NO)
+             CHGVAR     VAR(&MSG) VALUE(&LOC *BCAT &LCKBOXX *CAT ' +
+                          Lock Box:  Received Deposit Date ' *CAT +
+             &DEPDTE *BCAT &TIMEF *CAT '. --DUPLICATE ERROR-- +
+                          Please retrieve file again.')
+             SNDPGRMSG  TOPGR(&DIST) MSG(&MSG) CONFMSG(*NO)
+             CHGJOB     LOG(4 00 *SECLVL) LOGCLPGM(*YES)
+             GOTO       CMDLBL(END)
+/*--*----------------------------------------------------------------*/
+/* END PROGRAM                                                       */
+/*-------------------------------------------------------------------*/
+ END:
+             ENDPGM

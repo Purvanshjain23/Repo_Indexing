@@ -1,0 +1,137 @@
+/***************************************************************** */
+/*                                                                 */
+/*  ENVIRONMENT:     PORK DIVISION - MOVED INTO E1IDEVMDL         */
+/*  SYSTEM:          INTERFACE MP2 TO JDE                          */
+/*  PROGRAM NUMBER:  MP441CL                                       */
+/*  PROGRAM NAME:    MP2: POST OF PURCHASE ORDERS TO JDE           */
+/*  PROGRAMMER:      LEANNE RAMSEY / ROSE CENTONZE                 */
+/*  CREATE DATE:     03/05/14      / 4/06/2020                     */
+/*                                                                 */
+/*  FUNCTION:        THIS CL EDITS AND PRINTS A LISTING AND THEN   */
+/*                   POSTS ERROR-FREE PURCHASE ORDERS TO JDE.      */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFIED:                                                       */
+/*                                                                 */
+/* 03/12/14  LeAnne Ramsey (E2992)                                 */
+/*           Since Guymon will now be sending both Plant and Live  */
+/*           data from MP2 to JDE, I changed the submission screen/*/
+/*           logic to require the user to enter an Accounting      */
+/*           Company. It is in the LDA.                            */
+/*                                                                 */
+/*  4/06/2020 ROSE CENTONZE  P16169                       */
+/*                     CHECK FOR LIVE WITH JW/E1 TO CALL ALTERNATE    */
+/*                     E1 FUNCTIONS WHICH ARE FROM E1IDEVMDL         */
+/*                     MPJDE303    --> MPJDE303E1 - CRT RUNLOG FILE E1B9CPP */
+/*              AT END, CALL PGM E1LDXFR TO PUSH E1 BATCHES TO Z PROCESSOR */
+/*                FROM RUN LOG WORKFILE QTEMP/E1B9CPP                        */
+/*                                                                 */
+/*  7/27/2020 Brad Baden     P16169   SDN465                          */
+/*                     Call program E1LRXFR to send an email of all   */
+/*                     of the Batch Numbers in the E1B9CPP file       */
+/*                                                                    */
+/**********************************************************************/
+
+             PGM
+
+             DCL        VAR(&LIVEJW) TYPE(*CHAR) LEN(1)  /*    LIVE WITH JW */
+             DCL        VAR(&LIVEE1) TYPE(*CHAR) LEN(1)  /*    LIVE WITH E1 */
+             DCL        VAR(&RETRN) TYPE(*CHAR) LEN(7)
+
+             DCL        VAR(&SOURCE)  TYPE(*CHAR) LEN(25) +
+                          VALUE('Inventory Receipts')
+             DCL        VAR(&BCHDSC) TYPE(*CHAR) LEN(25) VALUE('G/L +
+                          Journal Entry')
+             DCL        VAR(&RECIP)  TYPE(*CHAR) LEN(30)
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(40) VALUE('MP2 +
+                          Inventory Receipts to JDE')
+
+             DCL        VAR(&USER)   TYPE(*CHAR) LEN(10)
+             DCL        VAR(&GRPPRF) TYPE(*CHAR) LEN(10)
+
+             DCL        VAR(&ACONO) TYPE(*DEC) LEN(3)
+
+             RTVJOBA    USER(&USER)
+             RTVUSRPRF  USRPRF(&USER) GRPPRF(&GRPPRF)
+
+             CHGVAR     VAR(&ACONO) VALUE(%SST(*LDA 86 3))
+
+/*-------------------------------------------------------------------*/
+/*  GET E1 LIVE STATUS FROM COMPANY VALUES                           */
+/*-------------------------------------------------------------------*/
+             CALL       PGM(POMTXFR) PARM(&RETRN &ACONO  'JWLIVE    +
+                          ' &LIVEJW)
+             CALL       PGM(POMTXFR) PARM(&RETRN &ACONO  'E1LIVE    +
+                          ' &LIVEE1)
+/*-------------------------------------------------------------------*/
+/* Edit/print records for the Accounting Company entered by the user.*/
+/*-------------------------------------------------------------------*/
+
+             CALL       PGM(MP302CL)
+
+/*-------------------------------------------------------------------*/
+/*  Build a workfile for the posting. I need a workfile since some of*/
+/*  the key fields needed for the posting sequence are in the P.O.   */
+/*  Header file and some are in the P.O. Detail file.                */
+/*-------------------------------------------------------------------*/
+
+             CRTDUPOBJL OBJ(MPP303) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CALL       PGM(MP303) PARM(&ACONO)
+
+/*-------------------------------------------------------------------*/
+/* Post Error-free records to JDE for the Accounting Company that    */
+/* the user entered.                                                 */
+/*-------------------------------------------------------------------*/
+
+/*-------------------------------------------------------------------*/
+/*  CREATE E1 RUN LOG WORKFILE - TO USER LATER TO PUSH BATCHES TO E1   */
+/*                                                                   */
+             IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1 *EQ 'P') +
+                          THEN(DO )
+             CRTDUPOBJ  OBJ(E1B9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+                          ENDDO
+/*-------------------------------------------------------------------*/
+/*  CALL FOR JDE WORLD OR E1 IF LIVE OR PARALLEL                  */
+/*-------------------------------------------------------------------*/
+
+ PARLLL:     IF         COND(&LIVEJW *EQ 'P') THEN(CALL +
+                          PGM(MPJDE303) PARM(&ACONO &LIVEJW))
+             IF         COND(&LIVEE1 *EQ 'P') THEN(CALL +
+                          PGM(MPJDE303E1) PARM(&ACONO &LIVEE1))
+
+ LIVEE1:     IF         COND(&LIVEJW *EQ 'Y') THEN(CALL +
+                          PGM(MPJDE303) PARM(&ACONO &LIVEJW))
+             IF         COND(&LIVEE1 *EQ 'Y') THEN(CALL +
+                          PGM(MPJDE303E1) PARM(&ACONO &LIVEE1))
+/**********************************************************************/
+/*  EXECUTE THE PROGRAM TO READ THE QTEMP RUN LOG HEADER         */
+/*      E1B9CPP AND PUSH THE BATCHES TO E1                      */
+/**********************************************************************/
+ LIVEE1P:    IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1 *EQ 'P')  THEN(DO)
+/*                                                                   */
+             CALL       PGM(E1LDXFR) PARM(&RETRN)
+
+/**********************************************************************/
+/*                                                                   */
+/*  Send message to user that the batch is ready in JDE              */
+             IF         COND(&GRPPRF *EQ 'SBDPGMR') THEN(DO)
+             CHGVAR     VAR(&RECIP) VALUE('MP2 E1 TEST')
+                ENDDO
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+             CHGVAR     VAR(&RECIP) VALUE('MP2 E1')
+                ENDDO
+
+             CALL       PGM(E1LRXFR) PARM(&RETRN &SOURCE &BCHDSC +
+                          &RECIP &SUBJECT)
+
+             DLTF       FILE(QTEMP/E1B9CP*)
+             MONMSG     MSGID(CPF2105 CPF2125)
+             ENDDO                              /*          END LIVEE1P */
+             ENDPGM
+

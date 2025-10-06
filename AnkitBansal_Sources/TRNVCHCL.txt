@@ -1,0 +1,153 @@
+/***************************************************************** */
+/*                                                                 */
+/*  Program Number  -> TRNVCHCL - MOVED INTO E1IDEVMDL             */
+/*                                                                 */
+/*  Program Name    -> Create Trucker vouchers in JDE              */
+/*                                                                 */
+/*  Program Purpose -> This CLP is used to call the program to     */
+/*                     write trucker vouchers to JDE.              */
+/*                                                                 */
+/*                     It will write all vouchers to JDE as        */
+/*                     unposted to allow user to fix/update        */
+/*                     anything prior to creating payment groups.  */
+/*                                                                 */
+/*                     This CLP is executed from a script written  */
+/*                     in Visual Stuido.  Visual Studio then       */
+/*                     publish's it to directory:                 */
+/*                                                                 */
+/*    \\corkcapp1dev\ClickOnce Deployments\PowerProAcctInterface   */
+/*                                                                 */
+/*  Programmer      -> Barb Gutierrez           11/20/08           */
+/*  Modified by     -> Barb Gutierrez           09/06/11           */
+/*                     Retrieve user profile to determine which    */
+/*                     library list to use, production or test.    */
+/*                                                                 */
+/*  4/07/2020 ROSE CENTONZE  P16169                       */
+/*                     CHECK FOR LIVE WITH JW/E1 TO CALL ALTERNATE    */
+/*                     E1 FUNCTION  WHICH ARE FROM E1IDEVMDL         */
+/*                     TRNVCH      --> TRNVCHE1                     */
+/*                     HARD CODED COMPANY 390                     */
+/*              AT END, CALL PGM E1LDXFR TO PUSH E1 BATCHES TO Z PROCESSOR */
+/*                FROM RUN LOG WORKFILE QTEMP/E1B9CPP                        */
+/*                                                                 */
+/*  MODIFIED BY     -> ROSE CENTONZE          09/21/2021           */
+/*   whd 84086         Change company 390 to 355                      */
+/*                                                                    */
+/*******************************************************************/
+TRNVCHCL:    PGM
+             DCL        VAR(&MESSAGE) TYPE(*CHAR) LEN(100)
+             DCL        VAR(&BATCH) TYPE(*CHAR) LEN(8)
+             DCL        VAR(&USER) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&GRPPRF) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBNAME) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&JOBNBR) TYPE(*CHAR) LEN(6)
+
+             DCL        VAR(&LIVEJW) TYPE(*CHAR) LEN(1)  /*    LIVE WITH JW */
+             DCL        VAR(&LIVEE1) TYPE(*CHAR) LEN(1)  /*    LIVE WITH E1 */
+             DCL        VAR(&RETRN) TYPE(*CHAR) LEN(7)
+
+/*                                                                   */
+             RTVJOBA    USER(&USER) JOB(&JOBNAME) NBR(&JOBNBR)
+             RTVUSRPRF  USRPRF(&USER) GRPPRF(&GRPPRF) OUTQ(&OUTQ)
+
+/* Save library list prior to execution                              */
+
+             PSHLIBL35
+             MONMSG     MSGID(CPF098A)
+
+/* Set Library List                                                */
+
+             IF         COND(&GRPPRF *EQ 'SBDPGMR') THEN(DO)
+/*           CALL       PGM(SETJDED)    */
+             SETLIBL    JOBD(PRKTSTE1)
+             ENDDO
+
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+/*           CALL       PGM(SETJFOOD)             */
+             SETLIBL    JOBD(PRKPRDGUY)
+             ENDDO
+
+             ADDLIBLE   LIB(ESEND) POSITION(*LAST)
+             MONMSG     MSGID(CPF2103)
+/*                                                                   */
+/*-------------------------------------------------------------------*/
+/*  GET E1 LIVE STATUS FROM COMPANY VALUES    P16169                 */
+/*-------------------------------------------------------------------*/
+             CALL       PGM(POMTXFR) PARM(&RETRN X'355F' 'JWLIVE    +
+                          ' &LIVEJW)
+             CALL       PGM(POMTXFR) PARM(&RETRN X'355F' 'E1LIVE    +
+                          ' &LIVEE1)
+
+ /* GOTO LIVEE1   */
+
+/*  Execute the program to write the batch of vouchers to JDE        */
+/*                                                                   */
+/*-------------------------------------------------------------------*/
+/*  CALL FOR JDE WORLD OR E1 IF LIVE OR PARALLEL                  */
+/*-------------------------------------------------------------------*/
+/*******     CALL       PGM(TRNVCH) PARM(&BATCH)               ******/
+
+ PARLLL:     IF         COND(&LIVEJW *EQ 'P') THEN(CALL +
+                          PGM(TRNVCH) PARM(&BATCH))
+/*                                                                   */
+/*  CREATE E1 RUN LOG WORKFILE - TO USER LATER TO PUSH BATCHES TO E1   */
+/*                                                                   */
+             IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1 *EQ 'P') +
+                          THEN(DO )
+             CRTDUPOBJ  OBJ(E1B9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+                          ENDDO
+
+             IF         COND(&LIVEE1 *EQ 'P') THEN(CALL +
+                          PGM(TRNVCHE1) PARM(&BATCH))
+
+ LIVEE1:     IF         COND(&LIVEJW *EQ 'Y') THEN(CALL +
+                          PGM(TRNVCH) PARM(&BATCH))
+             IF         COND(&LIVEE1 *EQ 'Y') THEN(CALL +
+                          PGM(TRNVCHE1) PARM(&BATCH))
+
+/**********************************************************************/
+ LIVEE1P:    IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1 *EQ 'P')  THEN(DO)
+
+/*  EXECUTE THE PROGRAM TO READ THE QTEMP RUN LOG HEADER         */
+/*      E1B9CPP AND PUSH THE BATCHES TO E1                      */
+/*                                                                   */
+             CALL       PGM(E1LDXFR) PARM(&RETRN)
+
+             ENDDO                              /*          END LIVEE1P */
+/*                                                                   */
+/**********************************************************************/
+/*                                                                   */
+/*  Send message to user that the batch is ready in JDE              */
+
+             CHGVAR     VAR(&MESSAGE) VALUE(*BLANKS)
+             CHGVAR     VAR(&MESSAGE) VALUE('Power Pro has created +
+                          a payroll voucher batch in JDE.  Batch +
+                          ' |> &BATCH |> 'is ready for your review.')
+
+             IF         COND(&GRPPRF *EQ 'SBDPGMR') THEN(DO)
+             ESNDMAIL   RECIPIENT('ssi py interfaces test') +
+                          SUBJECT('SSI PY INTERFACE TO JDE-TEST') +
+                          MSG(&MESSAGE)
+               ENDDO
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+             ESNDMAIL   RECIPIENT('ssi py interfaces to jde') +
+                          SUBJECT('SSI PY INTERFACE TO JDE')  +
+                          MSG(&MESSAGE)
+               ENDDO
+/* Restore library list back to what it was prior to execution       */
+
+/*  GOTO EXIT    */
+
+             CLRPFM     FILE(STC001)     /* ADDED  P16169  */
+
+             POPLIBL35
+             MONMSG     MSGID(CPF0002)
+
+ EXIT:       ENDPGM
+

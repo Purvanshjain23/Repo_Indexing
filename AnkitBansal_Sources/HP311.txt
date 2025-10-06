@@ -1,0 +1,811 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:       HOG PRODUCTION SYSTEM
+      * PROGRAM:      HP311
+      * TITLE:        Workflies: Group Source Reports
+      * AUTHOR:       LeAnne Fedor
+      * CREATED:      12/16/99
+      *
+      * FUNCTION: This program always builds 4 workfiles:
+      *               1) HSP315 - Destination Groups
+      *               2) HSP317 - Source BGF Groups
+      *               3) HSP318 - Source Nursery Groups
+      *               4) HSP319 - Source Grow Finish Groups
+      *
+      *           When the user has selected the 'Summary' Version of the Source
+      *           Report, this program processes these workfiles and creates a Farm
+      *           Summary workfile (HSP316).
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 08/10/00  LeAnne Fedor
+      *           Accounting adjustments at the end of each group's life were
+      *           creating 'mixed' groups in the system that were not truly mixed
+      *           on the farm.  So, we set arbitrary cut-off dates for including
+      *           transfers.  The cut-off dates are:
+      *                 Nursery groups:      open date + 21 days
+      *                 Grow finish groups:  open date + 90 days
+      *
+      *           Also, we added code to populate new 'source' fields in workfile HSP315.
+      *           These fields are a) populated when the 'SUMMARY' version is run and
+      *           b) required for the build of DATAMART files.
+      *
+      * 08/30/00  LeAnne Fedor
+      *           Added code to populate new 'origin BGF cell' and 'origin Nursery cell'
+      *           fields in workfile HSP315.  These fields are a) populated when the
+      *           'SUMMARY' version is run and b) required for the build of DATAMART files.
+      *
+      * 11/07/00  LeAnne Fedor
+      *           The following fields:
+      *                   multiple BGF source farms flag
+      *                   multiple BGF source cells flag
+      *                   multiple Nursery source farms flag
+      *                   multiple Nursery source cells flag
+      *           now contain one of the following values instead of yes/no:
+      *                   S = single; there was 1 source
+      *                   M = multiple; there were 2 or 3 sources
+      *                   + = there were more than 3 sources
+      *
+      * 12/18/00  LeAnne Fedor
+      *           Fixed bug resulting from code added on 11/07/00 above.
+      *
+      * 06/05/01  LeAnne Fedor
+      *           Recompile only. New field 'multisite' added to Farm Site file.
+      *
+      * 06/28/01  LeAnne Fedor
+      *           Recompile only.
+      *           Three fields (manager/supervisor/multisite) renamed in Farm Site file.
+      *           Manager and supervisor fields removed from Hog Group file.
+      *
+      * 09/04/01  LeAnne Fedor
+      *           Recompile only. New 'square feet' fields added to Farm Site file.
+      *
+      * 12/05/01  LeAnne Fedor
+      *           Removed the following fields from HSP315. They were added originally to
+      *           accommodate Datamart. We are no longer using the 'group source report'
+      *           logic to populate these Datamart fields...we now use the Sire Line
+      *           Derivation logic. So, the fields are no longer needed in this logic.
+      *                   origin BGF cell
+      *                   multiple BGF source farms flag
+      *                   multiple BGF source cells flag
+      *                   origin Nursery cell
+      *                   multiple Nursery source farms flag
+      *                   multiple Nursery source cells flag
+      *
+      * 11/29/07  LeAnne Rasmey
+      *           As requested by Jessica LePlatt, we have added another
+      *           "Mixed Group Option": Only select groups with mixed BGF sources
+      *           When the user selects this version of the report, it will
+      *           only include groups that have more than one "real" BGF farm.
+      *           The logic will ignore both "GDU" and "BOAR" farms when making
+      *           the decision of whether the group is "mixed" in BGF.
+      *
+      * 07/02/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fhsp018    if   e           k disk
+      *    Farm Site
+      *
+      *
+     Fhsp034    if   e           k disk
+      *    Hog Group (records selected by open query)
+      *
+      *
+     Fhsl034d   if   e           k disk    rename(hgrec:hgrecd) prefix(p1)
+      *    Hog Group
+      *
+      *
+     Fhsj058a   if   e           k disk
+      *   Movement Event + Transfer Header
+      *   (omits 'scheduled'; selects 'transfers' 'destination')
+      *
+      *
+     Fhsp315    o    e           k disk
+      *   Workfile: Destination hog groups
+      *
+      *
+     Fhsp316    uf a e           k disk
+      *   Workfile: Farm summary
+      *
+      *
+     Fhsp317    uf a e           k disk
+      *   Workfile: BGF groups
+      *
+      *
+     Fhsp318    uf a e           k disk
+      *   Workfile: Nursery groups
+      *
+      *
+     Fhsp319    uf a e           k disk
+      *   Workfile: Grow/Finish groups
+      *
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      * Define array/table for source groups.
+      *
+     Dsource1          s              7p 0 dim(500)
+     Dsource2          s              7p 0 dim(500)
+      *
+     Dbfscd            s              5p 0 dim(500) descend
+     Drfscd            s              5p 0 dim(500) descend
+     Dnfscd            s             10    dim(500) descend
+     Dgfscd            s             10    dim(500) descend
+      *
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     D pgm             s             10
+      *
+      *
+      *
+      * Control fields and save fields
+      *
+     D source1cnt      s              3  0
+     D bcount          s              3  0
+     D ncount          s              3  0
+     D gcount          s              3  0
+     D mixedfl         s              1a
+     D realfl          s              1a
+      *
+      *
+      * Workfields
+      *
+     D wkfarmbldg      s             10a
+     D wkblcd          s                   like(hgblcd)
+     D wkalphfscd      s              5a
+     D wkfscd          s                   like(fsfscd)
+      *
+      *
+      * Workfields for date manipulation
+      *
+     D wkcymdiso       s               D   datfmt(*iso)
+     D wkcutoffdt      s                   like(hgopdt)
+      *
+      *
+      * Array indexes
+      *
+     D b               s              3  0
+     D r               s              3  0
+     D n               s              3  0
+     D g               s              3  0
+      *
+     D x               s              3  0
+     D y               s              3  0
+     D z               s              3  0
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldhgsn                53     59  0
+     D  ldrpfl               174    174
+     D  ldmgfl               182    182
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Read each record in the Hog Group file selected by the open query.
+      *
+     C     *loval        setll     hsp034
+      *
+     C                   dou       *in90 = *on                                  Main do
+     C                   read      hsp034                                 90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+     C                   move      no            mixedfl
+      *
+      * Calculate cut-off date
+      *
+     C                   exsr      $cutoff
+      *
+      * Clear source arrays and indexes
+      *
+     C                   z-add     0             source1
+     C                   z-add     0             source2
+     C                   z-add     0             x
+     C                   z-add     0             y
+     C                   z-add     0             z
+      *
+      * Clear farm arrays and indexes
+      *
+     C                   z-add     0             bfscd
+     C                   z-add     0             rfscd
+     C                   move      *blank        nfscd
+     C                   move      *blank        gfscd
+     C                   z-add     0             b
+     C                   z-add     0             r
+     C                   z-add     0             n
+     C                   z-add     0             g
+      *
+      *
+      * To get things started with each group,
+      * read the Movement Event transfers that went directly into this
+      * destination group and write each origin group to the first array.
+      *
+     C                   exsr      $source1
+      *
+      * Finding all the 'source' groups that went into a group is a cascading
+      * process. You have already filled the Source 1 array with the groups
+      * that sent pigs directly to the group.  Now, you must find the groups
+      * that sent pigs to these direct groups. This logic is repeated until
+      * you have all the groups that fed groups that fed groups, etc.
+      *
+      * So, fill/process the Source 1 array repeatedly until it is empty.
+      * (The field 'source1cnt' holds the current number of entries in the array.
+      *  This value changes with each pass through the logic.)
+      *
+     C                   dou       source1cnt = 0                               Do loop 1
+      * Initalize indexes
+     C                   z-add     0             x
+     C                   z-add     0             y
+      *
+      * Process each entry in the Source 1 array
+      *
+     C                   if        source1cnt <> 0                              If anything
+     C                   do        source1cnt    z                              Do loop 2
+     C                   exsr      $process1
+     C                   enddo                                                  Do loop 2
+      *
+      * You have finished processing each entry in the Source 1 array. So,
+      * prepare to repeat the processing of the Source 1 Array by:
+      *     1) resetting the Source 1 counter with the number of entries in Array 2
+      *     2) replacing the entries in Array 1 with the entries in Array 2
+      *     3) clearing array 2
+      *
+     C                   z-add     y             source1cnt
+     C                   z-add     source2       source1
+     C                   z-add     0             source2
+      *
+     C                   endif                                                  If anything
+     C                   enddo                                                  Do loop 1
+      *
+      * You now know whether this group is 'mixed' or 'not mixed' and
+      * can now make comparisons between the user's selection for
+      * the 'mixed group option'.
+      *
+     C                   if        ldmgfl  = 'I' or                             If process
+     C                             (ldmgfl = 'S' and mixedfl = yes) or
+     C                             (ldmgfl = 'B' and mixedfl = yes) or
+     C                             (ldmgfl = 'O' and mixedfl = no) or
+     C                             ldhgsn <> 0
+      *
+      * If the user has selected the Summary Version and you have any
+      * BGF, nursery or grow finish farms:
+      *    1) write farm summary workfile records for this destination group
+      *
+     C                   if        ldrpfl = 'S' and
+     C                             (b > 0 or n > 0 or g > 0)
+     C                   exsr      $summary
+     C                   endif
+      *
+      * Write destination group workfile
+      *
+     C                   exsr      $write315
+      *
+     C                   endif                                                  If process
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      *-------------
+      * End of file
+      *-------------
+     C                   seton                                        lr
+      /EJECT
+      *---------------------------------------------------------------
+      * Calculate the cut-off date for transfers
+      *---------------------------------------------------------------
+      *
+     C     $cutoff       begsr
+      *
+      * Initialize the cutoff date to high values to include all transfers.
+      *
+     C                   z-add     99999999      wkcutoffdt
+      *
+      * Check that open date is a valid date.
+      *
+     C     *iso          test(d)                 hgopdt                 92
+     C                   if        *in92 = *off                                 If valid date
+      *
+      * Calculate the cutoff date as follows:
+      *   Nursery groups:     open date + 21 days
+      *   Grow finish groups: open date + 90 days
+      *
+     C                   move      hgopdt        wkcymdiso
+      *
+     C                   select
+     C                   when      hgppcd = 'NUR  '
+     C                   adddur    21:*days      wkcymdiso
+     C                   move      wkcymdiso     wkcutoffdt
+      *
+     C                   when      hgppcd = 'GF   '
+     C                   adddur    90:*days      wkcymdiso
+     C                   move      wkcymdiso     wkcutoffdt
+     C                   endsl
+      *
+     C                   endif                                                  If valid date
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Find all groups that were a direct source
+      *---------------------------------------------------------------
+      *
+     C     $source1      begsr
+      *
+      * Read the join file over Movement Events and the Transfer Header file.
+      *
+     C     hghgsn        setll     hsj058a
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     hghgsn        reade     hsj058a                                91
+     C                   if        *in91 = *off and                             If not EOF
+     C                             mhrcdt <> 0 and
+     C                             mhrcdt <= wkcutoffdt
+      *
+      * Add the group to the appropriate phase workfile--if it is not
+      * already there.
+      *
+     C                   exsr      $phase
+      *
+      * Using the origin group from the movement event record, determine
+      * if the group is already in the Source 1 array.  Add the group
+      * if it is not in the array.
+      *
+     C                   eval      x = 1
+     C     mehsn         lookup    source1(x)                             92
+     C                   if        *in92 = *off                                 If not there
+     C                   add       1             y
+     C                   z-add     mehsn         source1(y)
+     C                   endif                                                  If not there
+      *
+     C                   z-add     y             source1cnt
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Process source array 1
+      *---------------------------------------------------------------
+      *
+     C     $process1     begsr
+      *
+      * If there is a group in the array entry
+      *
+     C                   if        source1(z) <> 0                              If more
+      *
+      * If the group is not a BGF group, then fill the second source
+      * array with all the groups that fed this group.
+      *
+     C     source1(z)    chain     hsl034d                            92
+     C                   if        *in92 = *off and                             If hit
+     C                             (p1hgppcd = 'NUR  ' or p1hgppcd = 'GF   ')
+     C                   exsr      $cutoff
+     C                   exsr      $source2
+     C                   endif                                                  If hit
+      *
+     C                   endif                                                  If more
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Find source groups and put in array 2
+      *---------------------------------------------------------------
+      *
+     C     $source2      begsr
+      *
+      * Read the join file over Movement Events and the Transfer Header file.
+      *
+     C     source1(z)    setll     hsj058a
+      *
+     C                   dou       *in91 = *on                                  Do loop
+     C     source1(z)    reade     hsj058a                                91
+     C                   if        *in91 = *off and                             If not EOF
+     C                             mhrcdt <> 0 and
+     C                             mhrcdt <= wkcutoffdt
+      *
+      * Add the group to the appropriate phase workfile--if it is not
+      * already there.
+      *
+     C                   exsr      $phase
+      *
+      * If the group was not already in the phase workfile, continue.
+      * Source group only needs to be in the source array one time.
+      *
+     C                   if        *in92 = *on                                  If need to add
+     C                   eval      x = 1
+     C     mehsn         lookup    source2(x)                             92
+     C                   if        *in92 = *off                                 If not there
+     C                   add       1             y
+     C                   z-add     mehsn         source2(y)
+     C                   endif                                                  If not there
+     C                   endif                                                  If need to add
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do loop
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Add group to appropriate phase workfile
+      *---------------------------------------------------------------
+      *
+     C     $phase        begsr
+      *
+      * Retrieve the group info for the origin group from the movement
+      * event record.
+      *
+     C     mehsn         chain     hsl034d                            92
+     C                   if        *in92 = *off                                 If hit
+      *
+      * BGF group
+     C                   select
+     C                   when      mhorpp = 'BGF  '
+     C     key01         chain     hsp317                             92
+     C                   if        *in92 = *on                                  If not there
+     C                   z-add     hghgsn        wbhgsn
+     C                   move      hghgcd        wbhgcd
+     C                   z-add     mehsn         wbsrhgsn
+     C                   move      p1hghgcd      wbsrhgcd
+     C                   z-add     p1hgfscd      wbsrfscd
+     C                   move      p1hgbscd      wbsrbscd
+     C                   move      p1hggncd      wbsrgncd
+     C                   write     wbrec
+      *
+      * Add this farm to the BGF farm array -- if it isn't already there.
+      *
+     C     p1hgfscd      lookup    bfscd                                  93
+     C                   if        *in93 = *off                                 If new BGF farm
+     C                   add       1             b
+     C                   z-add     p1hgfscd      bfscd(b)
+     C                   endif                                                  If new BGF farm
+      *
+      * If the user has selected "Only Groups with Mixed BGF Sources" report,
+      * they want the "mixed" decision to be made on "real" BGF groups--not
+      * GDU or BOAR groups. So, you have to determine if this is a "real"
+      * BGF farm and, if so, add it to the "real" BGf farm array.
+      *
+     C                   if        ldmgfl = 'B'                                 If "B" version
+     C                   exsr      $realbgf
+     C                   if        realfl = yes                                 If real
+     C     p1hgfscd      lookup    rfscd                                  93
+     C                   if        *in93 = *off                                 If new real BGF
+     C                   add       1             r
+     C                   z-add     p1hgfscd      rfscd(r)
+     C                   endif                                                  If new real BGF
+     C                   endif                                                  If real
+     C                   endif                                                  If "B" version
+      *
+     C                   endif                                                  If not there
+      *
+      *
+      * NURSERY group
+     C                   when      mhorpp = 'NUR  '
+     C     key01         chain     hsp318                             92
+     C                   if        *in92 = *on                                  If not there
+     C                   z-add     hghgsn        wnhgsn
+     C                   move      hghgcd        wnhgcd
+     C                   z-add     mehsn         wnsrhgsn
+     C                   move      p1hghgcd      wnsrhgcd
+     C                   z-add     p1hgfscd      wnsrfscd
+     C                   move      p1hgblcd      wnsrblcd
+     C                   move      p1hgbscd      wnsrbscd
+     C                   move      p1hggncd      wnsrgncd
+     C                   write     wnrec
+      *
+      * Add this farm to the nursery farm array -- if it isn't already there.
+      *
+     C                   movel(p)  p1hgfscd      wkfarmbldg
+     C                   move      p1hgblcd      wkfarmbldg
+      *
+     C     wkfarmbldg    lookup    nfscd                                  93
+     C                   if        *in93 = *off                                 If new nursery
+     C                   add       1             n
+     C                   move      wkfarmbldg    nfscd(n)
+     C                   endif                                                  If new nursery
+     C                   endif                                                  If not there
+      *
+      * GROW/FINISH
+     C                   when      mhorpp = 'GF   '
+     C     key01         chain     hsp319                             92
+     C                   if        *in92 = *on                                  If not there
+     C                   z-add     hghgsn        wghgsn
+     C                   move      hghgcd        wghgcd
+     C                   z-add     mehsn         wgsrhgsn
+     C                   move      p1hghgcd      wgsrhgcd
+     C                   z-add     p1hgfscd      wgsrfscd
+     C                   move      p1hgblcd      wgsrblcd
+     C                   move      p1hgbscd      wgsrbscd
+     C                   move      p1hggncd      wgsrgncd
+     C                   write     wgrec
+      *
+      * Add this farm to the GF farm array -- if it isn't already there.
+      *
+     C                   movel(p)  p1hgfscd      wkfarmbldg
+     C                   move      p1hgblcd      wkfarmbldg
+      *
+     C     wkfarmbldg    lookup    gfscd                                  93
+     C                   if        *in93 = *off                                 If new GF farm
+     C                   add       1             g
+     C                   move      wkfarmbldg    gfscd(g)
+     C                   endif                                                  If new GF farm
+     C                   endif                                                  If not there
+     C                   endsl
+      *
+      * Determine if Group is "mixed"
+      *
+     C                   exsr      $mixed
+      *
+     C                   endif                                                  If hit
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------
+      * Determine if this BGF Farm is "real"---not a "GDU" or "BOAR" farm
+      *--------------------------------------------------------------------------------
+      *
+     C     $realbgf      begsr
+      *
+     C                   move      yes           realfl
+      *
+     C     p1hgfscd      chain     hsp018                             94
+     C                   if        *in94 = *off and
+     C                             (fstfcd = 'BOAR ' or fstfcd = 'GDU  ')
+     C                   move      no            realfl
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *--------------------------------------------------------------------------------
+      * Determine if Group is Mixed
+      *--------------------------------------------------------------------------------
+      *
+      * In November 2007, Jessica LePlatt asked for a new version that
+      * shows only groups mixed at the BGF level; AND she wanted "different"
+      * mix rules. So, I now have 2 sets of "mixed" rules (exception and standard).
+      *
+     C     $mixed        begsr
+      *
+      *
+      * EXCEPTION RULES (only for the BGF Mix Only Report)
+      *   1) A GF or Nursery destination group is mixed if:
+      *        a) it has more than one "real" BGF source farm
+      *            (logic excludes "BOAR" and "GDU" BGF farms)
+      *
+     C                   select
+     C                   when      ldmgfl = 'B'
+      *
+     C                   if        (hgppcd = 'GF   ' or hgppcd = 'NUR  ')
+     C                             and r > 1
+     C                   move      yes           mixedfl
+     C                   endif
+     C                   other
+      *
+      * Standard rules:
+      * Determine if this destination group is mixed:
+      *   1) A GF destination group is mixed if:
+      *        a) it has more than one BGF source farm
+      *        b) it has more than one Nursery source farm
+      *   2) A Nursery destination group is mixed if:
+      *        a) it has more than one BGF source farm
+      *
+     C                   select
+     C                   when      hgppcd = 'GF   ' and (b > 1 or n > 1)
+     C                   move      yes           mixedfl
+      *
+     C                   when      hgppcd = 'NUR  ' and b > 1
+     C                   move      yes           mixedfl
+     C                   endsl
+     C                   endsl                                                  If BGF mix only
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Processing for summary workfile
+      *---------------------------------------------------------------
+      *
+     C     $summary      begsr
+      *
+      * Set the number of times to process the farm arrays equal to the
+      * maximum number of array entries in the BGF, Nursery or Grow/Finish Array.
+      *
+     C                   z-add     b             x
+      *
+     C                   if        n > x
+     C                   z-add     n             x
+     C                   endif
+      *
+     C                   if        g > x
+     C                   z-add     g             x
+     C                   endif
+      *
+      *  Sort arrays in descending order (descending to get the zero
+      *  entries to the bottom)
+      *
+     C                   sorta     bfscd
+     C                   sorta     nfscd
+     C                   sorta     gfscd
+      *
+      *
+      *  Clear the output record
+     C                   clear                   wfrec
+      *
+      *  Process the farm arrays
+      *
+     C                   do        x             z
+     C                   exsr      $detail
+     C                   enddo
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Build farm summary workfile
+      *---------------------------------------------------------------
+      *
+     C     $detail       begsr
+      *
+      * BGF farms
+     C                   if        bfscd(z) <> 0
+     C                   select
+     C                   when      bcount = 0
+     C                   z-add     bfscd(z)      wfb1fscd
+     C                   when      bcount = 1
+     C                   z-add     bfscd(z)      wfb2fscd
+     C                   when      bcount = 2
+     C                   z-add     bfscd(z)      wfb3fscd
+     C                   endsl
+     C                   add       1             bcount
+     C                   endif
+      *
+      * Nursery farms
+     C                   if        nfscd(z) <> *blank
+      *
+     C                   eval      wkalphfscd = %subst(nfscd(z):1:5)
+     C                   move      wkalphfscd    wkfscd
+     C                   eval      wkblcd = %subst(nfscd(z):6:5)
+      *
+     C                   select
+     C                   when      ncount = 0
+     C                   z-add     wkfscd        wfn1fscd
+     C                   movel(p)  wkblcd        wfn1blcd
+     C                   when      ncount = 1
+     C                   z-add     wkfscd        wfn2fscd
+     C                   movel(p)  wkblcd        wfn2blcd
+     C                   when      ncount = 2
+     C                   z-add     wkfscd        wfn3fscd
+     C                   movel(p)  wkblcd        wfn3blcd
+     C                   endsl
+     C                   add       1             ncount
+     C                   endif
+      *
+      * Grow finish farms
+     C                   if        gfscd(z) <> *blank
+      *
+     C                   eval      wkalphfscd = %subst(gfscd(z):1:5)
+     C                   move      wkalphfscd    wkfscd
+     C                   eval      wkblcd = %subst(gfscd(z):6:5)
+      *
+     C                   select
+     C                   when      gcount = 0
+     C                   z-add     wkfscd        wfg1fscd
+     C                   movel(p)  wkblcd        wfg1blcd
+     C                   when      gcount = 1
+     C                   z-add     wkfscd        wfg2fscd
+     C                   movel(p)  wkblcd        wfg2blcd
+     C                   when      gcount = 2
+     C                   z-add     wkfscd        wfg3fscd
+     C                   movel(p)  wkblcd        wfg3blcd
+     C                   endsl
+     C                   add       1             gcount
+     C                   endif
+      *
+      *
+      * Write a record each time you have 3 farm sites in any one production phase.
+      * Also, write a 'last' record when you have finished processing the arrays.
+      *
+     C                   if        (bcount = 3 or ncount = 3 or gcount = 3) or
+     C                             x = z
+     C                   exsr      $write316
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Write destination group workfile record
+      *---------------------------------------------------------------
+      *
+     C     $write315     begsr
+      *
+     C                   z-add     hghgsn        wdhgsn
+     C                   move      hghgcd        wdhgcd
+     C                   move      hgppcd        wdppcd
+     C                   move      hgptcd        wdptcd
+     C                   z-add     hgfscd        wdfscd
+     C                   move      hgblcd        wdblcd
+     C                   move      hggscd        wdgscd
+     C                   write     wdrec
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * $write316 - Write Farm summary record
+      *---------------------------------------------------------------
+      *
+     C     $write316     begsr
+      *
+     C                   z-add     hghgsn        wfhgsn
+     C                   move      hghgcd        wfhgcd
+     C                   write     wfrec
+     C                   clear                   wfrec
+     C                   z-add     0             bcount
+     C                   z-add     0             ncount
+     C                   z-add     0             gcount
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    hghgsn
+     C                   kfld                    p1hgfscd
+     C                   kfld                    p1hghgcd
+      *
+     C                   endsr
+      /EJECT

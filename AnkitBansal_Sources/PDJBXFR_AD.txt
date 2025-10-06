@@ -1,0 +1,453 @@
+// ?------------------------------------------------------------------------------------------------
+// ?Synon action diagram for PDJBXFR
+// ?Date: 14.08.2025 Time: 03:34:54
+// ?------------------------------------------------------------------------------------------------
+
+//?Execute user function
+
+//?Documentation/change log
+DO;
+
+//?SSD = Scheduled Ship Date; all orders on ld & Load Hdr should =
+//?RSD = Requested Ship Date for order
+//?RDD/RDT = Requested Delivery Date/Time
+//?MSD/MST = Must Ship Date/Time; when ord must ship to arrive by RDD/T
+//?DDD/DDT = Deadline Departure Date/Time: from Load Hdr; calc'd for 1st
+//?          stop/order on load in this function
+//?** 09/24/2009 LJB E00495
+//?** Requested Delivery Date will contain the Carrier Appointment
+//?** Date if it has been entered (from the web). Otherwise, it will
+//?** contain the Deadline Depart dt from the Load Header unless
+//?** it is blanks, then it will contain the Scheduled Ship Date
+//?** from the Order Header. Time will be midnight or current time.
+//?** 03/04/2007 LJB FP1251
+//?** Requested Ship Date should be same as Must Ship Date.
+//?** Add new test: Requested Ship Date not equal Must Ship Date.
+//?** Return a new error code that can be accepted if it is not
+//?** relevant to the calling program. (F9)
+//?** 12/26/2007 LJB FP1251
+//?** Set Must Ship Error code to Yes if Miles To Next Stop is zeros.
+//?** Set Must Ship date and time parameters to zeros also.
+//?** (See Internal Function for calculation logic)
+//?4/20/98  PLL  Implement business rule:  SSD <= MSD <= RDD; Time
+//?              used in calcs only if SSD = today
+ENDDO;
+
+// PAR.Must Ship Error = CND.No Error
+PAR.Must_Ship_Error = *BLANK;
+
+// Call program RTV System Date/Time   UP.
+CALL PROGRAM(RTV System Date/Time   UP) ('PDGFUPC');
+PARAMETER(PAR.Current_System_Date);
+PARAMETER(PAR.Current_System_Time);
+
+//?Calc Must ship date/time (set to zeros if no Miles Between Cities)
+DO;
+
+//?If no whse passed in, use 1st whse on order
+CASE;
+
+// IF PAR.Warehouse Code EQ WRK.BLANK
+IF PAR.Warehouse_Code = WRK.BLANK;
+
+EXECUTE FUNCTION(RTV 1st Warehouse/Ctl  RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC1360958;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(*ZERO);
+PARAMETER(*ZERO);
+PARAMETER(PAR.Warehouse_Code);
+PARAMETER(WRK.TXT_field_not_needed);
+{
+ //?USER: Processing if Data record not found
+
+ MOVE *ALL (To: PAR From: CON);
+
+ //?USER: Process Data record
+
+ EXECUTE FUNCTION(RTV Warehouse Control  RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1304300;
+ PARAMETER(DB1.Warehouse_Code);
+ PARAMETER(PAR.Trans_Contol_AS400_Plant);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ MOVE *ALL (To: PAR From: DB1);
+
+ QUIT;
+
+}
+
+
+ENDIF;
+
+// PAR.City = CON.*BLANK
+PAR.City = *BLANK;
+
+// PAR.State Code = CON.*BLANK
+PAR.State_Code = *BLANK;
+
+//?Get City and State for the warehouse
+EXECUTE FUNCTION(RTV Warehouse Address  RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1211418;
+PARAMETER(PAR.Warehouse_Code);
+PARAMETER(WRK.TXT_field_not_needed);
+PARAMETER(WRK.TXT_field_not_needed);
+PARAMETER(WRK.TXT_field_not_needed);
+PARAMETER(WRK.TXT_field_not_needed);
+PARAMETER(PAR.City);
+PARAMETER(WRK.TXT_field_not_needed);
+PARAMETER(PAR.State_Code);
+{
+ //?USER: Process Data record
+
+ MOVE *ALL (To: PAR From: DB1);
+
+}
+
+
+EXECUTE FUNCTION(RTV Miles Between      IF) TYPE(EXCINTFUN)                     AC1453987;
+PARAMETER(PAR.City);
+PARAMETER(PAR.State_Code);
+PARAMETER(PAR.Ship_To_City);
+PARAMETER(PAR.Ship_To_State_Code);
+PARAMETER(PAR.Miles_to_next_stop);
+{
+ //?Execute internal function
+
+ // PAR.Miles to next stop = CON.*ZERO
+ PAR.Miles_to_next_stop = *ZERO;
+
+ //?ensure cities are all caps, no punctuation
+ //?usr city is From City; Ship to City is To city
+ // Execute function CVT Str to Upper Alpha US.
+ EXECUTE FUNCTION(CVT Str to Upper Alpha US) TYPE(EXCUSRSRC) ('PDWEUFR');
+ PARAMETER(PAR.From_City);
+ PARAMETER(PAR.USR_City);
+ {
+  PDWEUFR:  PGM PARM(&STRIN &STROUT)
+
+  CHGVAR VAR(&FLDOUT) VALUE('%XLATE(UPTEXT &STRIN)')
+ }
+
+ // Execute function CVT Str to Upper Alpha US.
+ EXECUTE FUNCTION(CVT Str to Upper Alpha US) TYPE(EXCUSRSRC) ('PDWEUFR');
+ PARAMETER(PAR.To_City);
+ PARAMETER(PAR.Ship_To_City);
+ {
+  PDWEUFR:  PGM PARM(&STRIN &STROUT)
+
+  CHGVAR VAR(&FLDOUT) VALUE('%XLATE(UPTEXT &STRIN)')
+ }
+
+ //?** Rtv miles, if none, then reverse the order of cities and check again
+ EXECUTE FUNCTION(RTV Miles Between      RT) TYPE(RTVOBJ) FILE(PDLFREP)          AC1453986;
+ PARAMETER(PAR.USR_City);
+ PARAMETER(PAR.From_State);
+ PARAMETER(PAR.Ship_To_City);
+ PARAMETER(PAR.To_State_State_Code);
+ PARAMETER(PAR.Miles_to_next_stop);
+ {
+  //?USER: Processing if Data record not found
+
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ CASE;
+
+ // IF PGM.*Return code is *Record does not exist
+ IF PGM.*Return_code = 'Y2U0005';
+
+ EXECUTE FUNCTION(RTV Miles Between      RT) TYPE(RTVOBJ) FILE(PDLFREP)          AC1453986;
+ PARAMETER(PAR.Ship_To_City);
+ PARAMETER(PAR.To_State_State_Code);
+ PARAMETER(PAR.USR_City);
+ PARAMETER(PAR.From_State);
+ PARAMETER(PAR.Miles_to_next_stop);
+ {
+  //?USER: Processing if Data record not found
+
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ CASE;
+
+ // IF PGM.*Return code is *Record does not exist
+ IF PGM.*Return_code = 'Y2U0005';
+
+ // PGM.*Return code = CND.*Record does not exist
+ PGM.*Return_code = 'Y2U0005';
+
+ ENDIF;
+
+ ENDIF;
+
+}
+
+
+//?Modified code 10/21/09
+CASE;
+
+// IF PAR.Miles to next stop is Not Entered
+IF PAR.Miles_to_next_stop = *ZERO;
+
+// PAR.Must Ship Error = CND.Miles to Next=Zeros
+PAR.Must_Ship_Error = 'MTN';
+
+// PAR.Must Ship Date        USR = CND.not entered
+PAR.Must_Ship_Date_USR = *ZERO;
+
+// PAR.Must Ship Time        USR = CND.Not Entered
+PAR.Must_Ship_Time_USR = *ZERO;
+
+//?Modified code 10/21/09
+// IF *OTHERWISE
+IF *OTHERWISE;
+
+//?** Requested Delivery Date/Time
+//?** This will have Carrier Appt Dt/Tm if it is entered  E00495
+EXECUTE FUNCTION(CLC Must Ship Date     IF) TYPE(EXCINTFUN)                     AC1508788;
+PARAMETER(PAR.Requested_Delivery_Date);
+PARAMETER(PAR.Requested_Delivery_Time);
+PARAMETER(PAR.Miles_to_next_stop);
+PARAMETER(PAR.Must_Ship_Date_USR);
+PARAMETER(PAR.Must_Ship_Time_USR);
+{
+ //?Execute internal function
+
+ //?***** Change Log and Comments
+ DO;
+
+ //?***** CALCULATION LOGIC
+ //?1. Total legal run hours DIVIDED BY 24 = Whole Days (drop decimals)
+ //?2. Whole days TIMES 24 = Whole day hours
+ //?3. Total legal run hours MINUS Whole day hours = Hours Left
+ //?4. Hours left TIMES 10000 = Hours left time of day
+ //?               (i.e. 5 hrs * 10000 = 5:00:00 in the morning)
+ //?5. Requested delivery date MINUS Whole days = Must Ship Date
+ //?6. If Whole days = zeros, then deliver today
+ //?    Must Ship Date EQUALS Requested Delivery Date
+ //?7. IF Hours left time of day IS *GE Requested Delivery Time
+ //?    Hours left time of day MINUS Requested delivery time = Time to subtrct
+ //?    Must Ship Date MINUS 1 day = new Must Ship Date
+ //?    Midnight MINUS Time to subtract = new Must Ship Time
+ //?8. IF Hours left time of day IS *LT Requested Delivery Time
+ //?    Requested deliv time MINUS Hours left time of day = Must Ship Time
+ //?               (i.e. 6:00:00 MINUS 5:00:00 = 1:00:00 in the morning)
+ //?** E00495 LJB 09/24/2009
+ //?** Req Deliv Date/Time parms contain Carrier Appointment Date
+ //?** and either current time or midnight, if they were entered
+ //?** FP1251 LJB 12/26/2007
+ //?** Req Deliv Date/Time parms contain Deadline Depart Date
+ //?** and either current time or midnight.
+ //?** Traffic Dept adds the load time to the legal run hours so I have
+ //?** set the LOADTIME in the System Value file to zeros.
+ ENDDO;
+
+ EXECUTE FUNCTION(RTV Legal Run Miles DscRT) TYPE(RTVOBJ) FILE(PDLGCPP)          AC1456042;
+ PARAMETER(PAR.Miles_to_next_stop);
+ PARAMETER(PAR.Hours_Required);
+ {
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  QUIT;
+
+ }
+
+ EXECUTE FUNCTION(RTV Numeric Value      RT) TYPE(RTVOBJ) FILE(CADPREP)          AC1510877;
+ PARAMETER('LOADTIME');
+ PARAMETER(PAR.@Hours);
+ {
+  //?USER: Process Data record
+
+  // PAR.System Value Numeric = DB1.System Value Numeric
+  PAR.System_Value_Numeric = DB1.System_Value_Numeric;
+
+  QUIT;
+
+ }
+
+ // PAR.Hours Required = PAR.Hours Required + PAR.@Hours
+ PAR.Hours_Required = PAR.Hours_Required + PAR.@Hours;
+
+ // PAR.USR Time = PAR.Requested Delivery Time * CON.100 *
+ PAR.USR_Time = PAR.Requested_Delivery_Time * 100;
+
+ //?calc number of days and left over hours it takes to get to target city
+ DO;
+
+ // calculate # whole days
+ PAR.@Days_5 = PAR.Hours_Required / 24;
+
+ // hours in whole days
+ PAR.@Hours = PAR.@Days_5 * 24;
+
+ // Get hours left
+ PAR.@Hours = PAR.Hours_Required - PAR.@Hours;
+
+ //?convert hours left to time
+ // WRK.Time = PAR.@Hours * CON.10000 *
+ WRK.Time = PAR.@Hours * 10000;
+
+ //?** Calculate delivery date by backtracking by whole days
+ CASE;
+
+ // IF PAR.@Days 5 EQ WRK.ZERO
+ IF PAR.@Days_5 = WRK.ZERO;
+
+ //?** Target city is close enough to deliver today
+ // PAR.Must Ship Date        USR = PAR.Requested Delivery Date
+ PAR.Must_Ship_Date_USR = PAR.Requested_Delivery_Date;
+
+ //?** Calculate delivery date by backtracking by whole days
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ //?** Subtract whole days from requested delivery date
+ // WRK.@Days 5 = PAR.@Days 5 * CON.-1 *
+ WRK.@Days_5 = PAR.@Days_5 * -1;
+
+ // PAR.Must Ship Date        USR = PAR.Requested Delivery Date + WRK.@Days 5 *DAYS
+ PAR.Must_Ship_Date_USR = DATEINCR(PAR.Requested_Delivery_Date WRK.@Days_5 'DY' 1111111
+ 'NONE' 'N' 1);
+
+ ENDIF;
+
+ //?calculate must ship time
+ CASE;
+
+ // IF WRK.Time GE PAR.USR Time
+ IF WRK.Time >= PAR.USR_Time;
+
+ // WRK.Time = WRK.Time - PAR.USR Time
+ WRK.Time = WRK.Time - PAR.USR_Time;
+
+ // PAR.Must Ship Date        USR = PAR.Must Ship Date        USR + CON.-1 *DAYS
+ PAR.Must_Ship_Date_USR = DATEINCR(PAR.Must_Ship_Date_USR '-1' 'DY' 1111111 'NONE' 'N' 1);
+
+ // PAR.Must Ship Time        USR = CON.240000 - WRK.Time
+ PAR.Must_Ship_Time_USR = 240000 - WRK.Time;
+
+ //?calculate must ship time
+ // IF *OTHERWISE
+ IF *OTHERWISE;
+
+ // PAR.Must Ship Time        USR = PAR.USR Time - WRK.Time
+ PAR.Must_Ship_Time_USR = PAR.USR_Time - WRK.Time;
+
+ ENDIF;
+
+ ENDDO;
+
+}
+
+
+//?Set RST/MST to midnight if SSD <> today; otherwise init working fields
+CASE;
+
+// IF PAR.Scheduled Ship Date EQ PAR.Current System Date
+IF PAR.Scheduled_Ship_Date = PAR.Current_System_Date;
+
+// PAR.Must Ship Time Work   USR = PAR.Must Ship Time        USR
+PAR.Must_Ship_Time_Work_USR = PAR.Must_Ship_Time_USR;
+
+// PAR.Requested Deliv Time 6.0 = PAR.Must Ship Time        USR
+PAR.Requested_Deliv_Time_6_0 = PAR.Must_Ship_Time_USR;
+
+//?Set RST/MST to midnight if SSD <> today; otherwise init working fields
+// IF *OTHERWISE
+IF *OTHERWISE;
+
+// PAR.Must Ship Time Work   USR = CON.240000
+PAR.Must_Ship_Time_Work_USR = 240000;
+
+// PAR.Requested Deliv Time 6.0 = CON.240000
+PAR.Requested_Deliv_Time_6_0 = 240000;
+
+ENDIF;
+
+// PAR.Must Ship Error = CND.No Error
+PAR.Must_Ship_Error = *BLANK;
+
+//?Scheduled Ship <= Must Ship?     ERROR
+CASE;
+
+// IF PAR.Scheduled Ship Date LT PAR.Must Ship Date        USR
+IF PAR.Scheduled_Ship_Date < PAR.Must_Ship_Date_USR;
+
+// OR PAR.Scheduled Ship Date EQ PAR.Must Ship Date        USR
+OR ( PAR.Scheduled_Ship_Date = PAR.Must_Ship_Date_USR;
+
+// AND PAR.Current System Time LE PAR.Must Ship Time Work   USR
+AND PAR.Current_System_Time <= PAR.Must_Ship_Time_Work_USR );
+
+//?Scheduled Ship <= Must Ship?     ERROR
+// IF *OTHERWISE
+IF *OTHERWISE;
+
+// PAR.Must Ship Error = CND.Schd Shp not bef Must Shp
+PAR.Must_Ship_Error = 'SSD';
+
+ENDIF;
+
+//?Must Ship before Delivery?   ERROR
+CASE;
+
+// IF PAR.Must Ship Date        USR LT PAR.Requested Delivery Date
+IF PAR.Must_Ship_Date_USR < PAR.Requested_Delivery_Date;
+
+// OR PAR.Must Ship Date        USR EQ PAR.Requested Delivery Date
+OR ( PAR.Must_Ship_Date_USR = PAR.Requested_Delivery_Date;
+
+// AND PAR.Must Ship Time Work   USR LE PAR.Requested Deliv Time 6.0
+AND PAR.Must_Ship_Time_Work_USR <= PAR.Requested_Deliv_Time_6_0 );
+
+//?Must Ship before Delivery?   ERROR
+// IF *OTHERWISE
+IF *OTHERWISE;
+
+// PAR.Must Ship Error = CND.Must Shp not bef Delivery
+PAR.Must_Ship_Error = 'MSD';
+
+ENDIF;
+
+//?Must Ship before Now.    ERROR
+CASE;
+
+// IF PAR.Current System Date EQ PAR.Must Ship Date        USR
+IF PAR.Current_System_Date = PAR.Must_Ship_Date_USR;
+
+// AND PAR.Current System Time GT PAR.Must Ship Time Work   USR
+AND PAR.Current_System_Time > PAR.Must_Ship_Time_Work_USR;
+
+// PAR.Must Ship Error = CND.Must Ship before NOW
+PAR.Must_Ship_Error = 'NOW';
+
+ENDIF;
+
+ENDIF;
+
+ENDDO;
+

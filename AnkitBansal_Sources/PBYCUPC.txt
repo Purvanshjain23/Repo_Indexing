@@ -1,0 +1,252 @@
+/********************************************************************/
+/*  PROGRAM   - PBYCUPC                                             */
+/*  SYSTEM    - ORDER MANAGEMENT SYSTEM                             */
+/*  PROGRAM   - PRINT POST RB ADJUSTMENTS FOR A/R                   */
+/*  DATE      - 08/30/2016                                          */
+/*  SYNOPSIS -  1.  CALLS PRINT PROMPT PROGRAM.                     */
+/*              2.  CALLS PROGRAM TO POST ADJUSTMENT FILES.         */
+/*              3.  CALLS PROGRAM TO POST A/R MISC ENTRIES TO JDE   */
+/*                  AND DUPLICATES THE GENERATED SPOOL FILE TO      */
+/*                  TRIUMPHS OUTQ.                                  */
+/*                                                                  */
+/*  PARAMETERS:                                                     */
+/*     O    &RETURN     - RETURN CODE                               */
+/*     I    &APPLIC     - APPLICATION CODE                          */
+/*     I    &PGM        - CL PROGRAM TO SUBMIT                      */
+/*     B    &COMPNYN    - COMPANY NUMBER (PASSED)                   */
+/*     B    &COPYN      -  NO. OF COPIES (PASSED)                   */
+/*     I    &DESC       - PRINT PROGRAM DESCRIPTION (FOR PROMPT     */
+/*                         SCREEN)                                  */
+/*     B    &OUTQ       -  OUTPUT QUEUE                             */
+/*                         IF THIS IS BLANK AT START, PROMPT        */
+/*                         PGM IS CALLED; OTHERWISE, THE PRINT CL   */
+/*                         IS SUBMITTED WITHOUT PROMPTING           */
+/*     B    &HOLD       -  HOLD STATUS                              */
+/*     B    &SAVE       -  SAVE STATUS                              */
+/*     B    &NQSTAT     -  INDICATOR WHETHER MUST RUN IN NIGHT Q    */
+/*     B    &NIGHTQ     -  NIGHT JOB QUEUE                          */
+/********************************************************************/
+/*                                                                  */
+/* SDN440 RMC  8/05/2021                 */
+/*             FOR M3 - CHECK COMP VALUE M3LIVE INSTEAD OF M3ARMSC */
+/*             FOR E1 LIVE - REPLACE ARMISJDERB WITH ARMISJE1RB        */
+/*              AT END, CALL PGM E1LDXFR TO PUSH E1 BATCHES TO Z PROCESSOR */
+/*                FROM RUN LOG WORKFILE QTEMP/E1B9CPP                        */
+/*                Call program E1LRXFR to send an email of all*/
+/*                of the Batch Numbers in the E1B9CPP file    */
+/********************************************************************/
+ PBYCUPC:    PGM        PARM(&RETURN &APPLIC &PGM &COMPNYN &COPYN +
+                          &DESC &OUTQ &HOLD &SAVE &NQSTAT &NIGHTQ)
+/* PARMS                                                                      */
+        DCL    &RETURN     *CHAR   (7)           /* Return Code               */
+        DCL    &APPLIC     *CHAR   (06)          /* Application Code          */
+        DCL    &PGM        *CHAR   (10)          /* CL to Submit              */
+        DCL    &COMPNYN    *DEC                  /* Company Number (Passed)   */
+        DCL    &DESC       *CHAR   (25)          /* PRT Pgm Description       */
+        DCL    &COPYN      *DEC                  /* No COPIES  */
+        DCL    &OUTQ       *CHAR   (10)          /* Output Queue              */
+        DCL    &HOLD       *CHAR   (4)           /* Hold Status               */
+        DCL    &SAVE       *CHAR   (4)           /* Save Status               */
+        DCL    &NQSTAT     *CHAR   (01)          /* If MUST run in Night Q    */
+        DCL    &NIGHTQ     *CHAR   (10)          /* Night Job Queue           */
+        DCL    &COALL      *CHAR   (1)           /* COMPANY ALL */
+        DCL    &ERROR      *CHAR   (7) VALUE(' ')
+        DCL    &TFFLAG     *CHAR   (1) VALUE(' ')
+        DCL    &COMMAND    *CHAR   (512)
+                       /*   Command for Create Printer File Override */
+
+/* INTERNAL FIELDS                                                            */
+        DCL    &COPY       *DEC    (2 0)         /* Number of copies          */
+        DCL    &COMPANY    *DEC    (3 0)         /* Company Number            */
+        DCL    &PLT        *CHAR   (1)           /* PLANT COMPANY */
+        DCL    &ORG        *CHAR   (1)           /* ORGANIZATION  */
+             DCL        VAR(&COA) TYPE(*CHAR) LEN(3) /* ALPHA COMP  */
+             DCL        VAR(&LIVEM3) TYPE(*CHAR) LEN(1)   /* LIVE WITH M3 */
+             DCL        VAR(&LIVEE1) TYPE(*CHAR) LEN(1)   /* LIVE WITH E1 */
+             DCL        VAR(&DATAS) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&USER) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&GRPPRF) TYPE(*CHAR) LEN(10)
+ SDN440:     DCL        VAR(&SOURCE) TYPE(*CHAR) LEN(25) VALUE('OMS +
+                          Misc AR Post')
+             DCL        VAR(&BCHDSC) TYPE(*CHAR) LEN(25) VALUE('GL +
+                          Entries')
+             DCL        VAR(&RECIP)  TYPE(*CHAR) LEN(30)
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(40) VALUE('OMS +
+                          Misc AR Post to JDE')
+
+/* ERROR MESSAGE FIELDS                                                       */
+        DCL    &MSG        *CHAR   (512)         /* message                   */
+        DCL    &MSGID      *CHAR   (7)           /* message id                */
+        DCL    &MSGL       *DEC    (5 0)
+
+/********************************************************************/
+/*   INITIALIZE VARIABLES                                           */
+/********************************************************************/
+             CHGVAR     VAR(&RETURN) VALUE('       ')
+             CHGVAR     VAR(&COPY) VALUE(&COPYN)
+             CHGVAR     VAR(&COMPANY) VALUE(&COMPNYN)
+
+             RTVJOBA    USER(&USER)
+             RTVUSRPRF  USRPRF(&USER) GRPPRF(&GRPPRF)
+
+/********************************************************************/
+/*   MONITOR FOR ALL MESSAGES AT PROGRAM LEVEL                      */
+/********************************************************************/
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(MSGTRAP))
+
+/********************************************************************/
+/*  E000549                                                          */
+/*  EXECUTE THE PROGRAM TO RETRIEVE THE COMP VALULE:  LIVE WITH M3 AR MSC    */
+/*   GET USER DFT COMPANY IF PARM CO IS 000                    */
+              IF COND(&COMPANY *EQ 000) THEN(DO)
+             CALL       PGM(PMD4XFR) PARM('' &COA)
+             CHGVAR     VAR(&COMPANY) VALUE(&COA)
+             ENDDO
+             CALL       PGM(POMTXFR) PARM(&RETURN &COMPANY +
+                          'E1LIVE    ' &LIVEE1)
+             CALL       PGM(POMTXFR) PARM(&RETURN &COMPANY +
+                          'M3LIVE    ' &LIVEM3)
+/* SDN440 CHANGED ABOVE   'M3ARMSC   ' &LIVEM3)               */
+             ADDLIBLE   LIB(PRKFLIB) POSITION(*LAST) /* +
+                          PBL8REP,PLB9CPP PLCACPP  ARE HERE */
+             MONMSG     MSGID(CPF2103)
+
+/********************************************************************/
+/*   CALL PROMPT PROGRAM                                            */
+/********************************************************************/
+PRTPMT:
+             CALL       PGM(PDG0PVR) PARM(&RETURN &DESC &OUTQ &HOLD +
+                          &SAVE &COPY &NQSTAT &NIGHTQ &APPLIC)
+             CHGVAR     VAR(&COPYN) VALUE(&COPY)
+             IF         COND(&RETURN *NE ' ') THEN(GOTO +
+                          CMDLBL(USERQUIT))
+
+/********************************************************************/
+/*   SUBMIT PRINT CL PROGRAM                                        */
+/********************************************************************/
+  SUBMIT:
+             OVRPRTF    FILE(PRINT132) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(&HOLD) SAVE(&SAVE)
+             OVRPRTF    FILE(PBYBPFR$) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(&HOLD) SAVE(&SAVE)
+             OVRPRTF    FILE(PBYAPFR$) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(&HOLD) SAVE(&SAVE)    /* M3 POST REPORT */
+
+             /* CREATE AVAILABLE TO POST AND PRINT REPORT  */
+             CALL       PGM(PBYDXFR) PARM(' ' &LIVEM3)
+
+/**********************************************************************/
+/*   M3 MISC POST PROCESSING:  IF LIVE/PARALLEL  WITH M3   - E000549      */
+/*     8/136/2015 RMC   DO THIS BEFORE ORIG BECAUSE IT UPDATES ARBECPL5  */
+/**********************************************************************/
+ LIVEYEP:    IF         COND(&LIVEM3 *EQ 'Y' *OR &LIVEM3 *EQ 'P')  THEN(DO)
+
+/*  EXECUTE THE PROGRAM TO CREATE THE M3 GL INTERFACE TABLES:        */
+/*      PLB9CPP AND PLCACPP IN QTEMP. AFTER M3ARMSC COPY TO     */
+/*      M3IFLIB, COPY THE DETAIL FIRST, THEN THE HEADER TABLE   */
+/* GET THE M3 INTERFACE LIBRARY                              */
+             CALL       PGM(PBSHXFR) PARM(' '  &DATAS)
+
+
+             CRTDUPOBJ  OBJ(PLB9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(PLCACPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+             CALL       PGM(M3ARMSCRB) PARM(&ERROR &TFFLAG &LIVEM3)
+
+             CPYF       FROMFILE(QTEMP/PLCACPP) +
+                          TOFILE(&DATAS/PLCACPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+
+             CPYF       FROMFILE(QTEMP/PLB9CPP) +
+                          TOFILE(&DATAS/PLB9CPP) MBROPT(*ADD)
+             MONMSG     MSGID(CPF2817)
+
+             ENDDO
+/*                                                                    */
+/*                                                                    */
+/**********************************************************************/
+/*   ORIGINAL PROCESSING:  IF NOT LIVE WITH M3   - E000549      */
+/**********************************************************************/
+/* CALL PROGRAM TO POST TO G/L AND PRINT A DUPLICATE SPOOL COPY  */
+/* ON TRIUMPH'S OUTQ.                                            */
+
+ LIVENO:     IF         COND(&LIVEM3 *EQ 'N' *OR &LIVEM3 *EQ 'P') THEN(DO)
+
+/*                                                                   */
+/*  CREATE E1 RUN LOG WORKFILE - TO USER LATER TO PUSH BATCHES TO E1   */
+/*                                                                   */
+             CRTDUPOBJ  OBJ(E1B9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+
+/*           CALL       PGM(ARMISJDERB) PARM(&ERROR &TFFLAG)  OLD JDE  */
+             CALL       PGM(ARMISJE1RB) PARM(&ERROR &TFFLAG &LIVEE1)
+
+/*****************************************************************************/
+
+/*  EXECUTE THE PROGRAM TO READ THE QTEMP RUN LOG HEADER         */
+/*      E1B9CPP AND PUSH THE BATCHES TO E1                      */
+/*                                                                   */
+
+             CALL       PGM(E1LDXFR) PARM(&RETURN)
+/**********************************************************************/
+/*                                                                   */
+/*  Send message to user that the batch is ready in JDE              */
+             CHGVAR     VAR(&RECIP) VALUE(&USER)
+
+             CALL       PGM(E1LRXFR) PARM(&RETURN &SOURCE &BCHDSC +
+                          &RECIP &SUBJECT)
+
+             DLTF       FILE(QTEMP/E1B9CP*)
+             MONMSG     MSGID(CPF2105 CPF2125)
+
+
+             ENDDO             /* END LIVENO  */
+
+/**********************************************************************/
+
+/* If there was Triumph data, dup the report to TF's outq   */
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+             IF         COND(&TFFLAG *EQ 'Y' ) THEN(DO)
+             DUPSPLF    FILE(PRINT132) OUTQ(TFPRTDUP) SPLNBR(*LAST) +
+                          HOLD(*NO)
+             ENDDO
+             ENDDO
+
+/* IF ORGANIZATION IS DAILY'S, DUP THE REPORT TO DAILY'S OUTQS */
+             CALL       PGM(PMOVXFR) PARM(' ' &COMPANY &PLT &ORG)
+
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+             IF         COND(&ORG *EQ 'D') THEN(DO)
+             DUPSPLF    FILE(PRINT132) OUTQ(DMPRTDUP) SPLNBR(*LAST) +
+                          HOLD(*NO)
+             DUPSPLF    FILE(PRINT132) OUTQ(DSPRTDUP) SPLNBR(*LAST) +
+                          HOLD(*NO)
+             ENDDO
+             ENDDO
+
+             DLTOVR     FILE(PBYAPFR$)
+             DLTOVR     FILE(PBYBPFR$)
+             DLTOVR     FILE(PRINT132)
+             GOTO       CMDLBL(END)
+
+/*-------------------------USER QUIT--------------------------------*/
+ USERQUIT:   CHGVAR     VAR(&RETURN) VALUE('Y2U0005')
+             GOTO       CMDLBL(END)
+
+/*----------------------RECEIVE MESSAGES----------------------------*/
+
+ MSGTRAP:    RCVMSG     MSGTYPE(*EXCP) MSGDTA(&MSG) MSGDTALEN(&MSGL) +
+                          MSGID(&MSGID)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(END))
+
+             SNDPGMMSG  MSGID(&MSGID) MSGF(QCPFMSG) MSGDTA(%SST(&MSG +
+                          1 &MSGL)) MSGTYPE(*ESCAPE)
+             MONMSG     MSGID(CPF0000) EXEC(GOTO CMDLBL(END))
+
+ END:        ENDPGM

@@ -1,0 +1,1641 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * ENVIRONMENT: Pork Division
+      * SYSTEM:      HPS---Datamart
+      * PROGRAM:     HP220 Build Weekly Group Detail
+*     *                    (Nursery/Grow Finish Only)
+      * PROGRAMMER:  LeAnne Fedor
+      * CREATED:     06/29/00
+      *
+      *  FUNCTION:   This function writes a weekly record for each group that was open
+      *              during the week.
+      *
+      *              If the build function was submitted with a parm value of H=History,
+      *                 this program rebuilds the entire 'weekly' file starting
+      *                 with the 'history' dates in the data area DAFIN
+      *
+      *              If the build function was submitted with a parm value of ' '=Current
+      *                 this program writes additional 'weekly' records to the file starting
+      *                 with the 'current' dates in the data area DAFIN
+      *
+      ****************************************************************************************
+      * Modifications:
+      ****************************************************************************************
+      * Date      Programmer
+      *
+      * 10/23/00  LeAnne Fedor
+      *           Added logic to populate new Datamart 'Daily Dead' file.
+      *           Also, recompiled for new field 'load type' that was added to the sales
+      *           movement head file.
+      *
+      * 10/25/00  LeAnne Fedor
+      *           We replaced the 2 'daily dead and DOA head' fields in the Datamart 'Weekly
+      *           Group' file with the following six fields:
+      *
+      *              weekly daily dead                 cumulative daily dead
+      *              weekly DOA head from sales        cumulative DOA head from sales
+      *              weekly DOA head from transfers    cumulative DOA head from transfers
+      *
+      *           The users wanted the values in these fields to match the DOA values on the
+      *           HPS report HP643-Deaths and Cull Sales by Week Report. Report HP643 uses
+      *           'received' date of the movement to assign the deads and DOAs to weeks.
+      *
+      *           The generic program 'HPMOVE' which I was using to populate the two existing
+      *           'daily dead and DOA head' fields, extracted data based on the 'date' in
+      *           the Movement Event file. Tracking all the logic back, I found that the
+      *           'shipped date' was used for both sales and transfer movements when the
+      *           group was the origin group. So, it was not feasible to modify HPMOVE to
+      *           return the new fields that I required.....since it would be returning
+      *           data to me based on 'shipped' date instead of 'received' date.
+      *
+      *           So, I will populate the six new fields by accessing the files directly
+      *           instead of using the generic program HPMOVE to return data.
+      *
+      * 10/31/00  LeAnne Fedor
+      *           Until the OMS Calendar file is changed to allow retrieval of
+      *           the PIC date/year/week, we need to manipulate the values
+      *           returned from the call to the Calendar file.
+      *
+      * 12/18/00  LeAnne Fedor
+      *           Added new 'stage of phase' field.
+      *
+      * 12/20/00  LeAnne Fedor
+      *           Added new 'last 7-week average dead' field.
+      *
+      * 01/23/01  LeAnne Fedor
+      *           The OMS Calendar file now contains the HPS Pic date,
+      *           HPS calendar year and HPS calendar week. These fields
+      *           will now be retrieved from the OMS calendar file.
+      *
+      * 01/25/01  LeAnne Fedor
+      *           Changed  'stage of phase' logic for Nurseries.
+      *
+      * 02/05/01  LeAnne Fedor
+      *           Changed hardcoded logic to now include 1998 data. Previously, we only
+      *           started with the first week of 1999.
+      *           Also, added weekly and cumulative 'market sale head'.
+      *
+      * 02/07/01  LeAnne Fedor
+      *           Added logic to access the new data area and perform either
+      *           a) history or b) current processing. Removed hard-coding of dates.
+      *           Dates are now retieved from the new data area.
+      *
+      * 03/12/01  LeAnne Fedor
+      *           Removed all 'cumulative' fields.
+      *
+      * 03/22/01  LeAnne Fedor
+      *           Added back in logic to populate 'beginning inventory'. This logic was
+      *           inadvertantly removed with the 'cumulative' changes above.
+      *
+      * 06/11/01  LeAnne Fedor
+      *           Hardcoded 'accounting quarter'.
+      *
+      * 11/06/01  LeAnne Fedor
+      *           Added additional feed logic. Now, any tickets dated prior to the first
+      *           week the group is open will be lumped in with the tickets for that first
+      *           week.  And, any tickets after the week that the group disposes will be
+      *           lumped into the dispose week.
+      *
+      * 01/29/02  LeAnne Fedor
+      *           Replaced hardcoded 'accounting quarter' logic with our new generic
+      *           program.
+      *
+      * 02/28/02  LeAnne Fedor
+      *           Increased length of data area DAFIN.
+      *
+      * 08/01/02  LeAnne Fedor
+      *           Added 'destroyed head/pounds' fields.
+      *
+      * 08/01/02  LeAnne Fedor
+      *           Increased DAFIN data area by 1. 'Days' is now 3 long instead of 2.
+      *
+      * 08/06/02  LeAnne Fedor
+      *           Added a new 8,0 version of 'week-ending date' to the file so that we
+      *           can do queries, etc. more easily over the Datamart BGF Weekly Production
+      *           file.
+      *
+      * 08/07/02  LeAnne Fedor
+      *           Added two new fields:
+      *             weekly transfer DOA head
+      *             weekly transfer KOA head
+      *
+      * 12/02/02  LeAnne Fedor
+      *           When I was adding 'stage of phase' to another file, I realized that I
+      *           was using the 'rounded-up' weeks instead of the actual weeks when I was
+      *           creating the concatenated alpha weeks-days field. So, I changed the code
+      *           to use the 'not rounded-up' weeks.
+      *
+      * 12/13/02  LeAnne Fedor
+      *           To allow us to use the Weekly Group file to populate the Reported Daily
+      *           Activity file in a subsequent build step, we needed the data for the
+      *           'current' week. So we now process thru the Saturday after the system date.
+      *           But, we do not send these 'partial' week records to the Datamart...we will
+      *           only send the 'full week' records.
+      *
+      * 02/10/03  LeAnne Fedor
+      *           Added 2 new fields:
+      *                     days of growth
+      *                     weeks of growth
+      *           Changed the calc logic and field text on 2 fields:
+      *             wbphsstg is now 'stage of growth' instead of 'stage of phase'
+      *             wbpwkday is now 'alpha growth weeks-days' instead of
+      *                             'alpha phase weeks-days'
+      *
+      * 02/18/03  LeAnne Fedor
+      *           Added hardcoded logic for Health Care Code 'PRRS'.
+      *
+      * 04/23/03  LeAnne Fedor
+      *           Added 'version' parm on call to generic 'stage of growth' program.
+      *
+      * 10/15/03  LeAnne Fedor
+      *           Groups that were in 'create' status were calculating a goofy 'days in phase'
+      *           value. So, changed the code to check the 'open date' before calculating
+      *           'days in phase'.
+      *
+      * 03/18/03  LeAnne Fedor
+      *           Added fields:
+      *                weekly transfer doa pounds
+      *                weekly transfer koa pounds
+      *                weekly cull sale doa head
+      *                weekly cull sale doa pounds
+      *                weekly mrkts sale doa head
+      *                weekly mrkts sale doa pounds
+      *
+      * 08/09/04  Alice
+      *           Corrected problem with accumulating TOO much feed in the $priorfeed
+      *           logic.  Also changed the file READ in the Feed subroutines to SETLL on the
+      *           file with the Week begin date and to stop the DOU
+      *           when the feed ticket date became GT the Week End Date.
+      *
+      * 10/11/04  LeAnne Fedor
+      *           Added a 'submitted flag' position to the data area DAFIN.
+      *
+      * 10/27/04  LeAnne Fedor
+      *           Recompile. New field "3-week average dead" added to file
+      *           Datamart FIN: Weekly Group Detail. Also, standardized 2 key field
+      *           names.
+      *
+      * 02/01/05  LeAnne Fedor
+      *           Recompile only. New fields (Sire Line Company and Prime Line) added
+      *           to Datamart Group Header file.
+      *
+      * 07/05/05  LeAnne Fedor
+      *           Added 8 fields which will be used in paying "Royalties" on sire line
+      *           providers. These fields are only populated for Fully Paid, non-cull
+      *           sales:
+      *                weekly sold head-carcass
+      *                weekly sold lbs -carcass
+      *                weekly sold head-live
+      *                weekly sold lbs -live
+      *                weekly yard dead head
+      *                weekly yard dead pounds
+      *                weekly condemned head
+      *                weekly condemned pounds
+      *
+      * 08/25/05  LeAnne Fedor
+      *           Added a new field "Man Hours" to Weekly Group Detail file. This field
+      *           is initialized to zero in this program; it is populated in HP216-Build
+      *           Reported Daily Activity and Update Weekly Group Detail.
+      *
+      * 04/27/06  LeAnne Ramsey
+      *           Changed the "NC" (not-complete sales movement) logic. We
+      *           now handle NC like "FP" (fully paid) instead of like
+      *           "SH" (shipped).
+      *
+      * 08/02/06  LeAnne Ramsey
+      *           Recompile only. Two new fields (ration 8 feed pounds, ration paylean flag)
+      *           added to Datamart Group Header file.
+      *
+      * 12/11/06  LeAnne Ramsey
+      *           For the HPS Royalty Payments, we will change the definition of
+      *           Weekly Sold Head--Carcass and Weekly Sold Pounds--Carcass:
+      *             FROM: Market Sales with a Payment Type of "C"arcass
+      *             TO:   1) Market Sales with a Payment Type of "C"arcass when the
+      *                      Customer is Guymon Plant (Customer = 360516) AND
+      *                   2) All Market Sales for all customers other than Guymon Plant
+      *
+      * 08/10/07  LeAnne Ramsey
+      *           Recompile only. New "target" fields renamed in the Datamart Group
+      *           Header file.
+      *
+      * 09/21/07  LeAnne Ramsey
+      *           Recompile only. New "target" fields added/removed in the Datamart Group
+      *           Header file.
+      *
+      * 08/08/08  LeAnne Ramsey
+      *           No code changes. Just wanted to document that the "Royalty" data that
+      *           we generate for Greg Eckardt NO LONGER comes from Datamart/Cognos.
+      *           We have left all the "Royalty" code in this program because we do not
+      *           know if any COGNOS users are using it for something other than "Royalties".
+      *           BUT, it will no longer match the "Royalty" data we are giving to Eckardt.
+      *           Greg now has to have data extracted by Kill Date instead of Received Date
+      *           and he has to have true "period" dates instead of the "weekly" data that
+      *           is in this file.
+      *
+      * 05/24/10  LeAnne Ramsey
+      *           Added 2 fields to HPPF075-Weekly Group Detail:
+      *           1) WBWEDTMDCY-Week Ending Date in date format mm/dd/ccyy
+      *           2) WBPAJTIHD -Placement Adjusted Transfer In Head
+      *              We will only populate WBPAJTIHD on the first record for a group.
+      *
+      * 06/02/10  LeAnne Ramsey    (E778)
+      *           For our new field WBPAJTIHD -Placement Adjusted Transfer In Head, we need
+      *           to change the logic to populate it only on the first record for a group
+      *           that has Adjusted Transfer In Head. Since the first record for a group may
+      *           be when it is still in Create status, our first record approach was not
+      *           working right for Cognos.
+      *
+      * 10/18/10  LeAnne Ramsey  (E1079)
+      *           Recompile only. Sire Line Company is now 2-characters instead
+      *           of one.
+      *
+      * 05/20/11  LeAnne Ramsey (E1557)
+      *           Recompile only. Added Yard Dead to HSJ085E.
+      *
+      * 03/07/14  LeAnne Ramsey (C3401)
+      *           Suzanna Groom was reporting that some Farms/Groups had Weeks of Growth
+      *           data that was longer that in HPS. I looked at the data and found
+      *           invalid data (weekly records for groups long before they actually
+      *           opened). This invalid data showed up from the beginning.
+      *           So, I am adding logic to exclude the CR=Created groups...I
+      *           think that is the problem.  If not, I'll try something else.
+      *
+      * 10/14/16  Barb Gutierrez
+      *           Recompile only. Added fields Sold days in phase, Avg Sold days in phase,
+      *           Wgt open date, and company number to HPPF034.         E6136
+      *
+      * 03/25/20  Danny Nguyen - P405 - Farm Number Increase
+      *           Recompile only. Increased Bin Code (@@BNCD) in HSPREF file from 5A to 6A.
+      *
+      * 05/10/22 Eric L SDN736 Recompiled ticket nbr increase (TKNO & RTNO 7.0 TO 9.0)
+      /EJECT
+      ****************************************************************************************
+      * File Specifications
+      ****************************************************************************************
+      *
+     Fhppf034   if   e           k disk
+      *    Hog group
+      *
+      *
+     Fhsl038e   if   e           k disk
+      *   Feed ticket detail
+      *
+      *
+     Fhsl064i   if   e           k disk
+      *   Check detail
+      *
+      *
+     Fhsl065c   if   e           k disk
+      *    Check Adjustments
+      *
+      *
+     Fhsp066    if   e           k disk
+      *    Sale type codes
+      *
+      *
+     Fhsl068d   if   e           k disk
+      *  Killed/dead hogs
+      *
+      *
+     Fhsj075g   if   e           k disk
+      *  Transfer movement detail + Transfer movement header
+      *
+      *
+     Fhsj085e   if   e           k disk
+      *  Sale movement deatail + Sales movement header
+      *
+      *
+     Fhsp112    if   e           k disk
+      *  Farm health status
+      *
+      *
+     Fhsl112b   if   e           k disk    rename(hfrec:hfrecb)
+      *  Farm health status
+      *
+      *
+     Fhplf075f  uf   e           k disk    rename(wbrec:wbrecf) prefix(p1)
+      *  Datamart FIN: Weekly group detail
+      *
+      *
+     Fhppf075   o    e           k disk
+      *  Datamart FIN: Weekly group detail
+      *
+      /EJECT
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  Named Constants
+      *---------------------------------------------------------------
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * Arrays and Tables
+      ****************************************************************
+      *
+      ****************************************************************
+      * Standalone fields
+      ****************************************************************
+      *
+      *
+      * Parm fields
+      *
+     D xxgrwwk         s                   like(wbgrwwk)
+     D xxalphstg       s                   like(wbphsstg)
+     D xxnumstg        s              3  0
+     D xxversion       s              4
+      *
+     D xxccyymmdd      s              8  0
+     D xxsatdt         s              8  0
+     D xxcdyr          s              4  0
+     D xxcdwk          s              2  0
+      *
+     D xxperiod        s                   like(wbacpe)
+     D xxquarter       s                   like(wbacqr)
+      *
+     D xxprocfl        s              1a
+     D xxwk            s                   like(wbcdwk)
+     D xxpigday        s             11  0
+     D xxcyymmddi      s              7  0
+     D xxcyymmddo      s              7  0
+     D xxcocd          s              3  0
+     D xxreturn        s              7a
+     D xxjulian        s              5  0
+     D xxday           s              1a
+      *
+      *
+      * Define parms for the generic movement program
+      *
+     D zzcymd          s              8  0
+      *
+     D @@nu50          s              5  0
+     D gpihd           s                   like(@@nu50)
+     D pinhd           s                   like(@@nu50)
+     D tinhd           s                   like(@@nu50)
+     D tisphd          s                   like(@@nu50)
+     D tidphd          s                   like(@@nu50)
+     D pouhd           s                   like(@@nu50)
+     D touhd           s                   like(@@nu50)
+     D tosphd          s                   like(@@nu50)
+     D todphd          s                   like(@@nu50)
+     D rinhd           s                   like(@@nu50)
+     D rouhd           s                   like(@@nu50)
+     D qinhd           s                   like(@@nu50)
+     D qouhd           s                   like(@@nu50)
+     D morhd           s                   like(@@nu50)
+     D inahd           s                   like(@@nu50)
+      *
+     D @@nu92          s              9  2
+     D pinlb           s                   like(@@nu92)
+     D tinlb           s                   like(@@nu92)
+     D tisplb          s                   like(@@nu92)
+     D tidplb          s                   like(@@nu92)
+     D poulb           s                   like(@@nu92)
+     D toulb           s                   like(@@nu92)
+     D tosplb          s                   like(@@nu92)
+     D todplb          s                   like(@@nu92)
+     D rinlb           s                   like(@@nu92)
+     D roulb           s                   like(@@nu92)
+     D qinlb           s                   like(@@nu92)
+     D qoulb           s                   like(@@nu92)
+     D morlb           s                   like(@@nu92)
+      *
+      *
+      * Control/flag fields
+      *
+     D costfl          s              1
+     D first           s              1
+      *
+      *
+      * Workfields
+      *
+      *
+     D wkavglb         s             15  5
+     D wkdoalb         s                   like(wbwtdolb)
+     D wkfdlb          s             15  0
+     D wkday           s              1  0
+     D wkwk            s              2  0
+     D wkalphaday      s              1
+     D wkalphawk       s              2
+      *
+     D wkhccd          s                   like(hfhccd)
+     D lastprrsdt      s              8  0
+     D firstprrsdt     s              8  0
+     D lastprrsst      s                   like(hfhsfl)
+      *
+      *
+      * Save fields
+      *
+     D svhgcd          s                   like(hghgcd)
+      *
+      * Save fields for previous week's data
+      *
+     D svwtisphd       s                   like(@@nu50)
+     D svwtidphd       s                   like(@@nu50)
+      *
+     D svwtisplb       s                   like(@@nu92)
+     D svwtidplb       s                   like(@@nu92)
+      *
+     D svwtosphd       s                   like(@@nu50)
+     D svwtodphd       s                   like(@@nu50)
+      *
+     D svwtosplb       s                   like(@@nu92)
+     D svwtodplb       s                   like(@@nu92)
+      *
+     D svwinahd        s                   like(@@nu50)
+     D svwbihd         s                   like(@@nu50)
+     D svwgpihd        s                   like(@@nu50)
+      *
+      *
+      * Workfields for dates
+      *
+     D wkwkbegdt       s                   like(wbwedt)                         Week begin date
+     D wkwkenddt       s                   like(wbwedt)                         Week end date
+     D wkprevsat       s                   like(wbwedt)                         Saturday date
+     D wknextsat       s                   like(wbwedt)                         Saturday date
+     D wktoday         s              8  0
+     D wknulldt        s                   like(wbwedt) inz(D'0001-01-01')      Null date
+      *
+     D wk80begdt       s              8  0
+     D wk80enddt       s              8  0
+     D wkccyymmdd      s              8  0
+     D wkyymmdd        s              6  0
+      *
+     D wkcymdiso       s               D   datfmt(*iso)
+      *
+      *
+      ****************************************************************
+      * Data Structures
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard database file information data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTDBGR (record format: FDBCKD)
+     D dbfeed        e ds                  extname(utdbfr)
+      *
+      *---------------------------------------------------------------
+      * Definition for external data area
+      *---------------------------------------------------------------
+     D
+     Ddafin            ds                  dtaara(dafin)
+     D  dahwkbegdt             6     13  0
+     D  dahwkenddt            15     22  0
+     D  dacwkbegdt            29     36  0
+     D  dacwkenddt            38     45  0
+     D  dadays                47     49  0
+     D  dasbmfl               62     62
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Read the Datamart Group Header file and process all records.
+      *
+     C                   dou       *in90 = *on                                  Main do loop
+     C                   read      hppf034                                90
+     C                   if        *in90 = *off and hggscd <> 'CR'              If not EOF
+      *
+      * For each group:
+      *   1) Set a first time flag for the group
+      *   2) Clear the weekly output record
+      *   3) Initialize the weekly processing dates
+      *   4) Determine the date of the first PRRS record for the farm
+      *
+     C                   move      yes           first
+     C                   clear                   wbrec
+     C                   exsr      $initweeks
+     C                   exsr      $farmprrs
+      *
+      *
+      * Process weekly records for this group as long as:
+      *   a) the disposed date is zero or the dispose date falls on or after
+      *      the week beginning date, and
+      *   b) the week ending date falls on or before the next Saturday date that ends
+      *      this run of the data.
+      *
+     C                   dow       (hgdsdt = wknulldt or hgdsdt >= wkwkbegdt)   Do week loop
+     C                             and wkwkenddt <= wknextsat
+      *
+      * All records will be considered 'full week' records except for those
+      * in the 'current' week...the days between the Saturday 'previous' to
+      * the system date and the 'next' Saturday after the system date.
+      *
+     C                   if        wkwkenddt <= wkprevsat
+     C                   move      yes           wbfullwk
+     C                   else
+     C                   move      no            wbfullwk
+     C                   endif
+      *
+      * If the group was created/open before the WeekEndingDate, process it.
+      * (Note: Since HGOPDT is a date format field here, a create date of zero will
+      *  show up as the null date.)
+      *
+     C                   if        hgopdt <= wkwkenddt                          If process
+      *
+      *
+      * The first time through this for a new group:
+      *  1) Retrieve movement values up through the week prior to the starting week
+      *  3) Setup fields that are a direct map from the Group Header
+      *  4) Retrieve data and calculate the 'adjusted transfers in'
+      *
+     C                   if        first = yes
+     C                   exsr      $startmove
+     C                   exsr      $directmap
+     C                   exsr      $adjtran
+     C                   move      no            first
+     C                   endif
+      *
+      * Special processing for the first and last week for a group:
+      *
+      * If the group opened this week, retrieve Feed Tickets prior to this week.
+      *
+     C                   if        hgopdt >= wkwkbegdt and hgopdt <= wkwkenddt
+     C                   exsr      $priorfeed
+     C                   endif
+      *
+      * If the group disposed this week, accumulate any/all feed for subsequent
+      * weeks.
+     C                   if        hgdsdt >= wkwkbegdt and hgdsdt <= wkwkenddt
+     C                   exsr      $afterfeed
+     C                   endif
+      *
+      * Populate all date fields (year/week/period, etc) and calculate
+      * days in the phase.
+      *
+     C                   exsr      $dates
+      *
+      * Retrieve group info for:
+      *   1) movements
+      *   2) sales
+      *   3) DOAs from transfers out
+      *      transfers out to BGF groups
+      *   4) daily dead
+      *   5) feed
+      *   6) pig days
+      *
+     C                   exsr      $movements
+     C                   exsr      $sales
+     C                   exsr      $tranout
+     C                   exsr      $dailydead
+     C                   exsr      $feed
+     C                   exsr      $pigdays
+      *
+      * Determine PRRS status.
+      *
+     C                   exsr      $wkprrs
+      *
+      * Write the group record
+      *
+     C                   write     wbrec
+      *
+      *
+      * Clear fields in the output record that change weekly.
+      *
+     C                   z-add     0             wbwfdlb
+      *
+     C                   z-add     0             wbwcuhd
+     C                   z-add     0             wbwculb
+     C                   z-add     0             wbwcuam
+      *
+     C                   z-add     0             wbwslhd
+     C                   z-add     0             wbwsllb
+      *
+     C                   z-add     0             wbwlivhd
+     C                   z-add     0             wbwlivlb
+      *
+     C                   z-add     0             wbwcarhd
+     C                   z-add     0             wbwcarlb
+      *
+     C                   z-add     0             wbwydhd
+     C                   z-add     0             wbwydlb
+      *
+     C                   z-add     0             wbwcdhd
+     C                   z-add     0             wbwcdlb
+      *
+     C                   z-add     0             wbpigday
+     C                   z-add     0             wbmanhr
+     C                   z-add     0             wbphsday
+     C                   z-add     0             wbphswk
+     C                   move      *blank        wbphsstg
+      *
+     C                   z-add     0             wbwtihd
+     C                   z-add     0             wbwishd
+     C                   z-add     0             wbwidhd
+      *
+     C                   z-add     0             wbwtilb
+     C                   z-add     0             wbwislb
+     C                   z-add     0             wbwidlb
+      *
+     C                   z-add     0             wbwtohd
+     C                   z-add     0             wbwoshd
+     C                   z-add     0             wbwodhd
+     C                   z-add     0             wbwobhd
+      *
+     C                   z-add     0             wbwtolb
+     C                   z-add     0             wbwoslb
+     C                   z-add     0             wbwodlb
+      * Daily dead
+     C                   z-add     0             wbwkdhd
+     C                   z-add     0             wbwkdlb
+      *
+      * Daily dead destroyed
+      *
+     C                   z-add     0             wbwdkdhd
+     C                   z-add     0             wbwdkdlb
+      *
+      * Transfer DOA/KOA
+     C                   z-add     0             wbwtdohd
+     C                   z-add     0             wbwtdolb
+      * Transfer DOA
+     C                   z-add     0             wbwtdahd
+     C                   z-add     0             wbwtdalb
+      * Transfer KOA
+     C                   z-add     0             wbwtkahd
+     C                   z-add     0             wbwtkalb
+      * Sales DOA
+     C                   z-add     0             wbwsdohd
+     C                   z-add     0             wbwsdolb
+      * Cull sale DOA
+     C                   z-add     0             wbwcdahd
+     C                   z-add     0             wbwcdalb
+      * Market sale DOA
+     C                   z-add     0             wbwmdahd
+     C                   z-add     0             wbwmdalb
+      * Inventory adj
+     C                   z-add     0             wbwiahd
+      * Ending inventory
+     C                   z-add     0             wbeihd
+      *
+      * Placement Adjusted Transfer In Head
+      * (Note: The field will be populated on the first record for a Group that
+      * has Adjusted Transfer In Head. It will be zero on all other records for
+      * that group.)
+     c                   z-add     0             wbpajtihd
+     C                   endif                                                  If process
+      *
+      * Calculate the beginning/ending dates for the 'next' week.
+      *
+     C                   exsr      $nextweek
+      *
+     C                   enddo                                                  Do week loop
+      *
+      * If you processed this Group, execute the logic to populate the
+      * Placement Adjusted Transfer In Head.
+      *
+     C                   if        first = no
+     C                   exsr      $placement
+     C                   endif
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do loop
+      *
+      * EOF processing
+      *
+     C                   seton                                        lr
+      /EJECT
+      *-------------------------------------------------------------------------
+      * Initialize beginning and ending dates for weeks
+      *-------------------------------------------------------------------------
+      *
+      * The beginning and ending dates for the first week of processing
+      * are initialized from the data area.
+      *
+     C     $initweeks    begsr
+      *
+     C                   select
+     C                   when      xxprocfl = 'H'
+     C                   movel     dahwkbegdt    wkwkbegdt
+     C                   movel     dahwkenddt    wkwkenddt
+     C                   z-add     dahwkbegdt    wk80begdt
+     C                   z-add     dahwkenddt    wk80enddt
+      *
+     C                   when      xxprocfl = ' '
+     C                   movel     dacwkbegdt    wkwkbegdt
+     C                   movel     dacwkenddt    wkwkenddt
+     C                   z-add     dacwkbegdt    wk80begdt
+     C                   z-add     dacwkenddt    wk80enddt
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------
+      * Calculate the beginning and ending dates for the next week
+      *-------------------------------------------------------------------------
+      *
+     C     $nextweek     begsr
+      *
+      * Always calculate the beginning date of the next week as 1 day after
+      * the ending date of the current week.
+      *
+     C     wkwkenddt     adddur    1:*days       wkwkbegdt
+      *
+      *
+      * Always calculate the ending date of the next week as 6 days after the
+      * beginning date just calculated.
+      *
+     C     wkwkbegdt     adddur    6:*days       wkwkenddt
+      *
+      *
+      * To access the HPS data, you will also need these week dates in
+      * 'non-date' formats.
+      *
+     C                   move      wkwkbegdt     wk80begdt
+     C                   move      wkwkenddt     wk80enddt
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      *  Calculate adjusted transfer in values
+      *----------------------------------------------------------------
+      *
+     C     $adjtran      begsr
+      *
+      * Retrieve the total transfers in for the group.
+      *
+     C                   z-add     99999999      zzcymd
+     C                   call      'HPMOVE'      plist01
+     C                   z-add     tinhd         wbajtihd
+     C                   z-add     tinlb         wbajtilb
+      *
+      * Calculate the 'cut-off' date as 7 days after the group's open date.
+      *
+     C     hgopdt        adddur    7:*days       wkcymdiso
+     C                   move      wkcymdiso     zzcymd
+      *
+      * Retrieve the 'transfer out head and pounds' as of the cutoff date
+      * subtract them from the transfer in values retrieved above.
+      *
+     C                   call      'HPMOVE'      plist01
+     C                   sub       touhd         wbajtihd
+     C                   sub       toulb         wbajtilb
+      *
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------------------
+      * Accumulate feed from all tickets dated prior to this first week of group processing
+      *-------------------------------------------------------------------------------------
+      *
+     C     $priorfeed    begsr
+      *
+     C     hghgsn        setll     hsl038e
+      *
+     C                   dou       *in91 = *on or fdtkdt >= wk80begdt           Do prior loop
+     C     hghgsn        reade     hsl038e                                91
+     C                   if        *in91 = *off and fdtkdt < wk80begdt          If prior
+      *
+     C                   add       fdfdlb        wkfdlb
+      *
+     C                   endif                                                  If prior
+     C                   enddo                                                  Do prior loop
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------------------
+      * Accumulate feed from all tickets dated after the week the group disposed
+      *-------------------------------------------------------------------------------------
+      *
+     C     $afterfeed    begsr
+      *
+      * Position on Group and Week-ending Date
+      *
+     C     key06         setgt     hsl038e
+      *
+     C                   dou       *in91 = *on                                  Do after loop
+     C     hghgsn        reade     hsl038e                                91
+     C                   if        *in91 = *off and fdtkdt > wk80enddt          If after
+      *
+     C                   add       fdfdlb        wkfdlb
+      *
+     C                   endif                                                  If after
+     C                   enddo                                                  Do after loop
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * Retrieve pig days for the group for the week
+      *----------------------------------------------------------------
+      *
+     C     $pigdays      begsr
+      *
+     C                   call      'HPPDAY'
+     C                   parm                    hghgsn
+     C                   parm                    wk80begdt
+     C                   parm                    wk80enddt
+     C     wbpigday      parm      0             xxpigday
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Determine the PRRS status for the group/week
+      *---------------------------------------------------------------
+      *
+     C     $wkprrs       begsr
+      *
+      * When the farm has no PRRS records, set the PRRS status to negative
+      *
+     C                   select
+     C                   when      firstprrsdt = 0
+     C                   move      '-'           wbprrsst
+      *
+      * When the week ends before the first PRRS record for the farm, set the
+      * PRRS status to negative
+      *
+     C                   when      wk80enddt < firstprrsdt
+     C                   move      '-'           wbprrsst
+      *
+      * When the week starts on/after the last PRRS record for the farm, use the
+      * last PRRS status
+     C                   when      wk80begdt >= lastprrsdt
+     C                   move      lastprrsst    wbprrsst
+     C                   other
+      *
+      * When the week falls in the range of the first/last PRRS record for the farm,
+      * find the last PRRS record for the farm in that week.
+      *
+     C                   move      'PRRS '       wkhccd
+     C                   move      *blank        wbprrsst
+     C     key05         setll     hsl112b
+      *
+     C                   dou       *in92 = *on or wbprrsst <> *blank
+     C     key04         reade     hsl112b                                92
+     C                   if        *in92 = *off and
+     C                             hfefdt <= wk80enddt and
+     C                             hfhccd = wkhccd
+     C                   move      hfhsfl        wbprrsst
+     C                   endif
+     C                   enddo
+      *
+     C                   endsl
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      *  Retrieve group movement info
+      *---------------------------------------------------------------
+      *
+     C     $movements    begsr
+      *
+     C                   z-add     wk80enddt     zzcymd
+     C                   call      'HPMOVE'      plist01
+      *
+      * Calculate 'weekly' values
+      *
+     C     tisphd        sub       svwtisphd     wbwishd
+     C     tidphd        sub       svwtidphd     wbwidhd
+     C     wbwishd       add       wbwidhd       wbwtihd
+      *
+     C     tisplb        sub       svwtisplb     wbwislb
+     C     tidplb        sub       svwtidplb     wbwidlb
+     C     wbwislb       add       wbwidlb       wbwtilb
+      *
+     C     todphd        sub       svwtodphd     wbwodhd
+     C     tosphd        sub       svwtosphd     wbwoshd
+     C     wbwodhd       add       wbwoshd       wbwtohd
+      *
+     C     tosplb        sub       svwtosplb     wbwoslb
+     C     todplb        sub       svwtodplb     wbwodlb
+     C     wbwodlb       add       wbwoslb       wbwtolb
+      *
+     C     inahd         sub       svwinahd      wbwiahd
+      *
+      * Set up beginning/ending inventory
+      *
+     C     gpihd         sub       svwgpihd      wbeihd
+     C                   z-add     svwbihd       wbbihd
+      *
+      * Save values that will be used in calculating the weekly values
+      * for the subsequent week.
+      *
+     C                   z-add     tisphd        svwtisphd
+     C                   z-add     tidphd        svwtidphd
+      *
+     C                   z-add     tisplb        svwtisplb
+     C                   z-add     tidplb        svwtidplb
+      *
+     C                   z-add     tosphd        svwtosphd
+     C                   z-add     todphd        svwtodphd
+      *
+     C                   z-add     tosplb        svwtosplb
+     C                   z-add     todplb        svwtodplb
+      *
+     C                   z-add     inahd         svwinahd
+     C                   z-add     gpihd         svwbihd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------
+      *  Retrieve group movement info for the starting week
+      *---------------------------------------------------------------------------------
+      *
+     C     $startmove    begsr
+      *
+      * Calculate the 'start' date as 1 day prior to the 'beginning week date'.
+      *
+     C     wkwkbegdt     subdur    1:*days       wkcymdiso
+     C                   move      wkcymdiso     zzcymd
+      *
+     C                   call      'HPMOVE'      plist01
+      *
+     C                   z-add     tisphd        svwtisphd
+     C                   z-add     tidphd        svwtidphd
+      *
+     C                   z-add     tisplb        svwtisplb
+     C                   z-add     tidplb        svwtidplb
+      *
+     C                   z-add     tosphd        svwtosphd
+     C                   z-add     todphd        svwtodphd
+      *
+     C                   z-add     tosplb        svwtosplb
+     C                   z-add     todplb        svwtodplb
+      *
+     C                   z-add     inahd         svwinahd
+      *
+      * Save the ending inventory value of this week to use as the 'beginning'
+      * value for the first week being processed.
+      *
+     C                   z-add     gpihd         svwbihd
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------
+      *  Setup and format fields that are a direct map from the Group Header
+      *---------------------------------------------------------------------------------
+      *
+     C     $directmap    begsr
+      *
+     C                   z-add     hgfscd        wbfscd
+     C                   movel     hgblcd        wbblcd
+     C                   movel     hgrmcd        wbrmcd
+     C                   movel     hghgcd        wbhgcd
+     C                   z-add     hgobfs        wbobfs
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------
+      * Populate date fields
+      *---------------------------------------------------------------------------------
+      *
+     C     $dates        begsr
+      *
+      * Populate week-ending dates and then calculate the 'days in the phase'
+      * as of a) the week-ending date or b) the dispose date
+      *
+     C                   move      wkwkenddt     wbwedt
+     C                   move      wbwedt        wbwedtmdcy
+     C                   movel     wkwkenddt     wb80wedt
+      *
+     C                   select
+     C                   when      hgopdt = wknulldt or hgopdt > wbwedt
+     C                   z-add     0             wbphsday
+      *
+     C                   when      hgdsdt = wknulldt or hgdsdt > wbwedt
+     C     wbwedt        subdur    hgopdt        wbphsday:*d
+     C                   other
+      *
+     C     hgdsdt        subdur    hgopdt        wbphsday:*d
+     C                   endsl
+      *
+      *
+      * Calculate 'weeks in the phase'.
+      *
+     C     wbphsday      div       7             wbphswk
+     C                   mvr                     wkday
+     C                   z-add     wbphswk       wkwk
+     C                   if        wkday > 0
+     C                   add       1             wbphswk
+     C                   endif
+      *
+      *
+      * Calculate 'days of growth' as:
+      *      average days of growth in + days in the phase
+      *
+     C     hgadgi        add       wbphsday      wbgrwday
+      *
+      *
+      * Calculate 'weeks of growth'
+      *
+     C     wbgrwday      div       7             wbgrwwk
+     C                   mvr                     wkday
+     C                   z-add     wbgrwwk       wkwk
+     C                   if        wkday > 0
+     C                   add       1             wbgrwwk
+     C                   endif
+      *
+      *
+      * Call generic program to calculate 'stage of growth'
+      * (Note: The field name still looks like 'stage of phase'--
+      * which it originally was. But, we can't rename fields in Datamart;
+      * so, we kept the 'phase' name and just changed the field text.
+      *
+     C                   call      'HP8012'
+     C                   parm      wbgrwwk       xxgrwwk
+     C     wbphsstg      parm      *blank        xxalphstg
+     C                   parm      0             xxnumstg
+     C                   parm      'PROD'        xxversion
+      *
+      *
+      * Concatenate growth weeks and days into one alpha field.
+      *(Note: the field name still looks like it is for 'phase'--which
+      * it originally was. But, we can't rename fields in Datamart; so,
+      * we kept the 'phase' name and just changed the field text.
+      *
+     C                   move      wkday         wkalphaday
+     C                   move      wkwk          wkalphawk
+     C                   eval      wbpwkday = wkalphawk + '-' + wkalphaday
+      *
+      *
+      * Retrieve the HPS calendar year/week/PIC date and accounting period/year/week
+      * fields from the OMS calendar file by calling a SYNON program.
+      * You must send input parms of 1) company number and 2) date in the
+      * SYNON format of CYYMMDD.
+      *
+      * Get the week-ending date into the SYNON format.
+      *
+     C                   movel     wbwedt        wkccyymmdd
+     C                   z-add     wkccyymmdd    wkyymmdd
+     C                   if        wkccyymmdd >= 20000000
+     C     wkyymmdd      add       1000000       xxcyymmddi
+     C                   else
+     C                   z-add     wkyymmdd      xxcyymmddi
+     C                   endif
+      *
+     C                   call      'POF3XFR'
+     C                   parm      *blank        xxreturn
+     C                   parm      350           xxcocd
+     C                   parm                    xxcyymmddi
+     C                   parm      0             xxjulian
+     C                   parm      0             wbacyr
+     C                   parm      0             wbacpe
+     C                   parm      0             wbacwk
+     C                   parm      *blank        xxday
+     C                   parm      0             xxwk
+     C                   parm      0             wbpicdt
+     C                   parm      0             wbcdyr
+     C                   parm      0             wbcdwk
+      *
+      *
+      * Call the generic program to retrieve the quarter associated with the
+      * accounting period.
+      *
+     C                   call      'HP8006'
+     C                   parm      wbacpe        xxperiod
+     C     wbacqr        parm      0             xxquarter
+      *
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve group sales info
+      *---------------------------------------------------------------
+      *
+     C     $sales        begsr
+      *
+      * Read all sales movement detail records for the selected hog group.
+      * (There will only be one record per group per movement.)
+      *
+     C     hghgsn        setll     hsj085e
+      *
+     C                   dou       *in91 = *on                                  Do sales loop
+     C     hghgsn        reade     hsj085e                                91
+     C                   if        *in91 = *off                                 If not EOF
+      *
+      *
+      * Determine whether to process this sales detail record by comparing
+      * either a) the ship date or b) the received date to the week-ending
+      * date----depending on the movement status.
+      *
+     C                   select
+     C                   when      shmscd = 'SH' and
+     C                             shshdt >= wk80begdt and
+     C                             shshdt <= wk80enddt
+     C                   exsr      $scfl
+     C                   if        costfl = 'C'
+     C                   add       sgshhd        wbwcuhd
+     C                   add       sgshlb        wbwculb
+     C                   else
+     C                   add       sgshhd        wbwslhd
+     C                   add       sgshlb        wbwsllb
+     C                   endif
+      *
+     C                   when      (shmscd = 'NC' or
+     C                              shmscd = 'FP' or
+     C                              shmscd = 'PP' or
+     C                              shmscd = 'PG') and
+     C                              shrcdt >= wk80begdt and
+     C                              shrcdt <= wk80enddt
+     C                   exsr      $scfl
+     C                   if        costfl = 'C'
+     C                   add       sglvhd        wbwcuhd
+     C                   add       sglvlb        wbwculb
+     C                   exsr      $cullam
+     C                   else
+     C                   add       sglvhd        wbwslhd
+     C                   add       sglvlb        wbwsllb
+     C                   exsr      $royalties
+     C                   endif
+     C                   endsl
+      *
+      * DOA's
+     C                   if        shrcdt >= wk80begdt and                      If received
+     C                             shrcdt <= wk80enddt
+      *
+     C                   add       sgdohd        wbwsdohd
+     C                   add       sgdolb        wbwsdolb
+      *
+     C                   select
+     C                   when      shstcd = 'CULLS'
+     C                   add       sgdohd        wbwcdahd
+     C                   add       sgdolb        wbwcdalb
+      *
+     C                   when      shstcd = 'MRKTS'
+     C                   add       sgdohd        wbwmdahd
+     C                   add       sgdolb        wbwmdalb
+     C                   endsl
+      *
+     C                   endif                                                  If received
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do sales loop
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Retrieve sale/cost flag associated with sale type code
+      *---------------------------------------------------------------
+      *
+     C     $scfl         begsr
+      *
+      * To accumulate head and pounds appropriately, you must know whether
+      * the user views this sale type as a reduction in the 'cost of sales'
+      * or as 'sales revenue'.  You determine this be retrieving the sale/cost
+      * flag for this sale type code.
+      *
+     C     shstcd        chain     hsp066                             92
+     C                   if        *in92 = *off
+     C                   movel     stscfl        costfl
+     C                   else
+     C                   move      *blank        costfl
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------
+      * Retrieve cull amount (dollars) for a hog group/movement.
+      *--------------------------------------------------------------------
+      *
+     C     $cullam       begsr
+      *
+      * Read all Check Detail records for this group/movement accumulating gross dollars
+      * and retrieving/accumulating adjustment dollars.
+      *
+     C     key02         setll     hsl064i
+      *
+     C                   dou       *in93 = *on                                  Do check detail
+     C     key02         reade     hsl064i                                93
+     C                   if        *in93 = *off                                 If more detail
+      *
+      *  Accumulate gross dollars
+      *
+     C                   add       cdgram        wbwcuam
+      *
+      *  Retrieve/accumulate check adjustments
+      *
+     C     key03         setll     hsl065c
+      *
+     C                   dou       *in94 = *on                                  Do adjustments
+     C     key03         reade     hsl065c                                94
+     C                   if        *in94 = *off                                 If more adjusts
+     C                   add       cjcjam        wbwcuam
+     C                   endif                                                  If more adjusts
+     C                   enddo                                                  Do adjustments
+      *
+     C                   endif                                                  If more detail
+     C                   enddo                                                  Do check detail
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------------------------
+      * Retrieve fields used in calculating Royalites for Sire Line providers
+      *-------------------------------------------------------------------------------------
+      *
+      * This subroutine is only executed for Fully Paid, non-cull sales.
+      *
+     C     $royalties    begsr
+      *
+      * Read all Check Detail records for this group/movement accumulating head/pounds.
+      * (This is how you know whether the hogs were paid 'Live' or paid 'Carcass'.)
+      *
+     C     key02         setll     hsl064i
+      *
+     C                   dou       *in93 = *on                                  Do check detail
+     C     key02         reade     hsl064i                                93
+     C                   if        *in93 = *off                                 If more detail
+      *
+      *  Accumulate unconditionally:
+      *    1) yard dead
+      *    2) condemned
+     C                   add       cdydhd        wbwydhd
+     C                   add       cdydlb        wbwydlb
+      *
+     C                   add       cdcdhd        wbwcdhd
+     C                   add       cdcdlb        wbwcdlb
+      *
+      *  Accumulate Live Head/Pounds conditionally into the Live OR Carcass fields
+      *  based on the following rules:
+      *    Live:    Payment Type of Live and customer is Guymon Plant (customer=360516)
+      *    Carcass: Everything else
+      *
+     C                   select
+     C                   when      cdtpcd = 'L' and cdcvno = 360516
+     C                   add       cdlvhd        wbwlivhd
+     C                   add       cdlvlb        wbwlivlb
+     C                   other
+      *
+     C                   add       cdlvhd        wbwcarhd
+     C                   add       cdlvlb        wbwcarlb
+     C                   endsl
+      *
+     C                   endif                                                  If more detail
+     C                   enddo                                                  Do check detail
+      *
+     C                   endsr
+      /EJECT
+      *-------------------------------------------------------------------
+      * Retrieve a) DOAs from transfers out and 2) transfers to BGF farms
+      *--------------------------------------------------------------------
+      *
+     C     $tranout      begsr
+      *
+      * Read all transfer movement detail records for the selected hog group.
+      *
+     C     hghgsn        setll     hsj075g
+      *
+     C                   dou       *in91 = *on                                  Do tran DOA loop
+     C     hghgsn        reade     hsj075g                                91
+     C                   if        *in91 = *off and                             If not EOF
+     C                             mhrcdt >= wk80begdt and
+     C                             mhrcdt <= wk80enddt
+      *  DOAs/KOAs
+     C                   if        mddohd <> 0
+     C                   add       mddohd        wbwtdohd
+     C                   add       mddolb        wbwtdolb
+     C                   endif
+      *
+      *  DOAs only
+     C                   if        mddoahd <> 0
+     C                   add       mddoahd       wbwtdahd
+     C                   endif
+      *
+      *  KOAs only
+     C                   if        mdkoahd <> 0
+     C                   add       mdkoahd       wbwtkahd
+     C                   endif
+      *
+      * Separate DOA/KOA pounds out into DOA pounds and KOA pounds
+      *
+     C                   select
+     C                   when      mddoahd = 0 and mdkoahd = 0
+      *
+     C                   when      mddoahd <> 0 and mdkoahd = 0
+     C                   add       mddolb        wbwtdalb
+      *
+     C                   when      mddoahd = 0 and mdkoahd <> 0
+     C                   add       mddolb        wbwtkalb
+      *
+     C                   when      mddohd <> 0
+     C     mddolb        div       mddohd        wkavglb
+     C     mddoahd       mult      wkavglb       wkdoalb
+     C                   add       wkdoalb       wbwtdalb
+     C                   eval      wbwtkalb = wbwtkalb + (mddolb - wkdoalb)
+     C                   endsl
+      *
+      * Head transferred from Grow Finish to BGF farms
+      *
+     C                   if        mhorpp = 'GF   ' and mhdnpp = 'BGF  '        If not EOF
+     C                   add       mdqlhd        wbwobhd
+     C                   add       mdrjhd        wbwobhd
+     C                   endif                                                  If not EOF
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do tran DOA loop
+      *
+     C                   endsr
+      /EJECT
+      *-----------------------------------------------------------------------------------------
+      * Retrieve the daily dead records for this group for this week
+      *-----------------------------------------------------------------------------------------
+      *
+     C     $dailydead    begsr
+      *
+      * Position on Group and Week-beginning date.
+      *
+     C     key01         setll     hsl068d
+      *
+     C                   dou       *in91 = *on or kdkddt > wk80enddt            Do deads
+     C     hghgsn        reade     hsl068d                                91
+     C                   if        *in91 = *off and kdkddt <= wk80enddt         If not EOF
+     C                   add       kdkdhd        wbwkdhd
+     C                   add       kdkdlb        wbwkdlb
+      *
+      * If the destroyed flag is YES, then accumulate these dead pigs in
+      * the 'destroyed dead' fields as well.
+      *
+     C                   if        kddsfl = yes                                 If destroyed
+     C                   add       kdkdhd        wbwdkdhd
+     C                   add       kdkdlb        wbwdkdlb
+     C                   endif                                                  If destroyed
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do deads
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      *  Retrieve group feed info
+      *---------------------------------------------------------------
+      *
+      * Only accumulate feed if the feed ticket date falls in the week
+      * being processed.
+      *
+     C     $feed         begsr
+      *
+      * Position on Group and Week-beginning date.
+      *
+     C     key01         setll     hsl038e
+      *
+     C                   dou       *in91 = *on or fdtkdt > wk80enddt            Do feed loop
+     C     hghgsn        reade     hsl038e                                91
+     C                   if        *in91 = *off and fdtkdt <= wk80enddt         If not EOF
+     C                   add       fdfdlb        wbwfdlb
+     C                   endif                                                  If in week
+     C                   enddo                                                  Do feed loop
+      *
+      * Add feed that is:
+      * 1) prior to the first week for the group or
+      * 2) after the last week for the group
+      *
+     C                   add       wkfdlb        wbwfdlb
+     C                   z-add     0             wkfdlb
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------
+      * Find the first/last episodes of PRRS on the farm
+      *-----------------------------------------------------------------
+      *
+     C     $farmprrs     begsr
+      *
+     C                   move      'PRRS '       wkhccd
+     C                   z-add     0             firstprrsdt
+     C                   z-add     0             lastprrsdt
+     C                   move      *blank        lastprrsst
+      *
+      * Find the date of the first episode for the farm.
+      *
+     C     key04         chain     hsp112                             92
+     C                   if        *in92 = *off                                 If first
+     C                   z-add     hfefdt        firstprrsdt
+      *
+      * Find the date of the last episode for the farm.
+      *
+     C     key04         chain     hsl112b                            92
+     C                   if        *in92 = *off                                 If last
+     C                   z-add     hfefdt        lastprrsdt
+     C                   move      hfhsfl        lastprrsst
+     C                   endif                                                  If last
+      *
+     C                   endif                                                  If first
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------------------------------
+      * Update Datamart Weekly Group Detail records for the Group with Placement Head
+      *---------------------------------------------------------------------------------------
+      *
+      * In June 2010, we added a new field Placement Adjusted Transfer In Head.
+      * We will populate it with the Adjusted Transfer In Head value.
+      * BUT, we only want it populated on the first record for the group that
+      * has a value in the Adjusted Head field. (We can't just update the
+      * first record for the group because the group may have been in Create status
+      * for the first week or two.)
+      *
+      * And, since our 'current' processing may pick up a group long after the first
+      * week that it was opened, we don't know, when we are in the middle of the
+      * regular processing, whether this is the 'first' record or not.
+      *
+      * So, if we processed a group in our regular processing, we will turn around and
+      * read/update the Group's Datamart records and update them for our new
+      * Placement field.
+      *
+     C     $placement    begsr
+      *
+     C                   move      *blank        svhgcd
+      *
+     C     hghgcd        setll     hplf075f
+      *
+     C                   dou       *in93 = *on                                  Do group
+     C     hghgcd        reade     hplf075f                               93
+     C                   if        *in93 = *off                                 If not EOF
+      *
+     C                   select
+     C                   when      p1wbhgcd <> svhgcd and p1wbajtihd <> 0
+     C                   z-add     p1wbajtihd    p1wbpajtihd
+     C                   move      p1wbhgcd      svhgcd
+     C                   other
+      *
+     c                   z-add     0             p1wbpajtihd
+     C                   endsl
+      *
+     C                   update    wbrecf
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do group
+      *
+     C                   endsr
+      /EJECT
+      *------------------------------------------------------------------
+      * Find the Saturday previous to the system date
+      *-----------------------------------------------------------------
+      *
+     C     $prevsat      begsr
+      *
+      * Get today's system date into the SYNON format.
+      *
+     C                   z-add     wktoday       wkyymmdd
+     C                   if        wktoday >= 20000000
+     C     wkyymmdd      add       1000000       xxcyymmddi
+     C                   else
+     C                   z-add     wkyymmdd      xxcyymmddi
+     C                   endif
+      *
+      * Call SYNON program
+      *
+     C                   z-add     0             wkccyymmdd
+     C                   call      'POGSXFR'
+     C                   parm      *blank        xxreturn
+     C                   parm      350           xxcocd
+     C                   parm                    xxcyymmddi
+     C                   parm      0             xxcyymmddo
+      *
+     C                   if        xxreturn = *blank                            If got Saturday
+     C                   z-add     xxcyymmddo    wkyymmdd
+     C                   z-add     wkyymmdd      wkccyymmdd
+     C                   if        xxcyymmddo >= 1000000
+     C                   add       20000000      wkccyymmdd
+     C                   else
+     C                   add       19000000      wkccyymmdd
+     C                   endif
+     C                   endif                                                  If got Saturday
+      *
+      * If you have a valid date, then move it to an *iso date format
+      * field.
+      *
+     C     *iso          test(d)                 wkccyymmdd             92
+     C                   if        *in92 = *off
+     C                   movel     wkccyymmdd    wkprevsat
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Find the Saturday after the system date
+      *---------------------------------------------------------------
+      *
+     C     $nextsat      begsr
+      *
+     C                   call      'HP8007'
+     C                   parm      wktoday       xxccyymmdd
+     C                   parm      0             xxsatdt
+     C                   parm      0             xxcdyr
+     C                   parm      0             xxcdwk
+      *
+      *
+      * If you have a valid date, then move it to an *iso date format
+      * field.
+      *
+     C     *iso          test(d)                 xxsatdt                92
+     C                   if        *in92 = *off
+     C                   movel     xxsatdt       wknextsat
+     C                   endif
+      *
+     C                   endsr
+      /EJECT
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+      * Parm lists
+      *
+     C     *entry        plist
+     C                   parm                    xxprocfl
+      *
+      *
+      * Key lists
+      *
+     C     key01         klist
+     C                   kfld                    hghgsn
+     C                   kfld                    wk80begdt
+      *
+     C     key02         klist
+     C                   kfld                    hghgsn
+     C                   kfld                    shmvsn
+      *
+     C     key03         klist
+     C                   kfld                    cdchdt
+     C                   kfld                    cdcvno
+     C                   kfld                    cdchno
+     C                   kfld                    cdlnno
+      *
+     C     key04         klist
+     C                   kfld                    hgfscd
+     C                   kfld                    wkhccd
+      *
+     C     key05         klist
+     C                   kfld                    hgfscd
+     C                   kfld                    wkhccd
+     C                   kfld                    wk80enddt
+      *
+     C     key06         klist
+     C                   kfld                    hghgsn
+     C                   kfld                    wk80enddt
+      *
+      *
+      * Parm lists
+      *
+     C     plist01       plist
+     C                   parm                    hghgsn
+     C                   parm                    zzcymd
+      * Head
+     C                   parm                    gpihd                          GROUP INV
+     C                   parm                    pinhd                          PIG IN
+     C                   parm                    tinhd                          TRSF IN
+     C                   parm                    tisphd                         SAME PHASE
+     C                   parm                    tidphd                         DIFF PHASE
+     C                   parm                    pouhd                          PIGS OUT
+     C                   parm                    touhd                          TRSF OUT
+     C                   parm                    tosphd                         SAME PHASE
+     C                   parm                    todphd                         DIFF PHASE
+     C                   parm                    rinhd                          REJECT IN
+     C                   parm                    rouhd                          REJECT OUT
+     C                   parm                    qinhd                          QUALITY IN
+     C                   parm                    qouhd                          QUALITY OUT
+     C                   parm                    morhd                          MORTALITY
+     C                   parm                    inahd                          INV ADJ
+      * Pounds
+     C                   parm                    pinlb                          PIG IN
+     C                   parm                    tinlb                          TRSF IN
+     C                   parm                    tisplb                         SAME PHASE
+     C                   parm                    tidplb                         DIFF PHASE
+     C                   parm                    poulb                          PIG OUT
+     C                   parm                    toulb                          TRSF OUT
+     C                   parm                    tosplb                         SAME PHASE
+     C                   parm                    todplb                         DIFF PHASE
+     C                   parm                    rinlb                          REJECT IN
+     C                   parm                    roulb                          REJECT OUT
+     C                   parm                    qinlb                          QUALITY IN
+     C                   parm                    qoulb                          QUALITY OUT
+     C                   parm                    morlb                          MORTALITY
+      *
+      *
+      * Using the system date as a starting point, retrieve the previous
+      * and the next Saturday from the OMS calendar file.
+      *
+     C                   move      *date         wkcymdiso
+     C                   move      wkcymdiso     wktoday
+      *
+     C                   exsr      $prevsat
+     C                   exsr      $nextsat
+      *
+      *
+      * Bring in the data area that contains the week-ending date for the first week
+      * of 'current' data. Move the retrieved date to a date format field.
+      *
+     C                   in        dafin
+      *
+     C                   movel     dacwkenddt    wkcymdiso
+      *
+     C                   endsr
+      /EJECT

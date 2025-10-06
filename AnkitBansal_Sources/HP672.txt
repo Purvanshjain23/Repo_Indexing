@@ -1,0 +1,869 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      HOG PRODUCTION
+      * PROGRAM:     HP672
+      * TITLE:       HOG MOVEMENT OUT SUMMARY REPORT
+      * PROGRAMMER:  MARY PALMER
+      * CREATED:     6/27/94
+      *
+      *  FUNCTION:   THIS PROGRAM PRINTS A REPORT OF ALL HOG MOVEMENTS
+      *              FOR SELECTED ORIGIN FARM SITES BY ORIGIN MOVEMENT
+      *              TRANSACTION CODE.  DESTINATION DATA IS
+      *              SUMMARIZED BY DESTINATION FARM, AND ONE LINE IS
+      *              PRINTED REFLECTING INVENTORY ACTIVITY FOR THE TIME
+      *              FRAME AT THE DESTINATION SITE.
+      *
+      *              WORKFILE HSP370 IS BUILT IN PROGRAM HP370 AND AN
+      *              OPEN QUERY STATEMENT IS USED TO SELECT AND
+      *              SEQUENCE RECORDS IN HP472CL.  SELECTION
+      *              CRITERIA IS PASSED THROUGH THE LDA.
+      *
+      *           THIS PROGRAM IS SUBMITTED BY HP472CL WHICH IS CALLED
+      *           FROM HP472 THROUGH QCMDEXC.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 11/27/01  LeAnne Fedor
+      *           As requested by Randy Rolf, added breakdown lines for
+      *           same phase/different phase totals. These 2 lines only print
+      *           after the Transfer Total line.
+      *
+      * 08/08/02  LeAnne Fedor
+      *           Changed column heading of DOA to KOA/DOA--since the data in the
+      *           column now contains both DOA and KOA.
+      *
+      * 01/15/04  LeAnne Fedor
+      *           Added 3 new selections:
+      *                    Include transfers Y/N
+      *                    Include sales     Y/N
+      *                        Sale type
+      *
+      * 04/05/04  LeAnne Fedor
+      *           Per Alice B., added a new column 'destination production phase'.
+      *           On the report, transfer data is summarized to the destination farm level.
+      *           So, for wean-to-finish farms, the individual transfers could be into groups
+      *           of various phases. So, for printing purposes, we retrieve the 'phase'
+      *           for the farm from the Farm Site Master file.
+      *
+      * 05/23/11  LeAnne Ramsey  (E1556)
+      *           Recompile only. Sex Code was added for the Destination Group
+      *           in workfile HSP370.
+      *
+      * 10/16/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 06/07/21  Danny Nguyen   (P2098)
+      *           Recompile only due to HSP370 file change.
+      *
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSP011    IF   E           K DISK
+      *    PRODUCTION PHASE
+      *
+     FHSP018    IF   E           K DISK
+      *    FARM SITE
+      *
+     FHSP066    IF   E           K DISK
+      *    SALES TYPE
+      *
+     FHSP370    IF   E             DISK
+      *    HOG MOVEMENT WORKFILE
+      *
+      *
+     FQPRINT    O    F  155        PRINTER OFLIND(*INOF)
+     F                                     INFDS(DS#PRT)
+      /EJECT
+      ****************************************************************
+      * TABLE/ARRAY SPECIFICATIONS
+      ****************************************************************
+      *
+      *  ARRAYS FOR TOTALS
+      *
+     D SHHD            S              8  0 DIM(4)
+     D SHLB            S              8  0 DIM(4)
+     D RCHD            S              8  0 DIM(4)
+     D RCLB            S              8  0 DIM(4)
+     D DOHD            S              8  0 DIM(4)
+     D RJHD            S              8  0 DIM(4)
+     D QLHD            S              8  0 DIM(4)
+      *
+      /EJECT
+      ****************************************************************
+      * INPUT SPECS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      *  LDA
+      *---------------------------------------------------------------
+      *
+     D                UDS
+     D  LDFSBO                 1      5
+     D  LDFYMD                 6     13  0
+     D  LDTYMD                14     21  0
+     D  LDPPCD                22     26
+     D  LDFSCD                27     31  0
+     D  LDPTCD                32     36
+     D  LDSTCD                37     41
+     D  LDTRANFL              42     42
+     D  LDSALEFL              43     43
+      *
+     D  LDSTDS                52     71
+     D  LDBODS                72    101
+     D  LDPTDS               102    111
+     D  LDPPDS               112    141
+     D  LDFSNM               142    166
+      *
+     D  LDFMDY               171    176  0
+     D  LDTMDY               177    182  0
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+     D UNKNWN          C                   CONST('UNKNOWN')
+     D ALL             C                   CONST('All')
+     D TRAN            C                   CONST('TRANSFERS OUT')
+      *
+      *----------------------------------------------------------------
+      *  DS#PRT: PRINTER CONTROL FIELDS...
+      *----------------------------------------------------------------
+     D DS#PRT          DS
+     D  OVFLIN               188    189B 0
+     D  CURLIN               367    368B 0
+      /EJECT
+      *
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+      *
+     C     *IN90         DOUEQ     *ON                                          MAIN DO
+     C                   READ      HSP370                                 90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C     FIRST         IFEQ      YES                                          IF FIRST
+     C                   EXSR      $FIRST
+     C                   ENDIF                                                  IF FIRST
+      *
+      *---------------------------------------------------------------
+      * CHECK FOR CONTROL BREAKS
+      *---------------------------------------------------------------
+      *
+     C                   SELECT
+      *
+      * BREAK ON ORIGIN PRODUCTION PHASE
+      *   PRINT LAST SUMMARIZED DETAIL LINE
+      *   PRINT FARM SITE TOTALS
+      *   PRINT MOVEMENT CODE TOTALS
+      *   RETRIEVE NEW DESCRIPTIONS
+      *   PRINT REPORT HEADINGS
+      *
+     C     WFORPP        WHENNE    SVPPCD
+     C                   EXSR      $DTL
+      *
+     C                   ADD       5             CURLIN
+     C     CURLIN        IFGT      OVFLIN
+     C     *INOF         OREQ      *ON
+     C                   EXSR      $HDR
+     C                   ENDIF
+      *
+     C                   EXSR      $TFTOT
+     C                   EXSR      $TMTOT
+     C                   MOVEL     WFORPP        SVPPCD
+      *
+     C                   EXSR      $PPDS
+     C                   EXSR      $DESC
+     C                   EXSR      $FSNM
+      *
+     C                   EXSR      $HDR
+      *
+      * BREAK ON MOVEMENT CODE
+      *   PRINT LAST SUMMARIZED DETAIL LINE
+      *   PRINT FARM SITE TOTALS
+      *   PRINT MOVEMENT CODE TOTALS
+      *   RETRIEVE NEW DESCRIPTIONS
+      *   PRINT MOVEMENT AND FARM HEADINGS
+      *
+     C     WFCODE        WHENNE    SVCODE
+     C                   EXSR      $DTL
+      *
+     C                   ADD       5             CURLIN
+     C     CURLIN        IFGT      OVFLIN
+     C     *INOF         OREQ      *ON
+     C                   EXSR      $HDR
+     C                   ENDIF
+      *
+     C                   EXSR      $TFTOT
+     C                   EXSR      $TMTOT
+     C                   EXCEPT    BLANK
+     C                   EXCEPT    BLANK
+      *
+     C                   EXSR      $DESC
+     C                   EXSR      $FSNM
+      *
+     C                   ADD       2             CURLIN
+     C     CURLIN        IFGT      OVFLIN
+     C     *INOF         OREQ      *ON
+     C                   EXSR      $HDR
+     C                   ELSE
+     C                   EXCEPT    HMHDR
+     C                   EXCEPT    HFHDR
+     C                   ENDIF
+      *
+      * BREAK ON FARM SITE
+      *   PRINT LAST SUMMARIZED DETAIL LINE
+      *   PRINT FARM SITE TOTALS
+      *   RETRIEVE NEW DESCRIPTIONS
+      *   PRINT FARM HEADINGS
+      *
+      *
+     C     WFORFS        WHENNE    SVORFS
+      *
+     C                   EXSR      $DTL
+     C                   EXSR      $TFTOT
+     C                   EXCEPT    BLANK
+      *
+     C                   EXSR      $FSNM
+      *
+     C                   ADD       2             CURLIN
+     C     CURLIN        IFGT      OVFLIN
+     C     *INOF         OREQ      *ON
+     C                   EXSR      $HDR
+     C                   ELSE
+     C                   EXCEPT    HFHDR
+     C                   ENDIF
+      *
+      * BREAK ON DESTINATION, SO PRINT SUMMARIZED DETAIL LINE
+      *
+     C     WFDNNM        WHENNE    SVDNNM
+     C                   EXSR      $DTL
+     C                   ENDSL
+      *
+      *---------------------------------------------------------------
+      * DETAIL PROCESSING
+      *---------------------------------------------------------------
+      *
+      * ACCUMULATE VALUES
+     C                   ADD       WFSHHD        SHHD
+     C                   ADD       WFSHLB        SHLB
+      *
+     C                   ADD       WFQLHD        RCHD
+     C                   ADD       WFRJHD        RCHD
+     C                   ADD       WFQLLB        RCLB
+     C                   ADD       WFRJLB        RCLB
+      *
+     C                   ADD       WFDOHD        DOHD
+     C                   ADD       WFRJHD        RJHD
+     C                   ADD       WFQLHD        QLHD
+      *
+      * For transfers only, accumulate values for same-phase/different phase
+      * breakdown of Transfer Totals.
+      *
+     C                   if        wfcode = 'TRAN '                             If transfer
+     C                   select
+     C                   when      wforpp = wfdnpp
+     C                   add       wfshhd        tsshhd
+     C                   add       wfshlb        tsshlb
+     C                   add       wfqlhd        tsrchd
+     C                   add       wfrjhd        tsrchd
+     C                   add       wfqllb        tsrclb
+     C                   add       wfrjlb        tsrclb
+     C                   add       wfdohd        tsdohd
+     C                   add       wfrjhd        tsrjhd
+     C                   add       wfqlhd        tsqlhd
+     C                   other
+     C                   add       wfshhd        tdshhd
+     C                   add       wfshlb        tdshlb
+     C                   add       wfqlhd        tdrchd
+     C                   add       wfrjhd        tdrchd
+     C                   add       wfqllb        tdrclb
+     C                   add       wfrjlb        tdrclb
+     C                   add       wfdohd        tddohd
+     C                   add       wfrjhd        tdrjhd
+     C                   add       wfqlhd        tdqlhd
+     C                   endsl
+     C                   endif                                                  If transfer
+      *
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  MAIN DO
+      *
+      *----------------------------------------------------------------
+      * EOF PROCESSING
+      *----------------------------------------------------------------
+      *  IF NO DETAIL RECORDS MATCHED THE SELECTION CRITERIA, THEN
+      *  PRINT THE STANDARD 'NO DATA...' ERROR MESSAGE
+      *
+     C     FIRST         IFEQ      YES
+     C                   EXCEPT    HRHDR
+     C                   EXCEPT    NODATA
+     C                   ELSE
+      *
+      *  CHECK CURRENT LINE FOR ROOM TO PRINT ALL TOTALS
+      *
+     C                   ADD       7             CURLIN
+     C     CURLIN        IFGT      OVFLIN
+     C     *INOF         OREQ      *ON
+     C                   EXSR      $HDR
+     C                   ENDIF
+      *
+      * PRINT:
+      *   LAST SUMMARIZED DETAIL RECORD
+      *   FARM SITE TOTALS
+      *   MOVEMENT CODE TOTALS
+      *   REPORT TOTALS
+      *
+     C                   EXSR      $DTL
+     C                   EXSR      $TFTOT
+     C                   EXSR      $TMTOT
+     C                   EXCEPT    BLANK
+     C                   EXCEPT    TRTOT
+     C                   ENDIF
+      *
+     C                   SETON                                        LR
+      /EJECT
+      *----------------------------------------------------------------
+      * $HDR  - PRINT HEADINGS
+      *----------------------------------------------------------------
+      *
+     C     $HDR          BEGSR
+      *
+     C                   EXCEPT    HRHDR
+     C                   EXCEPT    HMHDR
+     C                   EXCEPT    HFHDR
+      *
+     C                   ENDSR
+      *
+      *----------------------------------------------------------------
+      * $FSNM - RETRIEVE THE ORIGIN FARM SITE NAME
+      *----------------------------------------------------------------
+      *
+     C     $FSNM         BEGSR
+      *
+     C     WFORFS        CHAIN     HSP018                             92
+     C     *IN92         IFEQ      *OFF
+     C                   MOVEL     FSFSNM        HFFSNM
+     C                   ELSE
+     C                   MOVEL(P)  UNKNWN        HFFSNM
+     C                   ENDIF
+      *
+     C                   ENDSR
+      *
+      *----------------------------------------------------------------
+      * $DESC - RETRIEVE DESCRIPTION
+      *----------------------------------------------------------------
+      *
+     C     $DESC         BEGSR
+      *
+     C                   SELECT
+     C     WFMTCD        WHENEQ    'T'
+     C                   MOVEL(P)  TRAN          HMDESC
+      *
+     C     WFMTCD        WHENEQ    'S'
+     C     WFCODE        CHAIN     HSP066                             92
+     C     *IN92         IFEQ      *OFF
+     C                   MOVEL     STSTDS        HMDESC
+     C                   ELSE
+     C                   MOVEL(P)  UNKNWN        HMDESC
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $PPDS - RETRIEVE THE PRODUCTION PHASE DESCRIPTION
+      *----------------------------------------------------------------
+      *
+     C     $PPDS         BEGSR
+      *
+     C     WFORPP        CHAIN     HSP011                             92
+     C     *IN92         IFEQ      *OFF
+     C                   MOVEL     PPPPDS        HRPPDS
+     C                   ELSE
+     C                   MOVEL(P)  UNKNWN        HRPPDS
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $DTL   SUMMARIZED DETAIL LINE FOR A DESTINATION
+      *----------------------------------------------------------------
+      *
+     C     $DTL          BEGSR
+      *
+      *  CALCULATE AVERAGE RECEIVED POUNDS AND THE REJECT PERCENT
+      *
+     C     RCHD(1)       IFNE      0
+     C     RCLB(1)       DIV(H)    RCHD(1)       DTARLB
+      *
+     C     RJHD(1)       DIV(H)    RCHD(1)       WKFLD1
+     C     WKFLD1        MULT      100           DTRJPR
+     C                   ENDIF
+      *
+     C     *INOF         IFEQ      *ON
+     C                   EXSR      $HDR
+     C                   ENDIF
+      *
+     C                   EXCEPT    DTLINE
+     C                   MOVEL     WFDNNM        SVDNNM
+      *
+     C                   move      *blank        svdnfsppcd
+     C                   if        wfdnfs <> 0
+     C     wfdnfs        chain     hsp018                             92
+     C                   if        *in92 = *off
+     C                   move      fsppcd        svdnfsppcd
+     C                   endif
+     C                   endif
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $TFTOT - FARM SITE TOTALS
+      *----------------------------------------------------------------
+      *
+     C     $TFTOT        BEGSR
+      *
+     C                   EXCEPT    TFTOT
+     C                   Z-ADD     WFORFS        SVORFS
+      *
+     C                   ENDSR
+      *
+      *----------------------------------------------------------------
+      * $TMTOT - TOTALS FOR THE TRANSFERS OUT OR SALES TYPE
+      *----------------------------------------------------------------
+      *
+     C     $TMTOT        BEGSR
+      *
+     C                   EXCEPT    TMTOT
+      *
+      * If you just printed the total line for 'TRANSFERS', then print the
+      * same phase/different phase break-down lines.
+      *
+     C                   if        svcode = 'TRAN '                             If transfer
+     C                   exsr      $breakdown
+     C                   endif                                                  If transfer
+      *
+     C                   MOVEL     WFCODE        SVCODE
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------------------
+      * Print the same-phase/different phase breakdown lines for transfer total
+      *-------------------------------------------------------------------------
+      *
+     C     $breakdown    begsr
+      *
+     C                   if        tsshhd <> 0 or                               If same phase
+     C                             tsshlb <> 0 or
+     C                             tsrchd <> 0 or
+     C                             tsrclb <> 0 or
+     C                             tsdohd <> 0 or
+     C                             tsrjhd <> 0 or
+     C                             tsqlhd <> 0
+     C                   except    tstot
+     C                   endif                                                  If same phase
+      *
+      *
+     C                   if        tdshhd <> 0 or                               If diff phase
+     C                             tdshlb <> 0 or
+     C                             tdrchd <> 0 or
+     C                             tdrclb <> 0 or
+     C                             tddohd <> 0 or
+     C                             tdrjhd <> 0 or
+     C                             tdqlhd <> 0
+     C                   except    tdtot
+     C                   endif                                                  If diff phase
+      *
+     C                   endsr
+      /EJECT
+      *----------------------------------------------------------------
+      * $FIRST - FIRST TIME THROUGH
+      *----------------------------------------------------------------
+      *
+     C     $FIRST        BEGSR
+      *
+     C                   MOVEL     NO            FIRST
+      *
+     C                   MOVEL     WFCODE        SVCODE
+     C                   MOVEL     WFORPP        SVPPCD
+     C                   Z-ADD     WFORFS        SVORFS
+     C                   MOVEL     WFDNNM        SVDNNM
+      *
+     C                   move      *blank        svdnfsppcd
+     C                   if        wfdnfs <> 0
+     C     wfdnfs        chain     hsp018                             92
+     C                   if        *in92 = *off
+     C                   move      fsppcd        svdnfsppcd
+     C                   endif
+     C                   endif
+      *
+      * GET DESCRIPTIONS FOR CONTROL FIELDS
+      *
+     C                   EXSR      $DESC
+     C                   EXSR      $PPDS
+     C                   EXSR      $FSNM
+      *
+      * PRINT HEADINGS FOR FIRST TIME THROUGH
+      *
+     C                   EXSR      $HDR
+      *
+     C                   ENDSR
+      /EJECT
+      *---------------------------------------------------------------
+      * INITIALIZATION SUBROUTINE
+      *---------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      * WORKFIELDS
+     C                   Z-ADD     0             WKFLD1           15 4
+      *
+      * DEFINE SAVE FIELDS FOR CONTROL BREAKS
+      *
+     C     *LIKE         DEFINE    WFORPP        SVPPCD
+     C     *LIKE         DEFINE    WFCODE        SVCODE
+     C     *LIKE         DEFINE    WFORFS        SVORFS
+     C     *LIKE         DEFINE    WFDNNM        SVDNNM
+     C     *LIKE         DEFINE    FSPPCD        SVDNFSPPCD
+      *
+      * DETAIL LINE PRINT FIELDS
+      *
+     C                   Z-ADD     0             DTRJPR            5 2          REJECT %
+     C                   Z-ADD     0             DTARLB            5 2          AVG REC'D LB
+      *
+      * PRINT FIELDS FOR SAME PHASE AND DIFFERENT PHASE TOTAL LINES.
+      *
+     C                   Z-ADD     0             TDSHHD            8 0
+     C     *LIKE         DEFINE    tdshhd        tdshlb
+     C     *LIKE         DEFINE    tdshhd        tdrchd
+     C     *LIKE         DEFINE    tdshhd        tdrclb
+     C     *LIKE         DEFINE    tdshhd        tddohd
+     C     *LIKE         DEFINE    tdshhd        tdrjhd
+     C     *LIKE         DEFINE    tdshhd        tdqlhd
+      *
+     C                   Z-ADD     0             TsSHHD            8 0
+     C     *LIKE         DEFINE    tsshhd        tsshlb
+     C     *LIKE         DEFINE    tsshhd        tsrchd
+     C     *LIKE         DEFINE    tsshhd        tsrclb
+     C     *LIKE         DEFINE    tsshhd        tsdohd
+     C     *LIKE         DEFINE    tsshhd        tsrjhd
+     C     *LIKE         DEFINE    tsshhd        tsqlhd
+      *
+      * PRINT FIELDS FOR REPORT HEADING
+      *
+     C     *LIKE         DEFINE    PPPPDS        HRPPDS
+      *
+      * PRINT FIELDS FOR MOVEMENT HEADING
+      *
+     C     *LIKE         DEFINE    STSTDS        HMDESC
+      *
+      * PRINT FIELDS FOR FARM SITE HEADING
+      *
+     C     *LIKE         DEFINE    FSFSNM        HFFSNM
+      *
+      * SET UP REPORT HEADINGS:
+      *
+      * BUSINESS OFFICE
+      *
+     C     LDFSBO        IFEQ      *BLANK
+     C                   MOVEL(P)  ALL           LDFSBO
+     C                   ENDIF
+      *
+      * PRODUCTION TYPE
+      *
+     C     LDPTCD        IFEQ      *BLANK
+     C                   MOVEL(P)  ALL           LDPTCD
+     C                   ENDIF
+      *
+      * PRODUCTION PHASE
+      *
+     C     LDPPCD        IFEQ      *BLANK
+     C                   MOVEL(P)  ALL           LDPPCD
+     C                   ENDIF
+      * FARM SITE
+      *
+     C     LDFSCD        IFEQ      0
+     C                   SETON                                        89
+     C                   ENDIF
+      *
+      * Include Transfer Movements
+      *
+     C                   select
+     C                   when      ldtranfl = yes
+     C                   movel     'Yes'         hrtran            3
+     C                   when      ldtranfl = no
+     C                   movel     'No '         hrtran
+     C                   endsl
+      *
+      * Include Sales Movements
+      *
+     C                   select
+     C                   when      ldsalefl = yes
+     C                   movel     'Yes'         hrsale            3
+     C                   when      ldsalefl = no
+     C                   movel     'No '         hrsale
+     C                   seton                                        87
+     C                   endsl
+      *
+      * Only a specific Sales Type is included
+      *
+     C                   select
+     C                   when      ldstcd = *blank
+     C                   movel     All           hrstcd            5
+     C                   other
+     C                   movel     ldstcd        hrstcd
+     C                   endsl
+      *
+      *
+      * SET UP A FIRST TIME FLAG
+      * SET UP HEADING UNDERLINE FIELD FOR PRINT
+      * RETRIEVE TIME FOR REPORT HEADING
+      *
+     C                   MOVEL     YES           FIRST             1
+     C                   MOVEL     *ALL'-'       DASH            155
+     C                   TIME                    RTIME             6 0
+      *
+     C                   ENDSR
+      /EJECT
+      *-------------------------------------------------------------
+      * REPORT HEADING LINES
+      *-------------------------------------------------------------
+      *
+     OQPRINT    E            HRHDR          1 01
+     O                       SDPGM               10
+     O                                           77 'HOG PRODUCTION SYSTEM'
+     O                                          145 'DATE'
+     O                       UDATE         Y    155
+      *
+     O          E            HRHDR          1
+     O                       SDUSR               10
+     O                                           74 'HOG MOVEMENT OUT SUMMARY'
+     O                                           81 'REPORT'
+     O                                          145 'TIME'
+     O                       RTIME              155 '  :  :  '
+      *
+     O          E            HRHDR          1
+     O                                          145 'PAGE'
+     O                       PAGE          Z    155
+      *
+     O          E            HRHDR          1
+     O                                           19 'Business office ...'
+     O                                           26 '.......'
+     O                       LDFSBO              33
+     O                       LDBODS              67
+      *
+     O          E            HRHDR          1
+     O                                           19 'From received date '
+     O                                           26 '.......'
+     O                       LDFMDY        Y     36
+      *
+     O          E            HRHDR          1
+     O                                           19 'To received date ..'
+     O                                           26 '.......'
+     O                       LDTMDY        Y     36
+      *
+      *
+     O          E            HRHDR          1
+     O                                           26 'Origin production type ...'
+     O                       LDPTCD              33
+     O                       LDPTDS              47
+      *
+     O          E            HRHDR          1
+     O                                           26 'Origin production phase ..'
+     O                       LDPPCD              33
+     O                       LDPPDS              67
+      *
+     O          E            HRHDR          1
+     O                                           26 'Origin farm site .........'
+     O              N89      LDFSCD        M     34
+     O               89                          31 'All'
+     O              N89      LDFSNM              62
+      *
+     O          E            HRHDR          1
+     O                                           26 'Include transfers ........'
+     O                       hrtran              31
+      *
+     O          E            HRHDR          1
+     O                                           26 'Include sales ............'
+     O                       hrsale              31
+      *
+     O          E            HRHDR          2
+     O              n87                          26 'Sale type code ...........'
+     O              n87      hrstcd              33
+     O              n87      ldstds              57
+      *
+      * PRODUCTION PHASE DESCRIPTION
+      *
+     O          E            HRHDR          2
+     O                       HRPPDS              30
+      *
+      *-------------------------------------------------------------
+      * COLUMN HEADING LINES
+      *-------------------------------------------------------------
+      *
+     O          E            HRHDR          1
+     O                                           42 'DEST'
+     O          E            HRHDR          1
+     O                                           12 'ORIGIN'
+     O                                           42 'PROD'
+     O                                           55 'SHIPPED'
+     O                                           68 'SHIPPED'
+     O                                           81 'RECEIVED'
+     O                                           94 'RECEIVED'
+     O                                          105 'AVERAGE'
+     O                                          117 'DOA/KOA'
+     O                                          153 'QUALITY'
+      *
+     O          E            HRHDR          1
+     O                                           20 'DESTINATION'
+     O                                           43 'PHASE'
+     O                                           52 'HEAD'
+     O                                           68 'POUNDS'
+     O                                           81 'HEAD'
+     O                                           94 'POUNDS'
+     O                                          105 'POUNDS'
+     O                                          117 'HEAD'
+     O                                          130 'REJECTS'
+     O                                          142 'REJECT %'
+     O                                          153 'HEAD IN'
+      *
+     O          E            HRHDR          2
+     O                       DASH               155
+      *
+      *-------------------------------------------------------------
+      * FARM SITE HEADING
+      *-------------------------------------------------------------
+      *
+     O          E            HFHDR          1
+     O                       HFFSNM              31
+      *
+      *-------------------------------------------------------------
+      * MOVEMENT CODE HEADING
+      *-------------------------------------------------------------
+      *
+     O          E            HMHDR          2
+     O                       HMDESC              20
+      *
+      *-------------------------------------------------------------
+      * DETAIL LINE OF MOVEMENTS SUMMARIZED TO THE DESTINATION LEVEL
+      *-------------------------------------------------------------
+      *
+     O          E            DTLINE         1
+     O                       SVDNNM              34
+     O                       SVDNFSPPCD          43
+     O                       SHHD(1)       KB    56
+     O                       SHLB(1)       KB    69
+     O                       RCHD(1)       KB    82
+     O                       RCLB(1)       KB    95
+     O                       DTARLB        KB   106
+     O                       DOHD(1)       KB   118
+     O                       RJHD(1)       KB   131
+     O                       DTRJPR        KB   141
+     O                       QLHD(1)       KB   154
+      *
+      *-------------------------------------------------------------
+      * FARM SITE TOTAL LINE
+      *-------------------------------------------------------------
+      *
+     O          E            TFTOT          2
+     O                                            1 '*'
+     O                       SVORFS        M      9
+     O                       SHHD(2)       KB    56
+     O                                           57 '*'
+     O                       SHLB(2)       KB    69
+     O                                           70 '*'
+     O                       RCHD(2)       KB    82
+     O                                           83 '*'
+     O                       RCLB(2)       KB    95
+     O                                           96 '*'
+     O                       DOHD(2)       KB   118
+     O                                          119 '*'
+     O                       RJHD(2)       KB   131
+     O                                          132 '*'
+     O                       QLHD(2)       KB   154
+     O                                          155 '*'
+      *
+      *-------------------------------------------------------------
+      * MOVEMENT TYPE TOTAL
+      *-------------------------------------------------------------
+      *
+     O          E            TMTOT          1
+     O                                            2 '**'
+     O                       SVCODE              10
+     O                       SHHD(3)       KB    56
+     O                       SHLB(3)       KB    69
+     O                       RCHD(3)       KB    82
+     O                       RCLB(3)       KB    95
+     O                       DOHD(3)       KB   118
+     O                       RJHD(3)       KB   131
+     O                       QLHD(3)       KB   154
+      *
+      *
+      *-------------------------------------------------------------
+      * REPORT TOTALS
+      *-------------------------------------------------------------
+      *
+     O          E            TRTOT          1
+     O                                            3 '***'
+     O                                           17 'REPORT TOTAL'
+     O                       SHHD(4)       KB    56
+     O                       SHLB(4)       KB    69
+     O                       RCHD(4)       KB    82
+     O                       RCLB(4)       KB    95
+     O                       DOHD(4)       KB   118
+     O                       RJHD(4)       KB   131
+     O                       QLHD(4)       KB   154
+      *
+      *-------------------------------------------------------------
+      * Total line for 'same phase transfers'
+      *-------------------------------------------------------------
+      *
+     O          E            TSTOT          1
+     O                                           30 'Same-phase transfers'
+     O                       tsshhd        KB    56
+     O                       tsshlb        KB    69
+     O                       tsrchd        KB    82
+     O                       tsrclb        KB    95
+     O                       tsdohd        KB   118
+     O                       tsrjhd        KB   131
+     O                       tsqlhd        KB   154
+      *
+      *
+      *-------------------------------------------------------------
+      * Total line for 'different phase transfers'
+      *-------------------------------------------------------------
+      *
+     O          E            TDTOT          1
+     O                                           30 'Diff-phase transfers'
+     O                       tdshhd        KB    56
+     O                       tdshlb        KB    69
+     O                       tdrchd        KB    82
+     O                       tdrclb        KB    95
+     O                       tddohd        KB   118
+     O                       tdrjhd        KB   131
+     O                       tdqlhd        KB   154
+      *
+      *-------------------------------------------------------------
+      * PRINT A BLANK LINE BEFORE
+      *-------------------------------------------------------------
+      *
+     O          E            BLANK          1
+      *
+      *-------------------------------------------------------------
+      * NO DATA MESSAGE LINE
+      *-------------------------------------------------------------
+      *
+     O          E            NODATA         1
+     O                                           19 'NO DATA MEETS YOUR'
+     O                                           38 'SELECTION CRITERIA'

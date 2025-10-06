@@ -1,0 +1,319 @@
+/********************************************************************/
+/*                                                                  */
+/*  PROGRAM   - PPXVUPC PRINT AND POST INVOICES                     */
+/*  SYNOPSIS  - PRINT INVOICES FOR THRID PARTY OR INTER-COMPANY     */
+/*              AND POST THOSE INVOICES ONCE PRINTING IS COMPLETE.  */
+/*              SKIP THE POST IF AN INDIVIDUAL ORDER NUMBER IS      */
+/*              PASSED IN AND THERE ARE ERRORS.                     */
+/*                                                                  */
+/*  SYSTEM    - ORDER MANAGEMENT SYSTEM                             */
+/*  DATE      - 04/17/2006                                          */
+/*            - LARA BUSER                                          */
+/*                                                                  */
+/*  NOTE ***  - HOLD AND SAVE ARE HARDCODED *YES SO THE INVOICES    */
+/*               AND REPORTS CAN BE DUP'D TO ANOTHER OUTQ AND       */
+/*               SO THEY CAN BE SENT TO A SPECIAL FOLDER USING      */
+/*               ESEND TO CONVERT TO .PDF FILES AND STORED          */
+/*                                                                  */
+/*  PARAMETERS RECEIVED:                                            */
+/*   &COMPNYN    - COMPANY NUMBER - BLANK FOR ALL                   */
+/*   &LOADN      - PROCESS ORDERS ON LOAD                           */
+/*   &THRDATN    - PROCESS ORDERS THRU ACTUAL SHIP DATE             */
+/*   &ORDRN      - ORDE NUMBER                                      */
+/*   &BILTYP     - BILLING TYPE (INVOICE)                           */
+/*   &OUTQ       - OUTPUT QUEUE                                     */
+/*   &HOLD       - HOLD PRINT - ALWAYS *YES                         */
+/*   &SAVE       - SAVE PRINT - ALWAYS *YES                         */
+/*   &COPYN      - NUMBER OF COPIES                                 */
+/*   &NIGHTQ     - NIGHT OUTPUT QUEUE                               */
+/*   &JOBNME     - JOB NAME FOR FAXING                              */
+/*   &PRCUSTT    - PROCESSING CUSTOMER TYPE                         */
+/*                  THIS WILL BE EITHER TP FOR THIRD PARTY, OR      */
+/*                  IC FOR INTER-COMPANY CUSTOMERS                  */
+/*   &STATUSYN   - CONTROL PRINT OF AMOUNTS                         */
+/*                                                                  */
+/********************************************************************/
+/*  MODIFICATIONS:                                                  */
+/*------------------------------------------------------------------*/
+/* RMC 6/21/06 SET &DELETE TO Y FOR PDUWPFR SO INVOICES THAT ARENT  */
+/*             FAXED ARE DELETED FROM THE WF INVOICE LIST WORK      */
+/* SLM 12/21/06 ADD OVERRIDE TO PMCJPFR$  FOR COMBO INVOICES        */
+/* SLM 07/05/07 REMOVE CHGVAR ON A SEABOARD COVER SHEET             */
+/*           CHGVAR     VAR(&CVRNME) VALUE('SBDFINV1')              */
+/* PKD 10/26/06 ADDED DUPSPLF FOR DAILY'S                           */
+/* RMC 7/21/08 FP1110- HPB ONLY -- OVRPRTF FOR BOLS TOO.            */
+/*             SCAN: FP1110                                         */
+/* RMC 1/11/10 FP1322- INSTEAD OF 'SBMJOB  CMD(CALL PGM(PDIPSPCL)...' */
+/*             CALL IT SO NOW THE 'INVPOST" JOB'S REPORTS ARE IN THE */
+/*             SAME JOB AS THE INVOICES, TRANS LIST.. (IE. TPIN123456) --  */
+/*             ONE SUBMITTED JOB IS CREATED FROM AN INVOICE POST    */
+/*             SCAN: FP1322                                         */
+/* LJB 04/19/10 P000198- FAX INVOICE FLAG WILL ALWAYS BE "Y".       */
+/*             INVOICES THAT AREN'T FAXED/EMAILED WILL BE DELETED   */
+/*             LATER IN THE PROCESS. Fax/Email adresses are now     */
+/*             stored in PNF7REP Cust Distribution Entry file.      */
+/* JBB 03/17/17 E9064- ADD PROCESSING FOR COMPANY 440 TO DUPLICATE  */
+/*             SPOOLFILE TO NEW OUTQ STPRTDUP.                      */
+/*  RMC 05/13/19  R14851 HOLD NEW ONE EML/INV SPLF - PUMFPFR$   */
+/* RMC 7/18/19 T14912- HPB ONLY -- OVRPRTF FOR BOLS - ADD OFFSET .3 .3  */
+/* DN  08/04/21 W81963 - PUT PDUWPFR$ ON HOLD.                      */
+/********************************************************************/
+
+ PPXVUPC:    PGM        PARM(&COMPNYN &LOADN &THRDATN &ORDRN &BILTYP +
+                          &DESC &OUTQ &HOLD &SAVE &COPYN &NQSTAT +
+                          &NIGHTQ &JOBNME &PRCUSTT &STATUSYN)
+/* PARMS                                                            */
+DCL  VAR(&COMPNYN) TYPE(*DEC) /* Company Number (Passed)   */
+DCL  VAR(&LOADN) TYPE(*DEC) /* Load  Number  (Passed)   */
+DCL  VAR(&THRDATN) TYPE(*DEC) /* Thru Ship Date (Passed)   */
+DCL  VAR(&ORDRN) TYPE(*DEC) /* Order Number (Passed)   */
+DCL  VAR(&BILTYP) TYPE(*CHAR) LEN(1) /* Bill Activity Type (Invoice,Memo)  */
+DCL  VAR(&DESC) TYPE(*CHAR) LEN(25) /* PRT PGM DESCRIPTION */
+DCL  VAR(&OUTQ) TYPE(*CHAR) LEN(10) /* Output   Queue */
+DCL  VAR(&HOLD) TYPE(*CHAR) LEN(4) /* Hold Status */
+DCL  VAR(&SAVE) TYPE(*CHAR) LEN(4) /* Save Status */
+DCL  VAR(&COPYN) TYPE(*DEC) /* No. of Copies (Passed)   */
+DCL  VAR(&NQSTAT) TYPE(*CHAR) LEN(1) /* Night Queue Status flag */
+DCL  VAR(&NIGHTQ) TYPE(*CHAR) LEN(10) /* Night Job Queue */
+DCL  VAR(&JOBNME) TYPE(*CHAR) LEN(10) /* JOB NAME */
+DCL  VAR(&PRCUSTT) TYPE(*CHAR) LEN(02) /* PROCESS CUST TYPE (PASSED)*/
+DCL  VAR(&RETURN) TYPE(*CHAR) LEN(7) /* Return Code */
+DCL  VAR(&STATUSYN) TYPE(*CHAR) LEN(1) /* AMOUNT PRINT CONTROL */
+
+/* INTERNAL FIELDS                                                            */
+DCL VAR(&COUNT) TYPE(*DEC) LEN(5 0) /* Counter */
+DCL VAR(&COMPANY) TYPE(*DEC) LEN(3 0) /* Company  Number */
+DCL VAR(&LOAD) TYPE(*DEC) LEN(7 0) /* Load  Number */
+DCL VAR(&THRDAT) TYPE(*DEC) LEN(7 0) /* Thru  Actual Ship Date */
+DCL VAR(&ORDR) TYPE(*DEC) LEN(7 0) /* Order Number */
+DCL VAR(&COPY) TYPE(*DEC) LEN(2 0) /* Number of copies */
+DCL VAR(&COMMAND) TYPE(*CHAR) LEN(512) /* For  Trans. Reg. override  */
+DCL VAR(&DELETE) TYPE(*CHAR) LEN(1) /* Process Delete */
+DCL VAR(&INVOICN) TYPE(*DEC) /* Invoice Number, passed out */
+DCL VAR(&INVOICE) TYPE(*DEC) LEN(7 0) /* Invoice Number */
+DCL VAR(&USRSTATUS) TYPE(*CHAR) LEN(1) /* Error flag - if Yes, +
+                                          don't go thru the post process */
+DCL VAR(&USER) TYPE(*CHAR) LEN(10) /* USER -  determine if user PGMR */
+DCL VAR(&GRPPRF) TYPE(*CHAR) LEN(10) /* Group Profile - determine if PGMR */
+DCL VAR(&PROGRAMMER) TYPE(*CHAR) LEN(1)  VALUE('N') /* PGMRs - for testing */
+DCL VAR(&REPRINT) TYPE(*CHAR) LEN(1)
+DCL VAR(&CUSTNON) TYPE(*DEC)
+DCL VAR(&CVRNME) TYPE(*CHAR) LEN(10)
+DCL VAR(&CRDFLAG) TYPE(*CHAR) LEN(1)
+DCL VAR(&TYPE) TYPE(*CHAR) LEN(2)
+DCL VAR(&DEPT) TYPE(*CHAR) LEN(6)
+DCL VAR(&OVERLAY) TYPE(*CHAR) LEN(8)
+DCL VAR(&CDDPGM) TYPE(*CHAR) LEN(10)
+DCL VAR(&CDDFILE) TYPE(*CHAR) LEN(10)
+DCL VAR(&ADDLOBJ) TYPE(*CHAR) LEN(10)
+DCL VAR(&SENDPHONE) TYPE(*CHAR) LEN(10)
+DCL VAR(&SENDFAX) TYPE(*CHAR) LEN(10)
+DCL VAR(&OVOUTQ) TYPE(*CHAR) LEN(10)
+DCL VAR(&OVHOLD) TYPE(*CHAR) LEN(4)
+DCL VAR(&OVSAVE) TYPE(*CHAR) LEN(4)
+DCL VAR(&DRAWER) TYPE(*DEC) LEN(3 0)
+DCL VAR(&PRTDEVTYPE) TYPE(*CHAR) LEN(10)
+DCL VAR(&LENGTH) TYPE(*DEC) LEN(3 0)
+DCL VAR(&WIDTH) TYPE(*DEC) LEN(3 0)
+DCL VAR(&CPI) TYPE(*DEC) LEN(3 1)
+DCL VAR(&LPI) TYPE(*DEC) LEN(2 0)
+DCL VAR(&OVERFLOW) TYPE(*DEC) LEN(3 0)
+DCL VAR(&ROTATE) TYPE(*CHAR) LEN(5)
+DCL VAR(&COMMENT1) TYPE(*CHAR) LEN(50)
+DCL VAR(&COMMENT2) TYPE(*CHAR) LEN(50)
+DCL VAR(&COMMENT3) TYPE(*CHAR) LEN(50)
+DCL VAR(&COMMENT4) TYPE(*CHAR) LEN(50)
+DCL VAR(&COMMENT5) TYPE(*CHAR) LEN(50)
+DCL VAR(&RECSTS)   TYPE(*CHAR) LEN(1)
+DCL VAR(&PLT)      TYPE(*CHAR) LEN(1)
+DCL VAR(&ORG)      TYPE(*CHAR) LEN(1)
+
+/********************************************************************/
+/* CHANGE VARIABLES FOR USE IN PROGRAM                              */
+/********************************************************************/
+
+CHGVAR     VAR(&COMPANY) VALUE(&COMPNYN)
+CHGVAR     VAR(&LOAD) VALUE(&LOADN)
+CHGVAR     VAR(&THRDAT) VALUE(&THRDATN)
+CHGVAR     VAR(&ORDR) VALUE(&ORDRN)
+CHGVAR     VAR(&COPY) VALUE(&COPYN)
+CHGVAR     VAR(&DELETE) VALUE('N')
+CHGVAR     VAR(&REPRINT) VALUE(' ')
+CHGVAR     VAR(&CRDFLAG) VALUE('N')
+CHGVAR     VAR(&INVOICN) VALUE(0)
+CHGVAR     VAR(&CUSTNON) VALUE(0)
+
+RTVJOBA    USER(&USER)
+RTVUSRPRF  USRPRF(&USER) GRPPRF(&GRPPRF)
+
+/* ------------------------------------------------------------------*/
+/* GET COMPANY'S ORGANIZATION FOR LATER                             */
+/* ------------------------------------------------------------------*/
+             CALL       PGM(PMOVXFR) PARM(' ' &COMPANY &PLT &ORG)
+/* ------------------------------------------------------------------*/
+/* Override the printer file parms to the passed in parms.           */
+/* The exception report and invoice *** MUST *** BE SAVE *YES AND    */
+/* HOLD *YES lf later processing.                                    */
+/* Then, print the invoices and possibly the exception report.       */
+/* -- SEL INVC TO PRINT&POST XF - ORDER HEADER TRG *                 */
+/*    PRINT THE INVOICE(S)                                           */
+/* ------------------------------------------------------------------*/
+             OVRPRTF    FILE(PPXSPFR$) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(*YES) SAVE(*YES)
+ R14851:     OVRPRTF    FILE(PUMFPFR$) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(*YES) SAVE(*YES)
+
+             OVRPRTF    FILE(PMCJPFR$) PAGESIZE(88 125) LPI(8) +
+                          CPI(15) OVRFLW(82) DRAWER(3) OUTQ(&OUTQ) +
+                          FORMTYPE(*INV) COPIES(&COPY) HOLD(&HOLD) +
+                          SAVE(*YES)
+
+             OVRPRTF    FILE(PDR4PFR$) PAGESIZE(88 125) LPI(8) +
+                          CPI(15) OVRFLW(82) DRAWER(3) OUTQ(&OUTQ) +
+                          FORMTYPE(*INV) COPIES(&COPY) HOLD(*YES) +
+                          SAVE(*YES)
+
+/* ------------------------------------------------------------------*/
+/* Call RTV CDD for Overlays XF  --  FOR INVOICES - Daily's  */
+/* ------------------------------------------------------------------*/
+CHGVAR     VAR(&TYPE) VALUE('IN') /* INVOICE */
+CHGVAR     VAR(&DEPT) VALUE('INCST1') /* CUSTOM INVOICE */
+CALL PGM(PMG9XFR) PARM(' ' &COMPANY &TYPE &DEPT &OVERLAY &CDDPGM &CDDFILE +
+                       &ADDLOBJ &SENDPHONE &SENDFAX &OVOUTQ &OVHOLD &OVSAVE +
+                       &DRAWER &PRTDEVTYPE &LENGTH &WIDTH &LPI &CPI &OVERFLOW +
+                       &ROTATE  &COMMENT1 &COMMENT2 &COMMENT3 +
+                       &COMMENT4 &COMMENT5 &RECSTS)
+
+/* If active record found, process override */
+             IF         COND(&RECSTS *EQ 'A') THEN(DO)
+
+     OVRPRTF  FILE(&CDDFILE) DEVTYPE(&PRTDEVTYPE) PAGESIZE(&LENGTH &WIDTH) +
+              LPI(&LPI)  CPI(&CPI) OVRFLW(&OVERFLOW) DRAWER(&DRAWER) +
+              PAGRTT(&ROTATE) FRONTOVL(&OVERLAY) OUTQ(&OVOUTQ) +
+              COPIES(&COPY) HOLD(&OVHOLD) SAVE(&OVSAVE)
+ENDDO
+
+/* -----------------------------------------------------------------------*/
+/* Call RTV CDD for Overlays XF - DO FOR BOLS FOR HPB ONLY & PRINT 1 COPY */
+/* -----------------------------------------------------------------------*/
+ FP1110:
+             IF         COND(&ORG *EQ 'H') THEN(DO)
+             CHGVAR     VAR(&TYPE) VALUE('BL') /* BOL  */
+             CHGVAR     VAR(&DEPT) VALUE('TRAFF ') /* TRAFFIC        */
+             CALL       PGM(PMG9XFR) PARM(' ' &COMPANY &TYPE &DEPT +
+                          &OVERLAY &CDDPGM &CDDFILE &ADDLOBJ +
+                          &SENDPHONE &SENDFAX &OVOUTQ &OVHOLD +
+                          &OVSAVE &DRAWER &PRTDEVTYPE &LENGTH +
+                          &WIDTH &LPI &CPI &OVERFLOW &ROTATE +
+                          &COMMENT1 &COMMENT2 &COMMENT3 &COMMENT4 +
+                          &COMMENT5 &RECSTS)
+
+/* If active record found, process override */
+             IF         COND(&RECSTS *EQ 'A') THEN(DO)
+  /* RMC ADDED OFFSET TO OVR   7/18/19  */
+             OVRPRTF    FILE(&CDDFILE) DEVTYPE(&PRTDEVTYPE) +
+                          PAGESIZE(&LENGTH &WIDTH) LPI(&LPI) +
+                          CPI(&CPI) OVRFLW(&OVERFLOW) +
+                          DRAWER(&DRAWER) PAGRTT(&ROTATE) +
+                          FRONTOVL(&OVERLAY .3 .3) OUTQ(&OVOUTQ) +
+                          COPIES(1) HOLD(&OVHOLD) SAVE(&OVSAVE)
+             ENDDO
+ EFP1110:    ENDDO
+/* ------------------------------------------------------------------*/
+/* Call SEL Invc to Print&Post XF                                    */
+/* ------------------------------------------------------------------*/
+             CALL       PGM(PPXWXFR) PARM(' ' &COMPANY &ORDR &THRDAT +
+                          &LOAD &INVOICE &BILTYP &DESC &OUTQ &HOLD +
+                          &SAVE &NQSTAT &NIGHTQ &COPYN &COUNT +
+                          &JOBNME &PRCUSTT &DELETE &STATUSYN +
+                          &USRSTATUS)
+
+/* User Status Field = Y means there was an error when printing one  */
+/* invoice. When this is the case, skip the rest of the posting      */
+/* process.                                                          */
+
+IF         COND(&USRSTATUS *EQ 'Y') THEN(GOTO CMDLBL(END))
+
+/* ------------------------------------------------------------------*/
+/* Print the transaction register - *** MUST *** BE SAVE *YES AND    */
+/* HOLD *YES because this spool file is DUP'D to Triumph and CORP    */
+/* -- PRT INVOICE TRANS. REG PF - WF INVOICE LIST WORK *             */
+/* &DELETE is no longer being used.                                  */
+/* ------------------------------------------------------------------*/
+/* Override the printer file for the invoice transaction register    */
+/* ------------------------------------------------------------------*/
+             OVRPRTF    FILE(PDUWPFR$) OUTQ(&OUTQ) COPIES(&COPY) +
+                          HOLD(*YES) SAVE(*YES)
+
+             CALL       PGM(QCMDEXC) PARM(&COMMAND 512)
+
+ DELETE:     CHGVAR     VAR(&DELETE) VALUE('Y')
+
+             CALL       PGM(PDUWPFR) PARM(' ' &JOBNME &COMPANY &ORDR +
+                          &THRDAT &LOAD &BILTYP &DELETE &PRCUSTT)
+
+/* ------------------------------------------------------------------*/
+/* IF 960, DUPSPLF TO TFPRTDUP                                       */
+/* DON'T DUP IF A PROGRAMMER IS TESTING                              */
+/* ------------------------------------------------------------------*/
+IF         COND(&GRPPRF *NE SBDPGMR) THEN(DO) /* NOT A  PGMR */
+
+IF         COND(&COMPANY *EQ 960) THEN(DO)
+     DUPSPLF FILE(PDUWPFR$) JOB(*) OUTQ(TFPRTDUP) +
+             SPLNBR(*LAST) HOLD(*YES) SAVE(*YES)
+ENDDO                      /* Company 960 */
+
+IF         COND(&COMPANY *EQ 440) THEN(DO)
+     DUPSPLF FILE(PDUWPFR$) JOB(*) OUTQ(SPPRTDUP) +
+             SPLNBR(*LAST) HOLD(*YES) SAVE(*YES)
+ENDDO                      /* Company 440 */
+
+IF         COND(&ORG *EQ 'D') THEN(DO)
+  IF         COND(&COMPANY *EQ 363) THEN(DO)
+     DUPSPLF FILE(PDUWPFR$) JOB(*) OUTQ(DSPRTDUP) +
+             SPLNBR(*LAST) HOLD(*YES) SAVE(*YES)
+  ENDDO                      /* Company 363 */
+  IF         COND(&COMPANY *EQ 364) THEN(DO)
+     DUPSPLF FILE(PDUWPFR$) JOB(*) OUTQ(DMPRTDUP) +
+             SPLNBR(*LAST) HOLD(*YES) SAVE(*YES)
+  ENDDO                      /* Company 364 */
+ENDDO   /* ORG DAILY */
+
+/* ------------------------------------------------------------------*/
+/* DUPSPLF TO TIM                                                    */
+/* ------------------------------------------------------------------*/
+IF         COND(&ORG *NE 'D') THEN(DO)
+    /* W81963 - PUT REPORT ON HOLD */
+         /*  DUPSPLF    FILE(PDUWPFR$) OUTQ(PRKPRT08) SPLNBR(*LAST) +
+                          HOLD(*NO) SAVE(*YES)   */
+             DUPSPLF    FILE(PDUWPFR$) OUTQ(PRKPRT08) SPLNBR(*LAST) +
+                          HOLD(*YES) SAVE(*YES)
+ENDDO  /* ORG NE DAILY'S */
+
+/* ------------------------------------------------------------------*/
+/* *** PROGRAMMERS NOTE: ***                                        */
+/* TOGGLE THIS ENDDO TO PLACE AFTER THE CALL TO PDIPSPCL            */
+/*   WHEN TESTING TO STOP TESTING PRIOR TO G/L UPDATE. THIS WILL    */
+/*   LEAVE THE INVOICE WORK FILE INTACT BUT THE FILES WON'T GET     */
+/*   UPDATED FOR THE POSTING PROCESS. PDIPSPCL MUST BE CALLED       */
+/*   BEFORE THE HEADER RECORD IS PROPERLY UPDATED.                  */
+/* ------------------------------------------------------------------*/
+ENDDO      /* End "Not a Programmer" */
+
+/* ------------------------------------------------------------------*/
+/* POST INVOICES TO G/L, HISTORY, JDE, PROCESS WAREHOUSE TRANSFERS,  */
+/* AND PRINT THE INVOICE POST REGISTER                               */
+/* -- UPD POST INVOICES CLP -  /UT USER PROGRAMS *                   */
+/* ------------------------------------------------------------------*/
+ FP1322:     CALL       PGM(PDIPSPCL) PARM(&COMPNYN &INVOICN &OUTQ +
+                          &HOLD &SAVE &COPYN &NQSTAT &NIGHTQ &PRCUSTT)
+
+/* ------------------------------------------------------------------*/
+/* CALL THE PROGRAM TO FAX/EMAIL INVOICES THAT REQUIRE IT.           */
+/* Fax & Email are now stored in CUST DISTRIBUTION ENTRY file.       */
+/* ------------------------------------------------------------------*/
+             CALL       PGM(PDVMPCLP) PARM(&RETURN &COMPNYN &ORDRN +
+                          &CUSTNON &REPRINT &JOBNME &CVRNME &CRDFLAG)
+
+
+ END:        ENDPGM

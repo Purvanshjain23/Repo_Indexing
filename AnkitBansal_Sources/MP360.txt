@@ -1,0 +1,982 @@
+     Z* CRTBNDRPG
+     Z* DFTACTGRP(*NO) BNDDIR(YBNDDIR) DBGVIEW(*SOURCE)
+     Z* CVTOPT(*DATETIME) ACTGRP(*CALLER) OPTIMIZE(*BASIC)
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * ENVIRONMENT:  PORK DIVISION  - moved into the e1idevmdl
+      * SYSTEM:       AS/400
+      * PROGRAM:      MP360
+      * DESCRIPTION:  MP2: Build Workfile/Edit Invoices to Post to JDE
+      * PROGRAMMER:   LeAnne Fedor    / Rose Centonze
+      * DATE:         05/01/02        / 4/07/2020
+      *
+      *
+      * FUNCTION:    This program edits the invoices that:
+      *                1) have not yet been posted to JDE
+      *                2) have been completely applied to purchase orders
+      *
+      *              This program:
+      *                1) prints an edit listing of bad records
+      *                2) writes good records to a workfile for posting in a later step
+      *
+      *              QPRINT is used for the output file since the command 'CLPRINTA'
+      *              prints to QPRINT.  QPRINT is overridden in the submission CLP
+      *              to 'SHARE = YES' to allows both this RPG program and the CLP
+      *******        UT80046A to write to the same print file.
+      * 6/15/2021    UT80046 to write to the same print file. call ut80046 instead -its for 132 char
+      *
+      *              Since the 'CLPRINTA' command logic in UT80046A is not being used
+      *              to print headings, count lines or page break, these functions are
+      *              controlled from this RPG program by counting the lines.
+      *
+      *              This program page-breaks when the line count reaches 62 lines
+      *              because this listing is designed to run on paper that is 68 lines
+      *              long.  Therefore, if the users generate this report on various
+      *              laser printers with different page lengths, the page breaks may
+      *              be goofy.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 09/24/02  LeAnne Fedor
+      *           Recompile only.
+      *           All amount fields in the database were increased from 7,2 to 9,2.
+      *
+      * 11/18/03  Barb Gutierrez
+      *           Recompile only due to pkcwrel1 file change.
+      *
+      * 01/05/04  LeAnne Fedor
+      *           The users have been keying the 'p.o. number' into the Invoice Header
+      *           Comment field so that it got, eventually, into a field in the JDE
+      *           F0911 file that was printing on various JDE reports.
+      *
+      *           They asked us to default the 'p.o. number' into the Invoice Header
+      *           Comment field. We didn't see any reason to do this since we can
+      *           simply move the p.o. number directly into the workfile field that
+      *           utimately ends up on the JDE file.
+      *
+      *           So, in this modification, we are changing the code to move the
+      *           'p.o. number' directly into the 'comment field' in the workfile.
+      *
+      * 03/12/08  LeAnne Ramsey
+      *           We gave all functionality to High Plains Biodiesel. So,
+      *           we now run over two different library lists. We replaced
+      *           the hardcoding of Company=350 with a Data Area.
+      *
+      * 03/27/08  LeAnne Ramsey
+      *           Move the retrieve of the new data area up in the Initialization
+      *           Subroutine so that it occurred prior to account retrievals.
+      *
+      * 03/30/11  Barb Gutierrez
+      *           Recompile only due to field size changes in database.  E001398
+      *
+      * 03/11/14  LeAnne Ramsey (E2992)
+      *           Added Accounting Company to the workfile MPP304.
+      *           Accounting Company is a required entry when the user
+      *           submits this function.
+      *           Also, I changed the primary key on MPJ102B to be
+      *           Accounting Company.  We will use the new Accounting Company
+      *           instead of the Company in the data area DAMP2CONO.
+      *           I have removed DAMP2CONO from the program.
+      *
+      * 03/26/19  Brad Baden  (E14631)
+      *           Recompile only due to field size changes in database.
+      *
+      * 04/07/20  Rose Centonze
+      *           Get E1 Live from company values. call mpjdeaide1 if live with E1
+      *           Else call world pgm mpjdeaid. Call HPJDEVW/hpjdeve1 depending on E1Live Flag;
+      *           If live with E1, then call CHKSUPINV instead of vendinv to check for dup inv
+      *           If live with E1, then call VENDHOLDE1 instead of VENDHOLDW  check for held vendor
+      *
+      * 06/01/21  Danny Nguyen (S17068)
+      *           Database File Changed on MPP104 file in join LF MPJ102B.
+      *           Recompile only.
+      *
+      * 06/15/21  Rose Centonze
+      *           Call ut80046 instead of UT80046A - this one is for a 132 char prtf
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fcaabrel1  if   e           k disk
+      *    Company
+      *
+      *
+     Fpkcwrel1  if   e           k disk
+      *    G/L Account Codes
+      *
+     Fpdkmrel0  if   e           k disk
+      *  Company values file
+      *
+      *
+     Fmpp102    uf   e           k disk    prefix(p1)
+      *    MP2: Purchase order header
+      *
+      *
+     Fmpj102b   if   e           k disk    rename(phrec:phrecb)
+      *    MP2: Purchase Order Header + Invoice Header
+      *    (Logical selects only invoices not yet posted to JDE)
+      *
+      *
+     Fmpp105    if   e           k disk
+      *  MP2: Invoice detail
+      *
+      *
+     Fmpp304    uf a e           k disk
+      *    MP2: Workfile of Invoices to POST to JDE
+      *
+      *
+     Fqprint    o    f  132        printer oflind(*inof)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+      * Standard fields
+      *
+     d dash            s            132    inz(*all'-')
+     d rtime           s              6  0
+     D maxmsg          s              2  0  inz(20)
+     D msgfl           s             10
+      *
+      *
+      * Control fields
+      *
+     D errorfl         s              1    inz('N')
+     D first           s              1    inz('Y')
+     D start           s              1  0
+     D length          s              1  0
+      *
+      *
+      * Work fields for counting lines
+      *
+     d wkovfl          s              3  0 inz(62)
+     d wkcurl          s              3  0
+     d wkdifl          s              3  0
+      *
+      *
+      * Workfields
+      *
+     d wknewdoc        s                   like(mjnewdoc)
+      *
+      *
+     d wkaid           s              8
+     d wkcode          s                   like(cwdmcd)
+      *
+     d wkitemmcu       s                   like(mjmcu)
+     d wkitemobj       s                   like(mjobj)
+     d wkitemsub       s                   like(mjsub)
+      *
+     d wktaxmcu        s                   like(mjmcu)
+     d wktaxobj        s                   like(mjobj)
+     d wktaxsub        s                   like(mjsub)
+      *
+     d wkfrtmcu        s                   like(mjmcu)
+     d wkfrtobj        s                   like(mjobj)
+     d wkfrtsub        s                   like(mjsub)
+      *
+     d wkrtcd          s                   like(mjrtcd)
+     d wkmpval         s                   like(mjmpval)
+      *
+      *
+      * Parm fields
+      *
+     d xxepfl          s              1
+      *
+     d xxajd           s                   like(phjdvnno)
+     D xxname          s                   like(phjdvnnm)
+     D xxtype          s              3    inz('V  ')
+     D xxerror         s              1    inz('N')
+      *
+     d xxjdvnno        s                   like(phjdvnno)
+     d xxjdvnnx        s              8  0
+     d xxjdvnna        s              8a
+     d xxhold          s              1
+     d xxexists        s              1
+     d xxinno          s             25
+      *
+     d xxlivee1        s              1
+     d xxlivejw        s              1
+      *
+     d xxmcu           s                   like(mjmcu)
+     d xxobj           s                   like(mjobj)
+     d xxsub           s                   like(mjsub)
+      *
+      *
+      * Print fields
+      *
+     d h1epds          s              4
+     d h1conm          s                   like(abadtx)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * standard error message handling data structures
+      *---------------------------------------------------------------
+      *
+      * For error message handling, a packed index (3) is required.
+      * For program readability, define a corresponding error count
+      * field called 'error'
+      *
+     D                 ds                  inz
+     D  error                         2p 0
+     D   e                            2p 0 overlay(error)
+      *
+      * This data structure supplies the name of the message file to
+      * the message handling CL program.  The field name MSGFIL must be
+      * constant. The value in quotes is the name of the specific
+      * message file containing the user defined messages.
+      *
+     D                 ds                  inz
+     D  msgfil                       10    inz('HSMSGF    ')
+      *
+      *---------------------------------------------------------------
+      *  Standard message data structures
+      *---------------------------------------------------------------
+      *
+      * The following 3 data structures are used to speed message
+      * handling since it is faster to clear data structures than
+      * arrays.  Each is associated with a standard message array.
+      *
+     D mgi             ds                  inz
+     D  mgid                          7    dim(20)
+      *
+     D mgd             ds                  inz
+     D  mgdt                         50    dim(20)
+      *
+     D mgwk            ds                  inz
+     D  mgw                           1    dim(50)
+      *
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+      *
+      *---------------------------------------------------------------
+      * Local data area.
+      *---------------------------------------------------------------
+      *
+     Dlda             uds                  dtaara(*lda)
+     D  ldcymd                 2      9  0
+     D  ldmdy                 10     15  0
+     D  lduser                16     25
+     D  ldacono               86     88  0
+      *
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Print the headings the first time through
+      *
+     C                   exsr      $prthdr
+      *
+      * Read each record in the join logical file of purchase order header +
+      * invoice header (This logical is limited to invoices not-yet-posted to JDE.)
+      *
+      * Process those invoices where:
+      *  1) the accounting company matches the user's submission
+      *  2) the invoice 'amount to apply' and 'applied amount' are equal
+      *  3) the 'create user' matches the 'user' selected for the post
+      *  4) the 'invoice date' is on/before the cut-off date
+      *
+     C     ldacono       setll     mpj102b
+     C                   dou       *in90 = *on                                  Main do
+     C     ldacono       reade     mpj102b                                90
+     C                   if        *in90 = *off and                             If not EOF
+     C                             ihtaam = ihapam and
+     C                             ihcruser = lduser and
+     C                             ihindt <= ldcymd
+      *
+     C                   move      no            first
+      * Edit record
+     C                   exsr      $edit
+      *
+      * The invoice has been edited; so:
+      *   1) Process invoice detail records for invoices with no errors or
+      *   2) Print error messages for invoices with errors
+      *
+     C                   select
+     C                   when      error = 0
+     C                   exsr      $invdtl
+      *
+     C                   when      error <> 0
+     C                   exsr      $prtrec
+     C                   exsr      $prtmsg
+     C                   endsl
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+      * Now, if you had any data, reprocess your workfile records and populate
+      * the 'JDE value without decimals' field.
+      *
+     C                   if        first = no
+     C                   exsr      $batch
+     C                   endif
+      *
+      *---------------------------------------------------------------
+      * EOF processing
+      *---------------------------------------------------------------
+      *
+     C                   select
+     C                   when      first = yes
+     C                   except    nodata
+      *
+     C                   when      errorfl = no
+     C                   except    noerror
+     C                   endsl
+      *
+     C                   seton                                        lr
+      /eject
+      *---------------------------------------------------------------
+      * Edit record
+      *---------------------------------------------------------------
+      *
+     C     $edit         begsr
+      *
+      * Validate:
+      *  1) JDE vendor
+      *  2) Invoice number
+      *
+     C                   exsr      $vnno
+     C                   exsr      $inno
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Vendor validations
+      *-----------------------------------------------------------------------------------------
+      *
+      * Validations:
+      *    1) vendor must still be a valid vendor in JDE
+      *    2) vendor cannot have a 'Hold Payment' value of YES
+      *
+     C     $vnno         begsr
+      *
+      * Vendor must still be valid in JDE
+      *
+     C                   Z-ADD     LDACONO       XXCONO            3 0
+     C******             call      'HPJDEV'                         p16169
+     C                   if        xxlivee1 =  no                               E1 LIVE  no
+     C                   call      'HPJDEVW'
+     C                   parm                    mgi
+     C                   parm                    mgd
+     C                   PARM                    msg#              2 0          Number of Messa
+     C                   parm      phjdvnno      xxajd
+     C                   parm      'V  '         xxtype
+     C                   parm      no            xxerror
+     C                   parm      *blank        xxname
+     c                   endif
+     C                   if        xxlivee1 =  yes                              E1 LIVE  no
+     C                   call      'HPJDEVE1'
+     C                   parm                    mgi
+     C                   parm                    mgd
+     C                   PARM                    msg#              2 0          Number of Messa
+     C                   parm      phjdvnno      xxajd
+     C                   parm      'V  '         xxtype
+     C                   parm      no            xxerror
+     C                   parm      *blank        xxname
+     c                   endif
+      *
+     C                   if        xxerror = no
+     C     phposn        chain     mpp102                             92
+     C                   if        *in92 = *off
+     C                   move      xxname        p1phjdvnnm
+     C                   update    phrec
+     C                   endif
+     C                   endif
+      *
+      * Vendor on Payment Hold
+      *     p16169 - call correct pgm based on whichever is live
+     C                   if        xxlivee1 =  no                               E1 LIVE  no
+     C                   call      'VENDHOLDW'
+     C                   parm      phjdvnno      xxjdvnno
+     C                   parm      *blank        xxhold
+     C                   endif
+     C                   if        xxlivee1 =  yes                              E1 LIVE yes
+     C                   z-add     phjdvnno      xxjdvnnx
+     C                   call      'VENDHOLDE1'
+     C                   parm                    rtncde            7
+     C                   parm                    xxjdvnnx
+     C                   parm      *blank        xxhold
+     C                   endif
+      *
+     C                   if        xxhold = yes and error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09190'     mgid(e)
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *-----------------------------------------------------------------------------------------
+      * Validate Invoice Number
+      *-----------------------------------------------------------------------------------------
+      *
+      * Validations:
+      *    1) invoice number cannot already exist for this vendor in JDE
+      *
+     C     $inno         begsr
+      *
+      * Move our 20A invoice number to JDE's 25A invoice number field
+      *
+     C                   movel     ihinno        xxinno
+      *
+      * Call the JDE program to see if the invoice already exists
+      *
+     C                   if        xxlivee1 =  no                               E1 LIVE
+     C                   call      'VENDINV'
+     C                   parm      phjdvnno      xxjdvnno
+     C                   parm                    xxinno
+     C                   parm      *blank        xxexists
+     C                   endif                                                  live e1
+      *
+     C                   if        xxlivee1 =  yes                              E1 LIVE yes
+     C                   MOVE      phjdvnno      xxjdvnna
+     C                   move      '  '          xxexists
+     C                   call      'VENDINXE1'
+     C                   parm                    xxjdvnna                        ALPHA
+     C                   parm                    xxinno
+     C                   parm                    xxexists
+     C                   endif                                                  live e1
+      *
+     C** 6/10/20         if        errorst  = yes and error < maxmsg            added for p16169
+     C*                  add       1             error
+     C*                  movel     'HS09191'     mgid(e)
+     C*                  endif
+      *
+     C                   if        xxexists = '1' and error < maxmsg
+     C                   add       1             error
+     C                   movel     'HS09191'     mgid(e)
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write invoices for posting
+      *---------------------------------------------------------------
+      *
+      * If you are here, then the Invoice was error-free.
+      *
+      *
+     C     $invdtl       begsr
+      *
+      * We will write the first record for an invoice with a value of
+      * YES for the 'JDE new document' flag. All other records for the invoice
+      * will be NO.
+      *
+     C                   move      yes           wknewdoc
+     C                   z-add     0             wkmpval
+      *
+      * Process all the detail records for the Invoice accumulating dollars.
+      *
+     C     key01         setll     mpp105
+      *
+     C                   dou       *in91 = *on                                  Do detail loop
+     C     key01         reade     mpp105                                 91
+     C                   if        *in91 = *off                                 If not EOF
+     C                   add       idapam        wkmpval
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do detail loop
+      *
+      *
+      *  Write a single 'invoice' record.
+      *
+     C                   move      'I'           mjrtcd
+     C                   z-add     wkmpval       mjmpval
+     C                   move      wkitemmcu     mjmcu
+     C                   move      wkitemobj     mjobj
+     C                   move      wkitemsub     mjsub
+     C                   exsr      $wrt304
+      *
+      *  Write a single 'shipping and handling' record.
+      *
+     C                   if        ihsham <> 0                                  If freight
+     C                   move      'F'           mjrtcd
+     C                   z-add     ihsham        mjmpval
+     C                   move      wkfrtmcu      mjmcu
+     C                   move      wkfrtobj      mjobj
+     C                   move      wkfrtsub      mjsub
+     C                   exsr      $wrt304
+     C                   endif                                                  If freight
+      *
+      *  Write a single 'sales tax' record.
+      *
+     C                   if        ihstam <> 0                                  If sales tax
+     C                   move      'T'           mjrtcd
+     C                   z-add     ihstam        mjmpval
+     C                   move      wktaxmcu      mjmcu
+     C                   move      wktaxobj      mjobj
+     C                   move      wktaxsub      mjsub
+     C                   exsr      $wrt304
+     C                   endif                                                  If sales tax
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write a workfile record
+      *---------------------------------------------------------------
+      *
+     C     $wrt304       begsr
+      *
+     C                   movel     xxname        mjjdvnnm
+     C                   move      wknewdoc      mjnewdoc
+     C                   move(p)   lduser        mjcruser
+     C                   z-add     ldacono       mjacono
+     C                   z-add     0             mjjdeval
+     C                   z-add     phposn        mjposn
+     C                   z-add     phjdvnno      mjjdvnno
+     C                   movel     ihinno        mjinno
+     C                   z-add     ihindt        mjindt
+      *
+      * JDE requires p.o. number to be right-justified with zero fill. MP2 sends it
+      * to us as left-justified. So, swap it around to be what JDE wants. (Both MP2
+      * and JDE have it defined as 8A.)
+      *
+     C                   move      '00000000'    mjpono
+     C     ' '           checkr    phpono        length
+     C                   eval      start = 8 - length + 1
+     C                   eval      %subst(mjpono:start:length) =
+     C                             %subst(phpono:1:length)
+      *
+      * Move the p.o. number into the 'comment' field.
+      *
+     C                   movel(p)  phpono        mjcom
+      *
+     C                   write     mjrec
+     C                   move      no            wknewdoc
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print report headings
+      *---------------------------------------------------------------
+      *
+     C     $prthdr       begsr
+      *
+     C                   z-add     0             wkcurl
+     C                   except    h1hdr
+     C                   add       8             wkcurl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Print record
+      *---------------------------------------------------------------
+      *
+     C     $prtrec       begsr
+      *
+     C                   move      yes           errorfl
+      *
+     C                   if        wkcurl > wkovfl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Program UT80046A does not print headings or check for page breaks.
+      * Before calling  UT80046A, determine if all 8 lines required for the
+      * record will fit on the current page. Calculate the remaining lines
+      * on the page using the overflow line and the current line.
+      *
+     C     wkovfl        sub       wkcurl        wkdifl
+      *
+      * If you have more messages than will fit on the page, then page break
+      * and print headings.
+      *
+     C                   if        wkdifl < 8
+     C                   exsr      $prthdr
+     C                   endif
+      *
+     C                   except    l1dtl
+     C                   add       1             wkcurl
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------------
+      * Print error messages
+      *-------------------------------------------------------------------
+      *
+     C     $prtmsg       begsr
+      *
+     C                   if        error <> 0
+     C                   exsr      $wrmsg
+     C                   z-add     0             error
+     C                   exsr      $clmsg
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Write error messages
+      *---------------------------------------------------------------
+      *
+     C     $wrmsg        begsr
+      *
+      * If overflow, print headings.
+      *
+     C                   if        wkcurl > wkovfl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Program UT80046A does not print headings or check for page breaks.
+      * Before calling  UT80046A, determine if all the error messages can be
+      * printed on the current page.  Calculate the remaining print lines
+      * on the page using the overflow line and the current line.
+      *
+     C     wkovfl        sub       wkcurl        wkdifl
+      *
+      * If you have more messages than will fit on the page, then page break
+      * and print headings.
+      *
+     C                   if        error > wkdifl
+     C                   exsr      $prthdr
+     C                   endif
+      *
+      * Increment the current line by the number of error messages you will be
+      * printing in UT80046A plus one for the space after.  This sets the current
+      * line number properly for when you return from UT80046A.
+      *
+     C     wkcurl        add       error         wkcurl
+     C                   add       1             wkcurl
+      *
+     C****               call      'UT80046A'                           43   call below instead
+     C                   call      'UT80046'                            43       for 132 char prtf
+     C                   parm                    mgid
+     C                   parm                    mgdt
+     C                   parm                    error
+     C                   parm      msgfil        msgfl
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Clear messages
+      *----------------------------------------------------------------
+      *
+     C     $clmsg        begsr
+      *
+     C****               call      'UT80046A'                           43
+     C                   call      'UT80046'                            43       for 132 char prtf
+     C                   parm      *blank        mgi
+     C                   parm      *blank        mgd
+     C                   parm      *zero         error
+     C                   parm      msgfil        msgfl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Reprocess your workfile to populate the JDE 'Value' field
+      *---------------------------------------------------------------
+      *
+      * We need the dollar amount for JDE to be in a field without decimals.
+      * This subroutine reads the workfile records and populates this JDE 'value'
+      * field.
+      *
+     C     $batch        begsr
+      *
+     C     *loval        setll     mpp304
+      *
+     C                   dou       *in91 = *on                                  Do batch loop
+     C                   read      mpp304                                 91
+     C                   if        *in91 = *off                                 If not EOF
+     C     100           mult      mjmpval       mjjdeval
+     C                   update    mjrec
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Do batch loop
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve Freight accounts
+      *---------------------------------------------------------------
+      *
+     C     $frtacct      begsr
+      *
+      * First, go get an 'account id' from Cross Apps.  Retrieve the
+      * record using the following hard-coded values:
+      *   1) accounting company from the LDA
+      *   2) code = 'MPFRT'
+      *
+     C                   move      'MPFRT   '    wkcode
+     C                   exsr      $aid
+      *
+      * If you got an Account ID, then go retrieve the Cost Center/
+      * Object Account/Subsidiary associated with this Account ID from a JDE file.
+      *
+     C                   if        wkaid <> *blank
+     C                   move      'F'           wkrtcd
+     C                   exsr      $jdeaid
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve Sales Tax accounts
+      *---------------------------------------------------------------
+      *
+     C     $taxacct      begsr
+      *
+      * First, go get an 'account id' from Cross Apps.  Retrieve the
+      * record using the following hard-coded values:
+      *   1) accounting company from workfile
+      *   2) code = 'MPSLSTX'
+      *
+     C                   move      'MPSLSTX '    wkcode
+     C                   exsr      $aid
+      *
+      * If you got an Account ID, then go retrieve the Cost Center/
+      * Object Account/Subsidiary associated with this Account ID from a JDE file.
+      *
+     C                   if        wkaid <> *blank
+     C                   move      'T'           wkrtcd
+     C                   exsr      $jdeaid
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve Item accounts
+      *---------------------------------------------------------------
+      *
+     C     $itemacct     begsr
+      *
+      * First, go get an 'account id' from Cross Apps. Retrieve the
+      * record using the following hard-coded values:
+      *   1) accounting company from the LDA
+      *   2) code = 'APFARMWH'
+      *
+     C                   move      'APFARMWH'    wkcode
+     C                   exsr      $aid
+      *
+      * If you got an Account ID, then go retrieve the Cost Center/
+      * Object Account/Subsidiary associated with this Account ID from a JDE file.
+      *
+     C                   if        wkaid <> *blank
+     C                   move      'I'           wkrtcd
+     C                   exsr      $jdeaid
+     C                   endif
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve Account ID from Cross Apps
+      *---------------------------------------------------------------
+      *
+     C     $aid          begsr
+      *
+     C     key02         chain     pkcwrel1                           92
+     C                   if        *in92 = *off                                 If found
+     C                   move      cwdocd        wkaid
+     C                   else
+     C                   move      *blank        wkaid
+     C                   endif                                                  If found
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Retrieve JDE Account Stuff for A) Freight or B) Sales Tax
+      *---------------------------------------------------------------
+      *
+     C     $jdeaid       begsr
+      *
+     C                   if        xxlivejw = 'Y'                               if live JW
+     C                   call      'MPJDEAID'
+     C                   parm                    wkaid
+     C                   parm      *blank        xxmcu
+     C                   parm      *blank        xxobj
+     C                   parm      *blank        xxsub
+     C                   else
+     C                   if        xxlivee1= 'Y'                                if live  E1
+     C                   call      'MPJDEAIDE1'
+     C                   parm                    wkaid
+     C                   parm      *blank        xxmcu
+     C                   parm      *blank        xxobj
+     C                   parm      *blank        xxsub
+     C                   endif
+     C                   endif
+      *
+     C                   select
+     C                   when      wkrtcd = 'F'
+     C                   move      xxmcu         wkfrtmcu
+     C                   move      xxobj         wkfrtobj
+     C                   move      xxsub         wkfrtsub
+      *
+     C                   when      wkrtcd = 'T'
+     C                   move      xxmcu         wktaxmcu
+     C                   move      xxobj         wktaxobj
+     C                   move      xxsub         wktaxsub
+      *
+     C                   when      wkrtcd = 'I'
+     C                   move      xxmcu         wkitemmcu
+     C                   move      xxobj         wkitemobj
+     C                   move      xxsub         wkitemsub
+     C                   endsl
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C     *entry        plist
+     C                   parm                    xxepfl
+      *
+     C                   select
+     C                   when      xxepfl = 'E'
+     C                   move      'EDIT'        h1epds
+     C                   when      xxepfl = 'P'
+     C                   move      'POST'        h1epds
+     C                   endsl
+      *
+      *
+     C     key01         klist
+     C                   kfld                    ihposn
+     C                   kfld                    ihinno
+      *
+      *
+     C     key02         klist
+     C                   kfld                    ldacono
+     C                   kfld                    wkcode
+      *
+      * Retrieve Company Name
+      *
+     C     ldacono       chain     caabrel1                           92
+     C                   if        *in92 = *off
+     C                   eval      h1conm = abadtx
+     C                   endif
+      *
+      *  Live with JW World
+      *
+     C     key           klist
+     C                   kfld                    ldacono
+     C                   kfld                    kmv8cd
+     c                   eval      kmv8cd =  'JWLIVE    '                        p16169
+     C     Key           chain     pdkmrel0                           95
+     C                   if        *in95 = *off                                 If found
+     c                   movel     kmbxtx        xxlivejw
+     C                   endif                                                  live jw
+      *  Live with E1
+     c                   eval      kmv8cd =  'E1LIVE    '                        p16169
+     C     Key           chain     pdkmrel0                           95
+     C                   if        *in95 = *off                                 If found
+     c                   movel     kmbxtx        xxlivee1
+     C                   endif                                                  live e1
+      *
+      * The cost center/account object/subsidiary will be the same for all entries for:
+      * A) sales tax
+      * B) freight
+      * C) items
+      * So, execute one-time routines to retrieve the values for later use in writing records.
+      *
+     C                   exsr      $taxacct
+     C                   exsr      $frtacct
+     C                   exsr      $itemacct
+      *
+      *
+      * Retrieve time for report heading.
+      *
+     C                   time                    rtime
+      *
+     C                   endsr
+      /eject
+      *-------------------------------------------------------------
+      * Report heading lines
+      *-------------------------------------------------------------
+      *
+     Oqprint    e            h1hdr          1 01
+     O                       sdpgm               10
+     O                                           70 'MP2 INTERFACE TO JDE'
+     O                                          122 'DATE'
+     O                       udate         y    132
+      *
+     O          e            h1hdr          1
+     O                       sdusr               10
+     O                                           71 'INVOICE ERROR LISTING'
+     O                                          122 'TIME'
+     O                       rtime              132 '  :  :  '
+      *
+     O          e            h1hdr          1
+     O                       h1epds              62
+     O                                          122 'PAGE'
+     O                       page          z    132
+      *
+     O          e            h1hdr          2
+     O                                           19 'Accounting company:'
+     O                       ldacono       z     24
+     O                       h1conm              56
+      *
+      *
+     O          e            h1hdr          1
+     O                                            8 'JDE'
+     O                                           60 'PURCHASE'
+      *
+     O          e            h1hdr          1
+     O                                            8 'VENDOR'
+     O                                           57 'ORDER'
+      *
+     O          e            h1hdr          1
+     O                                            8 'NUMBER'
+     O                                           25 'JDE VENDOR NAME'
+     O                                           58 'NUMBER'
+     O                                           77 'INVOICE NUMBER'
+      *
+     O          e            h1hdr          1
+     O                       dash               132
+      *
+      *-------------------------------------------------------------
+      * Detail line
+      *-------------------------------------------------------------
+      *
+     O          e            l1dtl       1
+     O                       phjdvnno      z      8
+     O                       phjdvnnm            50
+     O                       phpono              60
+     O                       ihinno              83
+      *
+      *-------------------------------------------------------------
+      * No data message line
+      *-------------------------------------------------------------
+      *
+     O          e            nodata      1
+     O                                           22 'There were no unposted'
+     O                                           40 ' invoices to edit.'
+      *-------------------------------------------------------------
+      * There were no errors
+      *-------------------------------------------------------------
+      *
+     O          e            noerror     1
+     O                                           21 'There were no errors.'
+      /eject

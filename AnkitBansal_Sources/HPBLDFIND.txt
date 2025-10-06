@@ -1,0 +1,177 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  HPBLDFIND                                     */
+/*  PROGRAM NAME:    BUILD DATAMART FILES FOR GROW FINISH          */
+/*                   AND NURSERY GROUPS FOR THE DAY ONLY.  NO      */
+/*                   WEEKLY RECORDS WILL BE PROCESSED.             */
+/*  PROGRAMMER:      BARB GUTIERREZ                                */
+/*  CREATE DATE:     01/27/04                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL IS SUBMITTED ON AN AS NEEDED BASIS    */
+/*                   ONLY. NO HISTORICAL PROCESSING WILL BE RUN    */
+/*                   FROM THIS CL.                                 */
+/*                                                                 */
+/*  THE DATA AREA CONTAINS THE BEGINNING/ENDING DATES              */
+/*  FOR THE FIRST WEEK OF PROCESSING FOR BOTH SCENARIOS. USE OF    */
+/*  THE DATA AREA ELIMINATES HARD-CODING OF DATES IN PROGRAMS AND  */
+/*  ALLOWS 'CURRENT' TO BE REDIFINED AS TIME GOES BY.              */
+/*                                                                 */
+/*******************************************************************/
+/*  MODIFIED BY:                                                   */
+/*                                                                 */
+/* 10/11/04  LEANNE FEDOR                                          */
+/*           ADDED LOGIC TO RESET/CLEAR THE NEW 'SUBMITTED FLAG'   */
+/*           IN THE DATA AREA. THIS FLAG WILL KEEP THE USERS FROM  */
+/*           STEPPING ON THEMSELVES WHEN THEY SUBMIT THE FUNCTION  */
+/*           FROM THE NEW SUBMISSION SCREENS. THE FLAG LOGIC WAS   */
+/*           NOT ADDED TO THE JOB SCHEDULER SUBMISSION.            */
+/*                                                                 */
+/* 10/13/08  LEANNE RAMSEY                                         */
+/*           WE ARE ANTICPATING THAT WE WILL BEGIN TO "PURGE" HPS. */
+/*           THEREFORE, WE WILL NO LONGER WANT TO DO "HISTORY"     */
+/*           RUNS SINCE WE COULD BE DELETING DATAMART DATA THAT    */
+/*           WE CANNOT REBUILD---HAVING PURGED HPS.                */
+/*           BUT, I HATE TO REMOVE ALL THE "HISTORY" LOGIC.        */
+/*           SO, WE WILL, FOR NOW, SET THE INCOMING "PROC" PARM    */
+/*           TO BLANK TO FORCE A "CURRENT" RUN.                    */
+/*                                                                 */
+/* 05/03/10  LeAnne Ramsey                                         */
+/*           We now allocate/deallocate the PRKDMFLIB file.        */
+/*           Since users can submit this from the Menu, we want to */
+/*           handle any error message that they might get if the   */
+/*           file is in use.                                       */
+/*           Also, we now use ESEND instead of MPLUS/MPLUS.        */
+/*                                                                 */
+/* 07/01/20  Brad Baden   WHD# 66046  TFS# 16673                   */
+/*           Send WRKOBJLCK report to user when any ALCOBJ fails.  */
+/*                                                                 */
+/*******************************************************************/
+
+
+             PGM        PARM(&PROCFL)
+
+             DCL        VAR(&PROCFL) TYPE(*CHAR) LEN(1)
+
+             DCL        VAR(&CURBEGDT) TYPE(*DEC) LEN(8)
+             DCL        VAR(&ERR)    TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&USER)     TYPE(*CHAR) LEN(10)
+             DCL        VAR(&EMAIL)    TYPE(*CHAR) LEN(38)
+             DCL        VAR(&TSTPRDFL) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&SUBJECT)  TYPE(*CHAR) LEN(60) +
+                          VALUE('HPBLDFIND-Datamart FIN: Build +
+                          Daily....DIST LIST: prk cognos')
+
+/* OVERRIDE INCOMING PARM TO BE "CURRENT" PROCESSING                 */
+
+             CHGVAR     VAR(&PROCFL) VALUE(' ')
+
+/*------------------------------------------------------------------*/
+/* Set up the Email Recipient (either Test or Production)           */
+/*------------------------------------------------------------------*/
+
+/* Retrieve the Data Area that lets us know whether we are in TEST  */
+/* or PRODUCTION. (Always default to the 'TEST' Distribution List.) */
+
+             CHGVAR     VAR(&EMAIL) VALUE('prk cognos test')
+             RTVDTAARA  DTAARA(DATSTPRD (1 1)) RTNVAR(&TSTPRDFL)
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('prk cognos'))
+
+/*------------------------------------------------------------------*/
+/* Retrieve the User for sending the AS400 messages                 */
+/*------------------------------------------------------------------*/
+
+             RTVJOBA    USER(&USER)
+
+/*-----------------------------------------------------------------*/
+/* Allocate the file that will be copied to PRKDMFLIB              */
+/*-----------------------------------------------------------------*/
+
+/* Reported Daily Activity                                                   */
+             ALCOBJ     OBJ((PRKDMFLIB/HPPF103 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000) EXEC(DO)
+             CHGVAR     VAR(&ERR) VALUE('Y')
+
+             /* WHD66046 - Send WRKOBJLCK report to &EMAIL           */
+             WRKOBJLCK  OBJ(PRKDMFLIB/HPPF103) OBJTYPE(*FILE) +
+                          OUTPUT(*PRINT)
+
+             ESNDMAIL   RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) MSG('The +
+                          Datamart logic did not run because the +
+                          program was unable to allocate file +
+                          HPPF103. Check the physical (and logical +
+                          files over it) to see who has the file(s) +
+                          locked. The user has been sent an AS400 +
+                          message to resubmit the job later. See +
+                          attached report.') IMPORTANCE(*HIGH) +
+                          ATTLIST((* *DFT *N QPDSPOLK * *LAST 1))
+
+             DLTSPLF    FILE(QPDSPOLK)
+
+             SNDMSG     MSG('***** Your build of NUR/FIN Daily Data +
+                          for COGNOS did not run because file +
+                          HPPF103-Reported Daily Activity was in +
+                          use. No one can be using this file during +
+                          the build. Resubmit your build later. +
+                          *****') TOUSR(&USER)
+                        ENDDO
+
+/* If you were unable to allocate any file, just get on out.         */
+
+             IF         COND(&ERR = 'Y') THEN(GOTO CMDLBL(EXIT))
+
+/*-----------------------------------------------------------------*/
+/* CALCULATE 'CURRENT' BEGINNING/ENDING DATES AND UPDATE DATA AREA */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(HP209) PARM(&CURBEGDT)
+
+/*-----------------------------------------------------------------*/
+/* DELETE RECORDS FROM FILES FOR A 'CURRENT' RUN.                  */
+/*-----------------------------------------------------------------*/
+
+             IF         COND(&PROCFL *EQ ' ') THEN(DO)
+             CALL PGM(HP210D)
+             ENDDO
+
+/*-----------------------------------------------------------------*/
+/* BUILD THE REPORTED DAILY ACTIVITY FILE                          */
+/*-----------------------------------------------------------------*/
+
+             CALL       PGM(HP216CL) PARM(&PROCFL &CURBEGDT)
+
+/*********************************************************************/
+/* COPY THE FILES INTO PRKDMFLIB                                     */
+/*********************************************************************/
+
+             CPYF       FROMFILE(PRKFLIB/HPPF103) +
+                          TOFILE(PRKDMFLIB/HPPF103) MBROPT(*REPLACE) +
+                          CRTFILE(*NO) FMTOPT(*MAP *DROP)
+             MONMSG     MSGID(CPF2817) EXEC(CHGVAR VAR(&ERR) +
+                          VALUE('Y'))
+
+/*---------------------------------------------------------------------*/
+/* SEND COMPLETION MESSAGE TO I.S. FOLKS                               */
+/*---------------------------------------------------------------------*/
+
+             IF         COND(&ERR = 'Y') THEN(ESNDMAIL +
+                          RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG('HPPF103 did not get copied to +
+                          PRKDMFLIB. Investigate and rerun the +
+                          build.') IMPORTANCE(*HIGH))
+
+             IF         COND(&ERR = 'N') THEN(ESNDMAIL +
+                          RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG('The NUR/FIN Daily build completed +
+                          normally.') IMPORTANCE(*HIGH))
+
+/*----------------------------------------------------------------------*/
+/* RESET THE CONTROLLING DATA AREA TO INDICATE THAT THE JOB IS FINISHED */
+/*----------------------------------------------------------------------*/
+
+ EXIT:       CHGDTAARA  DTAARA(DAFIN (62 1)) VALUE(' ')
+
+             DLCOBJ     OBJ((PRKDMFLIB/HPPF103 *FILE *EXCL))
+             MONMSG     MSGID(CPF0000)
+
+             ENDPGM

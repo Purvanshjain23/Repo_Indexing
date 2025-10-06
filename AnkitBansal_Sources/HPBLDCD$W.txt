@@ -1,0 +1,451 @@
+/***************************************************************** */
+/*                                                                 */
+/*  PROGRAM NUMBER:  HPBLDCD$W                                     */
+/*  PROGRAM NAME:    DATAMART:  END OF HPS PERIOD PROCESS          */
+/*  PROGRAMMER:      BARB GUTIERREZ                                */
+/*  CREATE DATE:     08/26/03                                      */
+/*                                                                 */
+/*  FUNCTION:        THIS CL CALLS SYNON FUNCTION HPBLDCD$S.       */
+/*                   THIS PROCESS IS INITIATED FROM THE JOB        */
+/*                   SCHEDULER JOB: BIBLDFIN.  THIS IS THE JDE     */
+/*                   WORLD VERSION FOR THIS PROCESS.               */
+/*                                                                 */
+/*                   THIS JOB WILL RUN EVERY NIGHT BUT WILL ONLY   */
+/*                   PROCESS IF THE POSTING FLAG IN THE COMPANY    */
+/*                   CONTROL FILE IS SET TO AN 'F' FOR THE COMPANY.*/
+/*                   THIS TELLS US THE PERIOD HAS BEEN CLOSED IN   */
+/*                   HPS.  WE WILL THEN CHANGE THE FLAG TO BLANK   */
+/*                   SO WE WON'T PROCESS AGAIN.                    */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFICATIONS:                                                  */
+/* 09/23/2003  Barb Gutierrez                                      */
+/*             Added all the datamart HPS EOP processing to this   */
+/*             CL and removed it from HP477CL which is the actual  */
+/*             HPS EOP process on the AS/400.                      */
+/*                                                                 */
+/* 09/30/2003  Barb Gutierrez                                      */
+/*             Added the rebuild of the ALL farm master (HPPA018)  */
+/*                                                                 */
+/* 04/22/2004  Barb Gutierrez                                      */
+/*             Added the copy of file HPPA100 to prkdmflib.  Also  */
+/*             moved the re-creation of the "all" farm master up   */
+/*             to get rebuilt every night instead of only at period*/
+/*             end.                                                */
+/*                                                                 */
+/* 02/07/2005  Barb Gutierrez                                      */
+/*             Added units to the open query.  Accounting is now   */
+/*             keeping track of gas usage and would like these     */
+/*             units to be brought into the cost detail cube in    */
+/*             cognos.                                             */
+/*                                                                 */
+/* 01/13/2006  LeAnne Fedor                                        */
+/*             Added Royalty Payment logic when it is a "Final".   */
+/*             The Royalty Payment function is available from a    */
+/*             menu option. But, AMB wanted to also run it from    */
+/*             this Job Scheduler function. The Royalty Payment    */
+/*             function uses Sequel to create a spreadsheet that  */
+/*             is e-mailed to a Distribution List.                */
+/*                                                                 */
+/* 12/01/2006  LeAnne Fedor                                        */
+/*             Changed logic to call HP8007 instead of TF811 to    */
+/*             find the Saturday date since we are changing TF811  */
+/*             to use the Datamart Calendar file instead of the    */
+/*             OMS calendar file.                                  */
+/*                                                                 */
+/* 01/08/2007  LeAnne Fedor                                        */
+/*             On the change above (12/01/06) I missed the second  */
+/*             call to TF811. SO, I have now changed that call to  */
+/*             TF811 to use HP8007.                                */
+/*                                                                 */
+/* 08/11/2008  LeAnne Ramsey                                       */
+/*             Removed the Royalty logic. It is now performed in   */
+/*             the HPS Period Close function.                      */
+/*                                                                 */
+/* 08/31/09  ALICE BROWNFIELD                                      */
+/*           E00472 - Data Mart Build changes for DR Test          */
+/*           Change CPYF from PRKFLIB to PRKDMFLIB to build        */
+/*             directly into PRKDMFLIB.  files in PRKFLIB will be  */
+/*           empty  ----- this works better for MIMIX              */
+/*                                                                 */
+/* 02/02/10  LeAnne Ramsey                                         */
+/*           HP227 will now use HSP074-Transfer Header for calc    */
+/*           of BGF Produced Head; we added an override to the     */
+/*           file.                                                 */
+/*                                                                 */
+/* 03/15/10  LeAnne Ramsey                                         */
+/*           Steph A. needs limited period production data at the  */
+/*           Farm level for her "Utility" cube. So, we have added  */
+/*           a new Datamart ALL file: HPPA174-Farm Production.     */
+/*                                                                 */
+/* 03/22/10  LeAnne Ramsey                                         */
+/*           Steph A. needs BGF daily production data rolled up/   */
+/*           summed to the Farm/Period level for the new Monthly   */
+/*           Sow cube.                                             */
+/*                                                                 */
+/* 04/29/10  LeAnne Ramsey  (C719)                                 */
+/*           Changed logic to use ESEND instead of MPLUS/MPLUS.    */
+/*                                                                 */
+/* 05/11/16  Barb Gutierrez (E5752)                                */
+/*           Changed logic to allow for multiple companies to be   */
+/*           processed instead of just one.                        */
+/* 08/15/16  Barb Gutierrez (E5752)                                */
+/*           Added clof and dltovr for open query over HSL034L.    */
+/*                                                                 */
+/*  5/29/20  Brad Baden     SDN465                                 */
+/*           Copied source from program HPBLDCD$.  This program is */
+/*           called from program HPBLDCD$S.  This is the JDE World */
+/*           version for the job.  Added logic to SETLIBL to       */
+/*           PRKINTT if the Test/Production flag is "T".           */
+/*           Otherwise, add library PRKDMFLIB to the top of the    */
+/*           library list.                                         */
+/*                                                                 */
+/*******************************************************************/
+
+             PGM        PARM(&COCD &TSTPRDFL)
+
+             DCL        VAR(&QDATA)  TYPE(*CHAR) LEN(248)
+             DCL        VAR(&QDATA1)  TYPE(*CHAR) LEN(248)
+             DCL        VAR(&COCD)  TYPE(*CHAR) LEN(3)
+             DCL        VAR(&JDECO)  TYPE(*CHAR) LEN(5)
+             DCL        VAR(&ERR)    TYPE(*CHAR) LEN(1) VALUE('N')
+             DCL        VAR(&LDEOPF) TYPE(*CHAR) LEN(1)
+/*           DCL        VAR(&LDCTRY) TYPE(*CHAR) LEN(2)      */
+/*           DCL        VAR(&LDYEAR) TYPE(*CHAR) LEN(2)      */
+             DCL        VAR(&CTRY)   TYPE(*DEC)  LEN(2 0)
+             DCL        VAR(&YEAR)   TYPE(*DEC)  LEN(2 0)
+             DCL        VAR(&CCLC)   TYPE(*CHAR) LEN(2)
+             DCL        VAR(&CCLY)   TYPE(*CHAR) LEN(2)
+             DCL        VAR(&CCLP)   TYPE(*CHAR) LEN(2)
+/*           DCL        VAR(&LDEPDT) TYPE(*CHAR) LEN(8)      */
+             DCL        VAR(&PGMLIB) TYPE(*CHAR) LEN(10)
+
+/*           DCL        VAR(&BEGDTCHAR)  TYPE(*CHAR) LEN(8)  */
+/*           DCL        VAR(&ENDDTCHAR)  TYPE(*CHAR) LEN(8)  */
+             DCL        VAR(&BEGDT)      TYPE(*DEC)  LEN(8 0)
+             DCL        VAR(&ENDDT)      TYPE(*DEC)  LEN(8 0)
+
+             DCL        VAR(&C$FL)   TYPE(*CHAR)  LEN(1)
+             DCL        VAR(&LBPDT)  TYPE(*CHAR) LEN(8)
+             DCL        VAR(&LEPDT)  TYPE(*CHAR) LEN(8)
+
+             DCL        VAR(&EMAIL)    TYPE(*CHAR) LEN(38)
+             DCL        VAR(&TSTPRDFL) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&SUBJECT)  TYPE(*CHAR) LEN(60) +
+                          VALUE('HPBLDCD$-Datamart EOP: Build +
+                          Files.....DIST LIST: prk cognos')
+
+/*------------------------------------------------------------------*/
+/* Set up the Email Recipient (either Test or Production)           */
+/*------------------------------------------------------------------*/
+
+/* Retrieve the Data Area that lets us know whether we are in TEST  */
+/* or PRODUCTION. (Always default to the 'TEST' Distribution List.) */
+
+             CHGVAR     VAR(&EMAIL) VALUE('prk cognos test')
+
+             IF         COND(&TSTPRDFL *EQ 'P') THEN(CHGVAR +
+                          VAR(&EMAIL) VALUE('prk cognos'))
+
+/*-------------------------------------------------------------------*/
+/* RETRIEVE DATAMART EOP DATA AREA THAT HOLDS THE LAST HPS CLOSED    */
+/* PERIOD INFORMATION.   IF THE FLAG IS SET TO AN "F", THE FINAL     */
+/* HPS CLOSING HAS RUN SO WE WANT TO UPATE THE DATAMART FILES.       */
+/*-------------------------------------------------------------------*/
+
+/*           RTVDTAARA  DTAARA(DALPER (24 1)) RTNVAR(&LDEOPF)   */
+/*           RTVDTAARA  DTAARA(DALPER (1 2))  RTNVAR(&LDCTRY)   */
+/*           RTVDTAARA  DTAARA(DALPER (3 2))  RTNVAR(&LDYEAR)   */
+/*           RTVDTAARA  DTAARA(DALPER (15 8)) RTNVAR(&LDEPDT)   */
+
+/*           RTVDTAARA  DTAARA(DALPER (7 8))  RTNVAR(&BEGDTCHAR) */
+/*           RTVDTAARA  DTAARA(DALPER (15 8)) RTNVAR(&ENDDTCHAR) */
+
+/*-------------------------------------------------------------------*/
+/* RETRIEVE LAST CLOSED HPS BEGIN AND END DATES FOR COMPANY PASSED   */
+/* IN FROM THE COMPANY CONSTANTS FILE (HSP0071).  ALSO RETRIEVE THE  */
+/* COST CUBE BUILD FLAG.  IF IT IS SET TO AN "F", THE FINAL HPS      */
+/* CLOSING HAS RUN FOR THIS COMPANY AND SO WE WANT TO UPDATE THE     */
+/* DATAMART FILES.    E5752                                          */
+/*-------------------------------------------------------------------*/
+
+/* SET THE COST CUBE FLAG TO A BLANK INITIALY SO WE RETRIEVE THE  */
+/* LAST CLOSED HPS BEGIN AND END DATES.                           */
+
+             CHGVAR     VAR(&C$FL) VALUE(' ')
+
+             CALL       PGM(HP4771) PARM(&COCD &C$FL &LBPDT &LEPDT +
+                          &CCLC &CCLY &CCLP)
+             CHGVAR     VAR(&BEGDT) VALUE(&LBPDT)
+             CHGVAR     VAR(&ENDDT) VALUE(&LEPDT)
+
+/*---------------------------------------------------------*/
+/*  Clear/recreate the ALL Farm Master in PRKDMFLIB        */
+/*---------------------------------------------------------*/
+
+             CLRPFM     FILE(HPPA018)
+
+             SELECT
+             WHEN       COND(&TSTPRDFL *EQ 'T') THEN(DO)
+
+             CPYF       FROMFILE(HPPB018) TOFILE(*LIBL/HPPA018) +
+                          MBROPT(*ADD)
+             CPYF       FROMFILE(HPPF018) TOFILE(*LIBL/HPPA018) +
+                          MBROPT(*ADD)
+             ENDDO
+
+             OTHERWISE  CMD(DO)
+             CPYF       FROMFILE(PRKFLIB/HPPB018) +
+                          TOFILE(PRKDMFLIB/HPPA018) MBROPT(*ADD)
+             CPYF       FROMFILE(PRKFLIB/HPPF018) +
+                          TOFILE(PRKDMFLIB/HPPA018) MBROPT(*ADD)
+             ENDDO
+             ENDSELECT
+
+/*---------------------------------------------------------*/
+/*  IF FINAL RUN - PERIOD CLOSED                           */
+/*  use values retrieved from the company control file     */
+/*  instead of the lda.  E5752                             */
+/*---------------------------------------------------------*/
+/*           IF         COND(&LDEOPF *EQ 'F') THEN(DO)     */   /* If Final */
+             IF         COND(&C$FL *EQ 'F') THEN(DO)          /* If Final */
+
+             CHGVAR     VAR(&CTRY) VALUE(&CCLC)
+             CHGVAR     VAR(&YEAR) VALUE(&CCLY)
+
+/*  Recreate the Cost Category file in PRKDMFLIB                */
+
+             CLRPFM     FILE(HPPA039)
+             CALL       PGM(HP239)
+
+/*  Write the closed group cost detail records for Nur/Fin only to HPPF120 */
+/*  Add opnqry over hsl034l to extract out only company being processed E5752 */
+/*  Add parm of company  E5752 */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('HGCOCD *EQ')
+             CHGVAR     VAR(%SST(&QDATA 12 3)) VALUE(&COCD)
+
+             OVRDBF     FILE(HSL034L) SHARE(*YES)
+
+             OPNQRYF    FILE((HSL034L)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+
+             CALL       PGM(HP225) PARM(&COCD)
+
+             CLOF       OPNID(HSL034L)
+             DLTOVR     FILE(HSL034L)
+
+/*  Build the cost detail files for open groups Nur/Fin only    */
+/*  added company as parm and changed parm &ldepdt to &lepdt    */
+
+             CALL       PGM(HP226CL) PARM(&LEPDT &COCD) /* HPPF035 +
+                          & HPPF121 */
+
+             RGZPFM     *LIBL/HPPF035
+             MONMSG     MSGID(CPF0000)
+
+             RGZPFM     *LIBL/HPPF120
+             MONMSG     MSGID(CPF0000)
+
+             RGZPFM     *LIBL/HPPF121
+             MONMSG     MSGID(CPF0000)
+
+/* Add leading zeros to company being passed in for JDE open query  */
+
+             CHGVAR     VAR(&JDECO) VALUE('00' *CAT &COCD)
+
+/* Create the Datamart JDE Expense file for the Period being Closed  */
+/* changed the hard coding of company 350 to be the company passed in */
+/* E5752  */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA 1 8)) VALUE('GBCO +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 10 1)) VALUE('"')
+             CHGVAR     VAR(%SST(&QDATA 11 5)) VALUE(&JDECO)
+             CHGVAR     VAR(%SST(&QDATA 16 1)) VALUE('"')
+             CHGVAR     VAR(%SST(&QDATA 18 15)) VALUE('*AND GBCTRY +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 34 2)) VALUE(&CTRY)
+             CHGVAR     VAR(%SST(&QDATA 37 13)) VALUE('*AND GBFY +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 51 2)) VALUE(&YEAR)
+             CHGVAR     VAR(%SST(&QDATA 54 13)) VALUE('*AND GBLT +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 68 4)) VALUE('"AA"')
+             CHGVAR     VAR(%SST(&QDATA 73 14)) VALUE('*AND GBOBJ +
+                          *GT')
+             CHGVAR     VAR(%SST(&QDATA 88 8)) VALUE('"5999  "')
+             CHGVAR     VAR(%SST(&QDATA 97 14)) VALUE('*AND GBOBJ +
+                          *LE')
+             CHGVAR     VAR(%SST(&QDATA 112 8)) VALUE('"9999  "')
+
+             CHGVAR     VAR(%SST(&QDATA 121 12)) VALUE('*OR GBCO +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 134 1)) VALUE('"')
+             CHGVAR     VAR(%SST(&QDATA 135 5)) VALUE(&JDECO)
+             CHGVAR     VAR(%SST(&QDATA 140 1)) VALUE('"')
+             CHGVAR     VAR(%SST(&QDATA 142 15)) VALUE('*AND GBCTRY +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 158 2)) VALUE(&CTRY)
+             CHGVAR     VAR(%SST(&QDATA 161 13)) VALUE('*AND GBFY +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 175 2)) VALUE(&YEAR)
+             CHGVAR     VAR(%SST(&QDATA 178 13)) VALUE('*AND GBLT +
+                          *EQ')
+             CHGVAR     VAR(%SST(&QDATA 192 4)) VALUE('"AU"')
+             CHGVAR     VAR(%SST(&QDATA 197 14)) VALUE('*AND GBOBJ +
+                          *GT')
+             CHGVAR     VAR(%SST(&QDATA 212 8)) VALUE('"5999  "')
+             CHGVAR     VAR(%SST(&QDATA 221 14)) VALUE('*AND GBOBJ +
+                          *LE')
+             CHGVAR     VAR(%SST(&QDATA 236 8)) VALUE('"9999  "')
+
+             OVRDBF     FILE(F0902CD) SHARE(*YES)
+             OPNQRYF    FILE((F0902CD)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+
+     /* Add OPNQRY over HPLA100A joining to farm master.  We only    */
+     /* want to process for company being passed in.  E5752          */
+
+             CHGVAR     VAR(&QDATA1) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA1 1 10)) VALUE('FSCOCD *EQ')
+             CHGVAR     VAR(%SST(&QDATA1 12 3)) VALUE(&COCD)
+
+/* Since we're doing a join and updating the file in the join, you   */
+/* have to use a different access path than the one in the RPG.      */
+
+             OVRDBF     FILE(HPLA100A) SHARE(*YES)
+             OPNQRYF    FILE((HPLA100A) (HPPA018)) +
+                          FORMAT(HPLA100A) QRYSLT(&QDATA1) +
+                          KEYFLD(*FILE) JFLD((HPLA100A/JDFSCD +
+                          HPPA018/FSFSCD)) SEQONLY(*YES)
+
+/* Added company parm.  E5752                                        */
+
+             CALL       PGM(HP241) PARM(&COCD)
+
+             CLOF       OPNID(F0902CD)
+             DLTOVR     FILE(F0902CD)
+             CLOF       OPNID(HPLA100A)
+             DLTOVR     FILE(HPLA100A)
+
+             RGZPFM     *LIBL/HPPA100
+             MONMSG     MSGID(CPF0000)
+
+/*********************************************************************/
+/*  Build/update more Datamart files in PRKDMFLIB                    */
+/*********************************************************************/
+
+/* Write BGF and NurFin Groups to HPPA034                            */
+
+     /* Override the key fields on the Transfer Movement Header file */
+     /* making Received Date the key field instead of Shipped Date   */
+
+     /* Add join to HSP009 to retrieve company   E5752               */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BOCOCD *EQ')
+             CHGVAR     VAR(%SST(&QDATA 12 3)) VALUE(&COCD)
+
+             OVRDBF     FILE(HSL074H) SHARE(*YES)
+/*           OPNQRYF    FILE((HSL074H)) KEYFLD((MHORFS) (MHRCDT)) +
+                          SEQONLY(*YES)              */
+             OPNQRYF    FILE((HSL074H) (HSP009)) FORMAT(HSL074H) +
+                          QRYSLT(&QDATA) KEYFLD((MHORFS) (MHRCDT)) +
+                          JFLD((HSL074H/MHORBO HSP009/BOBOBO)) +
+                          SEQONLY(*YES)
+
+             CALL       PGM(HP227) PARM(&COCD)
+
+             CLOF       OPNID(HSL074H)
+             DLTOVR     FILE(HSL074H)
+
+ /* Add BGFs to HPPF120-Closed Hog Group-Cost Detail */
+
+             CALL       PGM(HP228) PARM(&COCD)
+
+ /* Populate HPPA174-Farm Production (BGFs and NurFins)     */
+
+     /* Add OPNQRY over hppa174 to only select the company that is  */
+     /* passed in.  E5752                                            */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('W1COCD *EQ')
+             CHGVAR     VAR(%SST(&QDATA 12 3)) VALUE(&COCD)
+
+             OVRDBF     FILE(HPPA174) SHARE(*YES)
+             OPNQRYF    FILE((HPPA174)) OPTION(*ALL) QRYSLT(&QDATA) +
+                          KEYFLD(*FILE) SEQONLY(*YES)
+
+             CALL       PGM(HP296) PARM(&COCD)
+
+             CLOF       OPNID(HPPA174)
+             DLTOVR     FILE(HPPA174)
+
+             RGZPFM     *LIBL/HPPA174
+             MONMSG     MSGID(CPF0000)
+
+ /* Populate HPPB182-BGF Period Production                  */
+ /* Add join of farm master to open query.  We only want to */
+ /* process the company passed in.  E5752                   */
+
+             CHGVAR     VAR(&QDATA) VALUE(' ')
+             CHGVAR     VAR(%SST(&QDATA 1 10)) VALUE('BDDPDT *GE')
+             CHGVAR     VAR(%SST(&QDATA 12 8)) VALUE(&BEGDT)
+             CHGVAR     VAR(%SST(&QDATA 21 15)) VALUE('*AND BDDPDT *LE')
+             CHGVAR     VAR(%SST(&QDATA 37 8)) VALUE(&ENDDT)
+
+             OVRDBF     FILE(HPLB082B) SHARE(*YES)
+
+             OPNQRYF    FILE((HPLB082B)) QRYSLT(&QDATA) KEYFLD(*FILE) +
+                          SEQONLY(*YES)
+
+             CALL       PGM(HP217) PARM(&COCD)
+
+             CLOF       OPNID(HPLB082B)
+             DLTOVR     FILE(HPLB082B)
+
+             RGZPFM     *LIBL/HPPB182
+             MONMSG     MSGID(CPF0000)
+
+ /* Reset Data Area  THIS IS USED IN OTHER PROGRAMS THAT HAVEN'T */
+ /*   BEEN CHANGED TO USE THE NEW COMPANY CONTROL FILE HSP0071.  */
+
+             CHGDTAARA  DTAARA(DALPER (24 1)) VALUE(' ')
+
+/* SET THE COST CUBE FLAG TO A 'R' TO RESET THE PERIOD END FLAG   */
+/* FOR THE NEXT HPS CLOSE.                                        */
+
+             CHGVAR     VAR(&C$FL) VALUE('R')
+
+             CALL       PGM(HP4771) PARM(&COCD &C$FL &LBPDT &LEPDT +
+                          &CCLC &CCLY &CCLP)
+
+/*---------------------------------------------------------------------*/
+/* SEND COMPLETION MESSAGE TO I.S. FOLKS                               */
+/*---------------------------------------------------------------------*/
+
+             SELECT
+             WHEN       COND(&TSTPRDFL *EQ 'T') THEN(DO)
+             IF         COND(&ERR = 'N') THEN(ESNDMAIL +
+                          RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG('All Cost Data was successfully +
+                          written to TPMTESTF; the build completed +
+                          normally.') IMPORTANCE(*HIGH))
+             ENDDO
+
+             OTHERWISE  CMD(DO)
+             IF         COND(&ERR = 'N') THEN(ESNDMAIL +
+                          RECIPIENT(&EMAIL) SUBJECT(&SUBJECT) +
+                          MSG('All Cost Data was successfully +
+                          written to PRKDMFLIB; the build completed +
+                          normally.') IMPORTANCE(*HIGH))
+
+             ENDDO                                                /* OTHER    */
+             ENDSELECT
+
+             ENDDO                                                /* If Final */
+
+             ENDPGM

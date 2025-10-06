@@ -1,0 +1,736 @@
+     H*****************************************************************
+     H*
+     H*  Program number:  OMINVJ2E1   - Copied from OMINVJDE2 - MOD TO USE E1 FILES
+     H*  Program name:    Read Workfile for OM Invoices & Write to JDE
+     H*  Programmer:      Rose Centonze
+     H*  Date created:    03/25/2020
+     H*  Program purpose: This program will read the workfile created
+     H*                   in OMINVJDE1 by Document, account id & subledger.
+     H*                   Everytime the account id or subledger changes,
+     H*                   a summary record will be written to JDE.
+     H***
+     H*                   The user will need to go into JDE and post
+     H*                   this batch of journal entries.
+     H***
+     F*  MODIFIED BY     -> JONI MILLER          DATE  -> 05/03/96
+     F*                     JDE RELEASE A7.1 CHANGES
+     F*  MODIFIED BY     -> BARB GUTIERREZ       DATE  -> 04/20/99
+     F*                     CORRECTED PROBLEM WITH TRYING TO WRITE A RECORD
+     F*                     TO JDE EVEN IF THEIR WAS NO RECORDS TO PROCESS.
+     H***
+     H*  Modified BY     -> Barb Gutierrez       DATE  -> 11/17/03
+     H*                     Added the summarization at the subledger level.
+     H*                     We are now allowing for broker commissions and
+     H*                     multiple trade fund accruals.
+     H*
+     H*                     Also converted program to ILE.
+     H*
+     H*  Modified by:     Barb Gutierrez 07/22/04
+     H*                   We are now writing pounds to JDE.
+     H*
+     H*  Modified by:     Alice Brownfield 12/27/05 + 1/4/06
+     H*                   Clean up and
+     H*                   Write separate batch records for 960 invoices
+     H*
+     H*  Modified by:     Barb Gutierrez   01/10/06
+     H*                   changed to do a movel instead of move on the user name of
+     H*                   TFGLPOST.
+     H*
+     H*  Modified by:     Alice Brownfield   01/19/06
+     H*                   Changed to use CO# as the primary key to OML300.
+     H*                   Changed to re-set the Document Line # when we get
+     H*                    a new batch # instead of when the Document # changes.
+     H*                   This means that we could have missing Document Line #'s
+     H*                     Angie says this won't be a problem.
+     H*                   Changed and recompiled in the production environment.
+     H*  Modified by:     Barb Gutierrez     06/25/07
+     H*                   No logic changes.  Only changed comments that were
+     H*                   referencing company 300 and 362.  Daily Foods will
+     H*                   now be using this pgm.
+     H*  Modified by:     Barb Gutierrez     04/24/08
+     H*                   With the addition of High Plains BioEnergy, they would
+     H*                   like to write net gallons to the units field in JDE.
+     H*                   Renamed field omlbs in omp300 to omunit.
+     H*  Modified by:     Barb Gutierrez     09/18/08
+     H*                   Accruals can now be handled at the item code level.  With this change a
+     H*                   new accrual code type was created in the accrual master.  The new type
+     H*                   is a 'P'.  Changed code to not default the subledger type of an A.  We
+     H*                   now write out the type in OMINVJDE1.  We also had code in to not write
+     H*                   the subledger to the field in JDE if it was invalid.  Not sure why we
+     H*                   were doing this.  JDE will validate it again when the user tries to
+     H*                   post it.  Added subledger type to the bottom of the key in OML300.
+     H*                   Project E00193.
+     H*  MODIFIED BY: ROSE CENTONZE        01/20/17    Project  E8287
+     H*               Changed LF OML300 to SEL LIVE WITH M3 GL =N,P FOR  No or Parallel
+     H*  Modified by:     Rose Centonze    03/25/20   Scan:  P16169
+     H*                   Copied from OMINVJDE2 and modified to use E1IDEVMDL tables and pgms
+     H*                   F0011  -->  E10011l1  when write here, write to e1b9cpp
+     H*                   F0901  -->  E10901
+     H*                   F0911  -->  E10911  --> new fields
+      *                   X0010  -->  E1I0010 --> GET0010  - new logic
+      *                   X0901  -->  E1I0901
+      *                   X0028  -->  E1I0028  --> E1I0028A
+      *                   X09031  --> E1I09031 --> GET09031 - goes to BSSV
+      *         1 set edi trans no to gldoc
+      *         2 GLKCO - document company - leave blank
+      *         3 GLPKCO  GLOKCO  GLPSFX  - leave blank , not 000
+      *         4 glrcnd - reconciled-leave Blank
+      *         5 glag - should have the amount, not GLAA
+      *         6 icndo, icodcn- increment when get document
+      *  ** 10/13/2020 ALL OMS GL ENTRIES WILL HAVE EDI USER‚OMSJDESF or OMSJDESE > xxedus  ***
+      *  ** 10/14/2020 ALL OMS GL ENTRIES WILL HAVE transaction originator GLTORG -> usrnam **
+     H*  Modified by:     Rose Centonze    04/12/21   Scan:  sdn440 --  m3 to jde e1
+      *   XXEDUS  Per company value: OMSJDEUSR: OMSJDESF for 360,OMSJDETF FOR 960, OMSJDEST for 440
+      *  ** 10/13/2021 For ALL batches to company 300/320 output user OMSJDESF
+     H*                Write separate batch records for 440 entries to 300/320
+      *  ** 10/28/2021 Because companies 300/320/360 can all be in the same batch,some with same
+      *                document number, when writing the batch header go total up the number of
+      *                documents to write to E10011. the doc# arent consecutive in oml300
+      *                scan: doccount
+     H*
+     H*****************************************************************
+     F*
+     FOML300    IF   E           K DISK
+     F* OM Workfile            (Key: Co#, Document #, Account ID, subledger, subledger type)
+     F*F0901     IF   E           K DISK                                         p16169
+     Fe10901    IF   E           K DISK
+     F* JDE Account Master     (Key: ???                       )
+     F*F0011     UF A E           K DISK                                          p16169
+     Fe10011l1  UF A E           K DISK
+     F*   JDE BATCH HEADER FILE
+     F*
+     F*F0911     O    E             DISK                                          p16169
+     Fe10911    O    E             DISK
+     F* JDE G/L LEDGER FILE
+     F*
+     D*
+     D***  RETRIEVE USER I.D. AND WORKSTATION I.D.
+     D*
+     D                SDS
+     D  PGMSGQ           *PROC
+     D  WRKSTN               244    253
+     D  USRNAM               254    263
+      *
+      * Parm fields
+      *
+     D*
+      ****************************************************************
+      * Data structures
+      ****************************************************************
+      *
+      * For call to JDE account routine
+      *
+     d xxsym           s              1
+     d xxomod          s              1
+     d xximod          s              1
+     d xxerrm          s              4
+      *
+     d xxani           s                   like(glani)
+     d wkani           s                   like(glani)
+      *
+      * Workfields
+      *
+     D wkisodate       s               D   datfmt(*iso)
+     D xxccyymmdd      s              8  0
+     D xxsyssyndt      s              7  0
+     d xxsidat         s              6
+     d xxedat          s              6  0
+     D*
+     D***  ACTUAL SHIP DATE FROM WORKFILE  YYMMDD
+     D*
+     D                 DS
+     D  GLYMD                  1      7  0
+     D  YYGL                   2      3  0
+     D  MMGL                   4      5  0
+     D  DDGL                   6      7  0
+     D*
+     D***  G/L DATE MMDDYY
+     D*
+     D                 DS
+     D  GLMDY                  1      6  0
+     D  GLMM                   1      2  0
+     D  GLDD                   3      4  0
+     D  GLYY                   5      6  0
+     D*
+     D***  EXPLANATION
+     D*
+     D                 DS
+     D  WKEXA                  1     30
+     D  WK1                    1      7    INZ('INVOICE')
+     D  WK2                    9     15    INZ('POSTING')
+      *
+     D**
+     D**  INTIALIZE FIELDS THAT ARE DEFAULTED TO A PARTICULAR VALUE
+     D**
+     D GLDCT           C                   CONST('UI')
+     D GLLT            C                   CONST('AA')
+     D GLAM            C                   CONST('2')
+     D*GLPKCO          C                   CONST('00000')
+     D*GLOKCO          C                   CONST('00000')
+     D*GLPSFX          C                   CONST('000')
+     D GLPKCO          C                   CONST('     ')
+     D GLOKCO          C                   CONST('     ')
+     D GLPSFX          C                   CONST('   ')
+     D GLPOST          C                   CONST(' ')
+     D gleder          C                   const('B')
+     D glcrrm          C                   const('D')
+     D glcrcd          C                   const('USD')
+      *
+     d i0901ds         ds           500
+     d xxco                                like(gmco)
+     d xxaid                               like(gmaid)
+     d xxmcu                               like(gmmcu)
+     d xxobj                               like(gmobj)
+     d xxsub                               like(gmsub)
+     d xxans                               like(gmans)
+     d xxdl01                              like(gmdl01)
+     d xxlda                               like(gmlda)
+     d xxbpc                               like(gmbpc)
+     d xxpec                               like(gmpec)
+     d xxbill                              like(gmbill)
+     d xxcrcd                              like(gmcrcd)
+     d xxum                                like(gmum)
+     d xxr001                              like(gmr001)
+     d xxr002                              like(gmr002)
+     d xxr003                              like(gmr003)
+     d xxr004                              like(gmr004)
+     d xxr005                              like(gmr005)
+     d xxr006                              like(gmr006)
+     d xxr007                              like(gmr007)
+     d xxr008                              like(gmr008)
+     d xxr009                              like(gmr009)
+     d xxr010                              like(gmr010)
+     d xxr011                              like(gmr011)
+     d xxr012                              like(gmr012)
+     d xxr013                              like(gmr013)
+     d xxr014                              like(gmr014)
+     d xxr015                              like(gmr015)
+     d xxr016                              like(gmr016)
+     d xxr017                              like(gmr017)
+     d xxr018                              like(gmr018)
+     d xxr019                              like(gmr019)
+     d xxr020                              like(gmr020)
+     d xxr021                              like(gmr021)
+     d xxr022                              like(gmr022)
+     d xxr023                              like(gmr023)
+     d xxobja                              like(gmobja)
+     d xxsuba                              like(gmsuba)
+     d xxwcmp                              like(gmwcmp)
+     d xxcct                               like(gmcct)
+     d xxerc                               like(gmerc)
+     d xxhtc                               like(gmhtc)
+     d xxqlda                              like(gmqlda)
+     d xxccc                               like(gmccc)
+     d xxfmod                              like(gmfmod)
+     d xxuser                              like(gmuser)
+     d xxpid                               like(gmpid)
+     d xxjobn                              like(gmjobn)
+     d xxupmj                              like(gmupmj)
+     d xxupmt                              like(gmupmt)
+      *
+     C*
+     C*
+     C/EJECT
+     C*----------------------------------------------------------------
+     C* MAIN PROCESSING LOOP
+     C*----------------------------------------------------------------
+     C*   Read Workfile..........
+     C*
+     C     *IN50         DOUEQ     *ON
+     C                   READ      OMl300                                 50
+     C     *IN50         IFEQ      *OFF                                         HAVE RECORD
+     C*
+     C* FIRST TIME THROUGH stuff
+     C*         get first JDE batch number
+     C*         save break fields
+     C*
+     C     *IN91         IFEQ      *OFF
+     c                   exsr      $getbatchno
+     c                   exsr      $newbreak
+     C                   MOVE      *ON           *IN91
+     c                   endif
+     C* ------------------------------
+     C* WRITE RECORD TO JDE IF THE ACCOUNT ID OR THE SUBLEDGER CHANGES or Document #
+     C*                                                                or Company #
+     C*
+     C     OMAID         IFNE      SVGLID                                        DIFFERENT
+     C     OMSBL         ORNE      SVSBL
+     C     omdoc#        ORNE      SVdoc
+     C     omco#         ORNE      svco
+     C                   EXSR      $WRITE
+     C*
+     C* ______________________________
+     C* IF Company # changes to 960, we need to write a batch
+     C*   record for the 'SBD FOODS' entries and then setup
+     C*   to start accumulating new totals for the 960 batch
+     C*
+     C                   IF        svco <> omco# and
+     C                             omco# = 960
+     C                   exsr      $writebatch
+     C* TF User name
+     C*                  MOVEL     'TFGLPOST '   usrnam                          reset user name
+     C                   MOVEL     'TFGLPOST '   xxedus                          SET USER ID
+     c                   exsr      $getbatchno
+     C                   Endif                                                   new 960 co#
+      *
+     C* IF Company # changes to 440, we need to write a batch                    10-13 added this
+     C*   record for the 'SBD FOODS' entries and then setup
+     C*   to start accumulating new totals for the 440 batch
+     C                   IF        svco <> omco# and
+     C                             omco# = 440
+     C                   exsr      $writebatch
+     C* STF User name
+     C*                  MOVEL     'OMSJDEST '   usrnam                          reset user name
+     C                   MOVEL     'OMSJDEST '   xxedus                          SET USER ID
+     c                   exsr      $getbatchno
+     C                   Endif                                                   new 440 co#
+     C* ______________________________
+     C*
+     C*  reset save fields
+     C                   EXSR      $newbreak
+     C*
+     C                   ENDIF                                                   DIFFERENT
+     C*_________________________________________________________
+     C* -------   detail record processing
+     C* ACCUMULATE AMOUNT and pounds INTO TOTAL FOR ACCOUNT
+     C*
+     C                   ADD       OMamt         ACTamt           15 2
+     C                   ADD       OMUNIT        ACTUNIT          15 2
+     C*
+     C                   ENDIF                                                  50 = OFF
+     C*
+     C                   ENDDO                                                  50 DOUEQ ON
+     C*----------------------------------------------------------------
+     C* EOF PROCESSING:
+     C*  WRITE LAST RECORDs TO JDE
+     C*----------------------------------------------------------------
+     C*
+     C* last JE record
+     c                   if        omamt <> 0 or omunit <> 0
+     C                   EXSR      $WRITE
+     C                   endif                                                  HAVE A RECORD
+     C* last batch record
+     c                   if        batamt <> 0 or batndo <> 0
+     C                   exsr      $writebatch
+     C                   endif                                                  HAVE A RECORD
+     C*
+     C* THIS WILL CLOSE ANY FILES THAT ARE LEFT OPEN FROM ANY CALLED
+     C* PROGRAMS WITHIN THIS PROGRAM.
+     C*
+     C                   CALL      'UTRCRSC'
+     C*
+     C                   MOVE      *ON           *INLR
+     C/EJECT
+     C***************************************************************
+     C* SUBROUTINE SECTION
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   DATE PROCESSING SUBROUTINE
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $FMTDT        BEGSR
+     C*
+     C*                  MOVEL     '*JUL    '    #TFMT             7
+     C*                  MOVEL     '*NONE'       #SEP              7
+     C*                  MOVE      *BLANK        $ERTST            1
+     C*  p16169          CALL      'X0028   '
+     C*                  CALL      'E1I0028   '
+     C*                  PARM                    #SIDAT
+     C*                  PARM                    #EDAT
+     C*                  PARM                    #FFMT
+     C*                  PARM                    #TFMT
+     C*                  PARM                    #SEP
+     C*                  PARM                    $ERTST
+     C*                  PARM      *BLANKS       $CTRY             2
+     C*
+     C                   call      'E10028A'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxedat
+      *
+     c                   move      xxedat        xxsidat
+     C                   move      xxsidat       #sidat
+     C                   ENDSR
+     C*
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE SUBROUTINE
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $WRITE        BEGSR
+     C                   MOVE      SVGLID        WKID              8
+     C*****              z-add     ACTamt        GLAA                           instead of move
+     C                   z-add     ACTamt        GLAG                           instead of move
+     C                   z-add(h)  ACTunit       GLu                            no decimals
+     C*
+     C                   MOVEL     JEICUT        GLICUT                         BATCH TYPE
+     C                   Z-ADD     JEICU         GLICU                          BATCH #
+     C*****              MOVE      'R'           GLRCND                         RECONCILED CODE
+     C                   MOVE      ' '           GLRCND                         RECONCILED CODE
+      *
+     C                   Z-ADD     SVDOC         GLDOC                          DOCUMENT #
+     C*
+     C*  RETRIEVE JULIAN DATE  FOR ACTUAL SHIP DATE
+     C*
+     C*                  MOVE      SVASDT        #SIDAT
+     C*                  MOVE      *BLANKS       #EDAT
+     C*                  MOVEL     '*YMD    '    #FFMT
+     C     *cymd         move      svasdt        wkisodate
+     c                   move      wkisodate     xxccyymmdd
+     C                   EXSR      $FMTDT
+     C                   MOVE      #SIDAT        GLDGJ                          G/L DATE
+     C*
+     C*  CONVERT ACTUAL SHIP DATE FROM YYMMDD TO MMDDYY
+     C*
+     C                   Z-ADD     SVASDT        GLYMD
+     C                   Z-ADD     YYGL          GLYY
+     C                   Z-ADD     MMGL          GLMM
+     C                   Z-ADD     DDGL          GLDD
+     C*
+     C*      CALCULATE PERIOD & FISCAL YEAR FROM G/L DATE
+     C*
+     C*  p16169          CALL      'X09031'
+     C*                  CALL      'E1I09031'
+     C*                  PARM      '1'           #CALC             1
+     C*                  PARM      WKCO          #CO               5
+     C*                  PARM      GLMDY         #DG               6 0
+     C*    GLPN          PARM                    #PN               2 0
+     C*    GLFY          PARM                    #FY               2 0
+     C*    GLCTRY        PARM                    #CTRY             2 0
+     C*                  PARM                    #EDT              1
+     C*                  PARM                    #DGSY             1
+JEU56 * Begin of Added code for GET09031                                    p16169
+JEU56 * Retrieve Acct. Period                                     copied from smlgen/qrpgsrc/edenupr
+JEU56C                   MOVE      GLDGJ         #DG                             julian date
+     C                   move      wkco          #CO
+MN04 C                   move      0             #CTRY             2 0
+MN04 C                   move      0             #FY               2 0
+      *
+MN04 C******             CALL      'GETFYPNO'
+MN04 C                   CALL      'GET09031'
+MN04 C                   PARM                    #CO               5
+MN04 C                   PARM                    #DG               6 0
+MN04 C                   PARM      0             #PN               2 0
+MD   C                   PARM      0             #FY               2 0
+MD   C                   PARM      0             #CTRY             2 0
+     C                   parm      ' '           BSSV              1
+MN04  *
+     C                   z-add     #pn           GLPN                           period
+     C                   z-add     #fy           GLFY                           fiscal year
+     C                   z-add     #ctry         GLCTRY                         fiscal century
+      *
+      ******* End of code added for GET09031                                     p16169
+      *
+     C                   Z-ADD     0             GLDKC                          CHECK CLEAR DATE
+     C                   MOVEL     USRNAM        GLUSER                         USER ID
+     C                   MOVEL     WRKSTN        GLJOBN                         JOB
+     C*
+     C                   MOVE      *zeros        GLCO                           CO #
+     C                   MOVE      svco          GLCO                           CO #
+     C                   MOVE      *blanks       GLKCO                          DOCUMENT CO#
+     C*
+     C                   MOVE      *BLANKS       GLCN                           CHECK #
+     C                   Z-ADD     0             GLDKJ
+     C*
+     C                   ADD       1             GLJELN                         LINE NUMBER
+     C*
+     C                   MOVE      GLDSYJ        GLDICJ
+     C*
+     C                   MOVE      SVGLID        GLAID
+     C                   MOVEL     SVMCU         GLMCU
+     C                   MOVEL     SVOBJ         GLOBJ
+     C                   MOVEL     SVSUB         GLSUB
+     C*
+     C* E00193 - Not sure why we're blanking out the subledger if it is not valid.  It goes
+     C*          through a validation routine in JDE anyway when the user posts it.
+     C*
+     C* If we have a subledger and it is invalid, do not write the subledger to jde
+     C*
+     C                   if        svsbl <> *blanks                             have subledger
+     C*
+     C*****              IF        svsblfl = ' '                                no error
+     C                   MOVEL     SVSBL         GLSBL
+     C                   MOVE      svsblty       glsblt
+     C*****              else                                                   is error
+     C*****              MOVE      *blanks       GLSBL
+     C*****              MOVE      *blanks       glsblt
+     C*****              endif                                                  no error
+     C*
+     C                   else                                                   no subledger
+     C                   MOVE      *blanks       GLSBL
+     C                   MOVE      *blanks       glsblt
+     C                   endif                                                  have subledger
+     C*
+      * CALL PGM TO GET STRUCTURED ACCOUNT NUMBER.
+     C*
+     C*
+     C*  p16169          CALL      'X0901'
+     C                   CALL      'E1I0901'
+     C                   PARM                    xxsym
+     C                   PARM      '2'           xxomod
+     C                   PARM      '9'           xximod
+     C     wkani         PARM                    xxani
+     C                   PARM      GLMCU         xxmcu
+     C                   PARM      GLOBJ         xxobj
+     C                   PARM      GLSUB         xxsub
+     C                   PARM                    xxerrm
+     C                   PARM                    i0901ds
+     C*
+     C                   if        xxerrm = *blanks
+     C                   MOVEL     WKANI         GLANI
+     C                   ELSE
+     C                   MOVE      *BLANKS       GLANI
+     C                   ENDIF
+     C*
+     C                   MOVE      GLDGJ         GLDSVJ
+     C                   MOVEL     WKEXA         GLEXA                          EXPLANATION ORIG
+     C                   MOVEL     USRNAM        GLTORG                         TRANSACTION ORIG
+     C***                MOVEL     USRNAM        GLUSER                         USER ID
+     C                   MOVEL     xxedus        GLUSER                         USER ID
+     C                   MOVE      *BLANKS       GLRE                           REVERSE/VOID
+     C                   MOVE      *ZEROS        GLCRR                          EXCHANGE RATE
+     C                   MOVE      *ZEROS        GLHCRR                         HIST EXCH RATE
+      *
+      * P16169 added for new fields in e10911
+     C                   movel     gluser        gledus                         edi user id
+     C                   movel     glicu         gledbt                         edi batch no
+     C                   movel     gldoc         gledtn                         edi trans #->glcoc
+     C                   z-add     gljeln        gledln                         edi line no
+     C                   movel     '0'           gledsp                         edi success procd
+     C                   movel     'A'           gledtc                         edi trans action
+     C                   movel     'J'           gledtr                         edi trans type
+     C                   move      xxsyssyndt    glabdt                         Date updated
+     C                   time                    glabtm                         Time Last Updated
+     C                   movel     'OMINVJ2E1'   glakvn                         pgm  Last Updated
+     C**                 movel     gluser        glajvn                         user id created
+     C                   movel     usrnam        glajvn                         user id created
+     C*
+     C*
+     C                   WRITE     I0911
+     C*
+     C*  ONLY ACCUMULATE DEBIT AMOUNTS FOR BATCH HEADER
+     C*
+     C**   GLAA          IFGT      0                                            GLAA > 0
+     C     GLAG          IFGT      0                                            GLAA > 0
+     C****               ADD       GLAA          BATAMTd          15 2
+     C                   ADD       GLAG          BATAMTd          15 2
+     C                   move      batamtd       BATAMT           15 0
+     C****               ADD       1             BATNDO                  increment for new doc
+     C                   ENDIF                                                  GLAG > 0
+     C*
+     C                   ENDSR
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   WRITE Batch Record
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $writebatch   BEGSR
+     C*
+     C     JEICU         IFNE      *ZEROS                                       BATCH# NOT 0
+     C                   MOVE      JEICUT        WKICUT
+     C                   MOVE      JEICU         WKICU
+     C*
+     C**   KEY11         CHAIN     I0011                              51          p16169
+     C     KEY11         CHAIN     I0011l1                            51
+     C     *IN51         IFEQ      *ON                                          51 = ON
+     C                   MOVE      JEICU         ICICU
+     C                   MOVE      BATAMT        ICAICU                          no dec
+     C                   MOVE      GLDICJ        ICDICJ
+     C                   MOVE      BATNDO        ICNDO
+     C                   z-add     BATAMTd       ICAME                           with dec
+     C                   MOVE      BATNDO        ICDOCN
+     C**                 MOVEL     USRNAM        ICUSER
+     C                   MOVEL     xxedus        ICUSER
+     C                   MOVEL     JEICUT        ICICUT
+     C                   MOVE      'A'           ICIAPP
+     C                   MOVE      'Y'           ICBAL
+     C                   MOVE      ' '           ICBALJ
+     C                   MOVE      ' '           ICIST
+     C                   MOVE      'N'           ICPOB
+     C                   MOVE      'Y'           ICIBOI
+     C*
+     C* Count number of documents per Batch 10-28-21
+     C*
+     c                   call      'E1MZXFR'
+     c                   parm                    RETURN
+     c                   parm                    xxedus                          user
+     c                   parm                    WKICU                           batch 8.0
+     c                   parm                    doccount          5 0
+     c*
+     c     doccount      ifne      0
+     c                   z-add     doccount      icndo
+     c                   z-add     doccount      icdocn
+     c                   end
+     c
+     C**                 WRITE     I0011                                        p16169
+     C                   WRITE     I0011l1
+     C*
+     C* WRITE RUN LOG HEADER WORKFILE - WILL BE READ IN CL OMINVCL TO PUSH BATCHES TO ZPROCESSOR
+     C*
+     C                   call      'E1LCXFR'
+     c                   parm                    RETURN            7
+     C                   parm                    icICUT                         BATCH TYPE
+     C                   parm                    icICU                          BATCH NUMBER
+     C                   parm                    icuser                         USER
+     C                   parm                    svco                           company
+     C* reset batch fields
+     C                   z-add     0             batamt
+     C                   z-add     0             batamtd
+     c                   z-add     0             batndo
+     C*
+     C                   ENDIF                                                  51 = ON
+     C                   ENDIF                                                  BATCH# NOT 0
+     C*
+     C                   ENDSR
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   Break Logic - setup save fields, re-set accumulators
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $newbreak     BEGSR
+     C*
+     c                   if        svdoc <> omdoc#                               added for p16169
+     c                   add       1             batndo            5 0          increment f/new do
+     c                   end
+     C*
+     C                   MOVE      OMAID         SVGLID            8
+     C                   MOVE      OMMCU         SVMCU            12
+     C                   MOVE      OMOBJ         SVOBJ             6
+     C                   MOVE      OMSUB         SVSUB             8
+     C                   MOVE      OMSBLTY       SVSBLTY           1
+     C                   MOVE      OMSBL         SVSBL             8
+     C                   MOVE      OMSBLFL       SVSBLFL           1
+     C                   Z-ADD     OMASDT        SVASDT            7 0
+     C                   Z-ADD     omdoc#        svdoc             8 0
+     C                   Z-ADD     omco#         svco              3 0
+     C*
+     C                   Z-ADD     0             ACTamt
+     C                   Z-ADD     0             ACTunit
+     C*
+     C                   ENDSR
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   get JDE Batch #'s
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     $getbatchno   BEGSR
+     C*
+      * CALL PGM TO GENERATE NEXT AVAILABLE BATCH # FROM JDE
+      *
+     C*  p16169          CALL      'X0010'
+     C*                  CALL      'E1I0010'
+     C*                  PARM      '00  '        PSSY              4
+     C*                  PARM      '01'          PSIDX             2
+     C*                  PARM                    PSNBR             8 0
+     C*                  Z-ADD     PSNBR         JEICU             8 0          BATCH NUM
+     C                   call      'GET0010 '                                   p16169
+     C                   parm      '00  '        xxsy              4
+     C                   parm      '01'          xxidx             3
+     C                   parm      0             spsnbr           15 0          chg from xxbatch
+     C                   parm      ' '           bssv              1            added parm
+     c                   z-add     spsnbr        jeicu             8 0          batch num
+     C*
+     C                   MOVEL     'G'           JEICUT            2            BATCH TYPE
+     C*
+     C*
+     C* Re-set the Document Line Counter
+     C*
+     C                   Z-ADD     0             GLJELN
+     c                   z-add     0             batndo                         increment f/new do
+     C*
+      *
+     C                   ENDSR
+     C*
+     C/EJECT
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*   Initial Subroutine - -
+     C*:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::*
+     C*
+     C     *inzsr        BEGSR
+     C*
+     C*----------------------------------------------------------------
+     C*
+     C* KEY USED FOR BATCH HEADER IN JDE
+     C*
+     C     KEY11         KLIST                                                    F0011
+     C                   KFLD                    WKICUT            2
+     C                   KFLD                    WKICU             8 0
+     C*
+     C     *ENTRY        PLIST
+     C                   PARM                    RETRN             7
+     C                   PARM                    ACO               3
+     C*
+     C                   MOVE      *ZEROS        WKCO              5
+     C                   MOVE      ACO           WKCO
+     C                   MOVE      ACO           CO                3 0
+     C*
+     C*   RETRIEVE YMD FORMAT FOR UDATE BY USING JDE'S ROUTINE...
+     C*
+     C                   TIME                    $TIME            12 0
+     C                   MOVE      $TIME         $DATE             6 0
+     C                   MOVE      $DATE         #SIDAT            6
+     C*                  MOVE      *BLANK        #EDAT             8
+     C*                  MOVEL     '*SYSVAL '    #FFMT             7
+     C*                  MOVEL     '*YMD    '    #TFMT             7
+     C*                  MOVEL     '*NONE'       #SEP              7
+     C*                  MOVE      *BLANK        $ERTST            1
+     C*  p16169          CALL      'X0028   '
+     C*                  PARM                    #SIDAT
+     C*                  PARM                    #EDAT
+     C*                  PARM                    #FFMT
+     C*                  PARM                    #TFMT
+     C*                  PARM                    #SEP
+     C*                  PARM                    $ERTST
+     C*                  PARM      *BLANKS       $CTRY             2
+     C*                  MOVE      #SIDAT        WKPSDT            6            POST DATE
+     c*
+     C     *mdy          movel     udate         wkisodate
+     C                   movel     wkisodate     xxccyymmdd
+     C                   call      'HP8008'
+     C                   parm                    xxccyymmdd
+     C                   parm      0             xxsyssyndt
+      *
+     C                   EXSR      $FMTDT
+      *
+     C                   move      xxsidat       wkpdst            6
+     C                   move      xxsidat       #sidat
+     C                   MOVE      #SIDAT        GLUPMJ                         UPDATE DATE
+     C                   MOVE      #SIDAT        GLDSYJ
+     C*
+     C*   RETRIEVE JULIAN DATE FOR UDATE BY USING JDE'S ROUTINE...
+     C*
+     C                   TIME                    $TIME            12 0
+     C                   MOVE      $TIME         $DATE             6 0
+     C                   MOVE      $DATE         #SIDAT            6
+     C                   MOVE      *BLANK        #EDAT             8
+     C*                  MOVEL     '*SYSVAL '    #FFMT             7
+      *
+      *
+      * Put system date into an 8,0 field.
+      * Then, get it into Synon format of CYYMMDD to use in updating AR Detail file.
+     C*                  MOVE      #SIDAT        GLUPMJ                         UPDATE DATE
+     C*                  MOVE      #SIDAT        GLDSYJ
+     C*
+     C                   TIME                    GLTICU                         TIME
+     C                   TIME                    GLUPMT                         TIME UPDATED
+      *
+      *
+     C                   movel     'OMINVJ2E1'   glpid
+      *
+      * Get company value OMSJDE for User ID to use for gledus
+      *
+     c                   movel     'OMSJDEUSR '  xxval
+     c                   call      'PUQ6XFR '
+     C                   PARM                    XXRTN             7
+     C                   PARM                    co
+     C                   PARM                    XXVAL            10
+     C                   PARM                    XXEDUS           10
+     C
+     c                   if        xxedus = *blanks                              added for p16169
+     c                   movel     'OMSJDESF  '  xxedus                         default
+     c                   end
+     c* USE THIS UNTIL IT CHANGES TO COMPANY 44O OR 960
+     c                   if        CO = 440 OR CO = 960                          added for SDN440
+     c                   movel     'OMSJDESF  '  xxedus                         default F/300/320
+     c                   end
+     C*
+     C                   endsr

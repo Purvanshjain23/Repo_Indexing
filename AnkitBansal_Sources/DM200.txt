@@ -1,0 +1,415 @@
+     H option(*srcstmt:*nodebugio)
+      *****************  RPG PROGRAM HEADING  ************************
+      *
+      * SYSTEM:      All
+      * PROGRAM:     DM200 - Build the Calendar File
+      * PROGRAMMER:  Alice and Barb
+      * CREATED:     02/12/04
+      *
+      * FUNCTION:    We create this file so that we can build a true time dimension
+      *              in Cognos and get the data pulled into the correct period.
+      *
+      *              We have to force the "Accounting" date to be in the same
+      *              calendar month as the period so that we can create the
+      *              Cognos time dimension based on the "calendar" month...
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 12/06/06  LeAnne Ramsey
+      *           We changed the file name/text on the Calendar file since this file
+      *           is now used in non-Datamart functions.
+      *           We also added 3 fields:
+      *             1) Transaction Date 6,0   (to hold the date in MMDDYY format)
+      *             2) Accounting Date 6,0    (to hold the date in MMDDYY format)
+      *             3) HPS Period
+      *
+      * 06/18/07  Sharon Zurn
+      *          -Added fields for quarter and week of quarter to CAPCAL.
+      *          -Added routine to populate the new fields.
+      *          -Added code to get the current year and add 1.  This
+      *           will now be used in the key to get the records for the
+      *           new year.
+      *          -Changed logical that we read to Company, Year.
+      *
+      * 09/10/07  LeAnne Ramsey
+      *           Renamed and added fields.
+      *
+      * 09/30/09  Barb Gutierrez
+      *           Changed to use the HPS calendar week in determing the
+      *           HPS quarter instead of the week number in caafrep.
+      *
+      /eject
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     Fcaafrelb  if   e           k disk    rename(@AFREH3:@afrel1)
+      *  OMS Calendar File (Key:  co#-afaic3, year)
+      *
+      *
+     Fcaafrel0  if   e           k disk    rename(@afrebd:@afrel0)
+      *  OMS Calendar File (Key:  co#-afaic3, date-afbcdt)
+      *
+      *
+     Fcaafrela  if   e           k disk    rename(@afreuw:@afrela)
+      *  OMS Calendar File (Key:  co#-afaic3, HPS year, HPS week, date)
+      *
+      *
+     Fcapcal    o    e           k disk
+      *     Calendar File (Key:  caco#, Catdtsy)
+      *
+      /eject
+      ****************************************************************
+      * DEFINITION SPECIFICATIONS
+      ****************************************************************
+      *
+      *
+      ****************************************************************
+      * CONSTANTS
+      ****************************************************************
+      *
+     D yes             c                   'Y'
+     D no              c                   'N'
+     D P               c                   'P'
+     D W               c                   'W'
+      *
+      *
+      ****************************************************************
+      * ARRAYS AND TABLES
+      ****************************************************************
+      *
+      ****************************************************************
+      * STANDALONE FIELDS
+      ****************************************************************
+      *
+     D wkqt            s              1  0
+     D wkwkqt          s              2  0
+     D wkperioda       s              1A   inz(P)
+     D wkweeka         s              1A   inz(W)
+      *
+      * Work fields for date manipulation
+      *
+     D updteyr         s              4s 0                                      Today ccyymmdd
+     D currdte         s              8s 0                                      Today ccyymmdd
+     D wkdate          s               d   datfmt(*usa)                         Work field MMDDCCYY
+     D wkisodate       s               D   datfmt(*iso)
+     D wkaccdtsyn      s              7  0
+     D wkdatesyn       s              7  0
+     D xxdatesyn       s              7  0
+     D xxccyymmdd      s              8  0
+     D wkdate08        s              8  0
+     D wktryrmo        s              6  0
+      *
+     D wkcono          s                   like(afaic3)
+     D svafbcdt        s                   like(afbcdt)
+     D svtryrmo        s                   like(wktryrmo)
+      *
+      ****************************************************************
+      * DATA STRUCTURES
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * Standard program status data structure
+      *---------------------------------------------------------------
+      *    externally defined as UTPGFR (record format: PGMDSR)
+     D pgmds         esds                  extname(utpgfr)
+      *
+     D wkperiod        ds                  inz
+     D   wkpd                         8
+     D   wkyear                       4    overlay(wkpd:1)
+     D   wkper                        3    overlay(wkpd:6)
+      *
+     D wkwkalpha       ds                  inz
+     D   wkhpswk                      8
+     D   wkyr                         4    overlay(wkhpswk:1)
+     D   wkweek                       3    overlay(wkhpswk:6)
+      *
+      *
+     D wkacperiod      ds
+     D   wkacyrpr              1      6  0
+     D   wkacyear              1      4  0
+     D   wkacper               5      6  0
+     D                 ds
+     D  wktrdate               1      7  0
+     D  wktrmm                 4      5  0
+      *
+      * The following is a dummy C-spec to keep the D-specs from
+      * running over into the C-specs on the compile listing. It
+      * serves no other purpose and can be deleted at any time.
+      *
+     C                   if        sdpgm = *blank
+     C                   endif
+      /EJECT
+      ****************************************************************
+      * MAINLINE
+      ****************************************************************
+      *
+      * Read the OMS calendar file and populate the datamart calendar file
+      * (ONLY use Company 350 calendar records)
+      *
+     C     key03         setll     caafrelb                               90
+     C                   dou       *in90 = *on                                  Main do
+     C     key03         reade     caafrelb                               90
+     C                   if        *in90 = *off                                 If not EOF
+      *
+      * Set up fields mapped directly from the record just read
+      *
+     C                   exsr      $dirmap
+      *
+      * Get the HPS quarter and week of quarter
+      *
+     C                   exsr      $hpsqtr
+      *
+      * Determine the week ending date we want to use for the Cognos
+      * date dimension
+     C                   exsr      $default
+      *
+      * Populate the "Sales Date" fields with the "Transaction Date" values.
+      *
+     C                   z-add     catdtsy       casdtsy
+     C                   move      catdtiso      casdtiso
+     C                   z-add     catdt08       casdt08
+     C                   z-add     catdt06       casdt06
+      *
+      * Write new calendar file record
+      *
+     C                   write     carec
+     C                   clear                   carec
+      *
+     C                   endif                                                  If not EOF
+     C                   enddo                                                  Main do
+      *
+     C                   seton                                        lr
+      /eject
+      *----------------------------------------------------------------
+      * Fields that are directly mapped
+      *----------------------------------------------------------------
+      *
+     C     $dirmap       begsr
+      *
+     C                   z-add     afaic3        caco#                          Company number
+      * Transaction
+     C                   z-add     afbcdt        catdtsy                        trans date synon
+     C                   move      afa9st        catdtdow                       day of week
+      *
+      *           Format the synon date into 8.0 and iso and 6.0
+      *
+     C                   z-add     catdtsy       wkdatesyn                      Trans Date 8,0
+     C                   exsr      $get80
+     C                   z-add     wkdate08      catdt08                        trans Date 8,0
+     C                   movel     wkisodate     catdtiso                       trans Date ISO
+     C     *mdy          move      wkisodate     catdt06                        trans Date 6,0
+      *
+      *
+      * Accounting
+     C                   z-add     afesnb        caacyr                         acct year
+     C                   z-add     afetnb        caaper                         acct period
+      *
+      *             Derive the accounting quarter from the period
+      *
+     C                   select
+     C                   when      caaper <= 3
+     C                   z-add     1             caacqt
+     C                   when      caaper <= 6
+     C                   z-add     2             caacqt
+     C                   when      caaper <= 9
+     C                   z-add     3             caacqt
+     C                   other
+     C                   z-add     4             caacqt
+     C                   endsl
+      *
+      *             Structure the period with year Pxx (2004 P01)
+      *
+     C                   move      afesnb        wkyear                         acct year
+     C                   movel     wkperioda     wkper                          'P'
+     C                   move      afetnb        wkper                          period number
+     C                   move      wkpd          caapera                        year/P/period number
+      *
+      * HPS
+     C                   z-add     afetnb        cahpspe                        hps period
+     C                   z-add     afnqnx        cahpsyr                        hps year
+     C                   z-add     afnrnx        cahpswk                        hps week
+     C                   move      'N'           cawkexfl                       week except flag
+      *
+      *
+      *            Structure the week with year Wxx (2004 W01)
+      *
+     C                   move      afnqnx        wkyr                           year
+     C                   movel     wkweeka       wkweek                         'W'
+     C                   move      afnrnx        wkweek                         week number
+     C                   move      wkhpswk       cahpswka                       year/W/week number
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Retrieve 8.0 date from synon formatted date and setup iso date
+      *----------------------------------------------------------------
+      *
+     C     $get80        begsr
+      *
+     C                   call      'HP8011'
+     C                   parm      wkdatesyn     xxdatesyn
+     C                   parm      0             xxccyymmdd
+      *
+     C                   z-add     xxccyymmdd    wkdate08                       Date 8,0
+     C     *iso          movel     xxccyymmdd    wkisodate                      Date ISO
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Determine week date to use for the Cognos Cubes
+      *----------------------------------------------------------------
+      *
+     C     $default      begsr
+      *
+      * Setup work fields to be used for commparisons in $default
+      *
+     C                   move      afesnb        wkacyear                       acctg year
+     C                   move      afetnb        wkacper                        period number
+     C                   z-add     afbcdt        wkaccdtsyn                     default trans dte
+      *
+      * Transaction Year/month
+      *
+     C                   move      afbcdt        wktrdate                       syn trans date
+     C                   move      wktrmm        wktryrmo                       cal month
+     C                   movel     afesnb        wktryrmo                       acctg year
+      *
+      *
+      * If the Tansaction Year/Month is GT the Acctg Year/Period =
+      *       use the LAST Day of the Prior Month
+      *
+     C                   select
+     C                   when      wktryrmo > wkacyrpr
+     C     key02         setgt     CAAFRELA
+     C                   dou       *in92 = *on
+     C     key02         readpe    CAAFRELA                               92    Do loop 1
+     C                   if        *in92 = *off                                 If not EOF1
+      *
+      *  setup new transaction Year/month
+      *
+     C                   move      afbcdt        wktrdate                       syn trans date
+     C                   move      wktrmm        wktryrmo                       cal month
+     C                   movel     afesnb        wktryrmo                       acctg year
+      *
+     C                   if        wktryrmo = wkacyrpr
+     C                   move      afbcdt        wkaccdtsyn                     acct date-synon
+     C                   move      *on           *in92                          seton EOF
+     c                   endif
+      *
+     c                   endif                                                  If not EOF1
+     c                   enddo                                                  Do loop 1
+      *
+      * If the Transaction Year/Month is LT the Acctg Year/Period =
+      *       use the FIRST Day of the NEXT Month
+      *
+     C                   when      wktryrmo < wkacyrpr
+     C     Key01         setll     CAAFREL0                               93
+     C                   dou       *in93 = *on                                  Do loop 2
+     C                   read      CAAFREL0                               93
+     C                   if        *in93 = *off                                 If not EOF2
+      *
+      *  setup new transaction Year/month
+      *
+     C                   move      afbcdt        wktrdate                       syn trans date
+     C                   move      wktrmm        wktryrmo                       cal month
+     C                   movel     afesnb        wktryrmo                       acctg year
+      *
+     C                   if        wktryrmo = wkacyrpr
+     C                   move      afbcdt        wkaccdtsyn                     acct date-synon
+     C                   move      *on           *in93                          seton EOF
+     c                   endif
+      *
+     c                   endif                                                  If not EOF2
+     c                   enddo                                                  Do loop2
+      *
+      * If the Tansaction Year/Month is EQUAL TO the Acctg Year/Period =
+      *       use the Transaction Date as the Acctg date
+      *
+     c                   when      wktryrmo = wkacyrpr
+     C                   move      afbcdt        wkaccdtsyn                     trans date
+     C                   endsl
+      *
+      *-------------------------------------------------------------------------------------
+      * Format the synon date into 8.0 and iso and 6.0
+      *
+     C                   z-add     wkaccdtsyn    caacdtsy                       Acct Date syn
+      *
+     C                   z-add     wkaccdtsyn    wkdatesyn                      acctg Date
+     C                   exsr      $get80
+     C                   movel     wkdate08      caacdt08                       Acct Date 8,0
+     C                   movel     wkisodate     caacdtiso                      Acct Date ISO
+     C     *mdy          move      wkisodate     caacdt06                       Acct Date 6,0
+      *
+     C                   endsr
+      /eject
+      *----------------------------------------------------------------
+      * Get the HPS quarter and week of quarter
+      *----------------------------------------------------------------
+      *
+     C     $hpsqtr       begsr
+      *
+      * Day of week = 1, increment the week of quarter.
+      *
+     C                   if        AFA9ST   = '1'
+     C                   add       1             wkwkqt
+     C                   endif
+      *
+      * When quarter changes we need to set the week of qtr back to one.
+      *
+     C                   select
+     C                   when      afnrnx = 1                                   HPS calendar week
+     C                   z-add     1             wkwkqt
+     C                   z-add     1             wkqt
+      *
+     C                   when      afnrnx = 14                                  HPS calendar week
+     C                   z-add     1             wkwkqt
+     C                   z-add     2             wkqt
+      *
+     C                   when      afnrnx = 27                                  HPS calendar week
+     C                   z-add     1             wkwkqt
+     C                   z-add     3             wkqt
+      *
+     C                   when      afnrnx = 40                                  HPS calendar week
+     C                   z-add     1             wkwkqt
+     C                   z-add     4             wkqt
+     C                   endsl
+      *
+     C                   z-add     wkwkqt        cahpswkqt
+     C                   z-add     wkqt          cahpsqt
+      *
+     C                   endsr
+      /eject
+      *---------------------------------------------------------------
+      * Initialization subroutine
+      *---------------------------------------------------------------
+      *
+     C     *inzsr        begsr
+      *
+     C     key01         klist
+     C                   kfld                    wkcono                         Company
+     C                   kfld                    afbcdt                         date
+      *
+     C     key02         klist
+     C                   kfld                    wkcono                         Company
+     C                   kfld                    afnqnx                         HPS Year
+     C                   kfld                    afnrnx                         HPS Week
+      *
+     C     key03         klist
+     C                   kfld                    wkcono                         Company
+     C                   kfld                    updteyr                        date
+      *
+      * Default to Company 350
+     C                   z-add     350           wkcono
+      *
+      * Get current year and figure out new year to populate records
+      * Set up today's date
+      *
+     C     *usa          move      *date         wkdate
+     C                   move      wkdate        currdte                        ccyymmdd creation dt
+     C                   move      currdte       updteyr                        ccyymmdd creation dt
+     C                   add       1             updteyr                        ccyymmdd creation dt
+      *
+     C                   endsr
+      /eject

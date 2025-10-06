@@ -1,0 +1,231 @@
+/***************************************************************** */
+/*                                                                 */
+/*  ENVIRONMENT:     PORK DIVISION  - MOVED TO E1IDEVMDL           */
+/*  SYSTEM:          INTERFACE MP2 TO JDE   OR E1                  */
+/*  PROGRAM NUMBER:  MP460CL                                       */
+/*  PROGRAM NAME:    MP2: SPECIFY EDIT/POST OF INVOICES TO JDE     */
+/*  PROGRAMMER:      LEANNE FEDOR     / ROSE CENTONZE              */
+/*  CREATE DATE:     05/06/02        / 4/07/2020                   */
+/*                                                                 */
+/*  FUNCTION:        THIS CL RUNS A BATCH EDIT OVER UNPOSTED       */
+/*                   INVOICES AND POSTS INTO JDE WHEN              */
+/*                   1) THE USER HAS ELECTED TO 'POST' AND         */
+/*                   2) AN INVOICE IS ERROR-FREE                   */
+/*                                                                 */
+/*******************************************************************/
+/* MODIFIED:                                                       */
+/*                                                                 */
+/* 03/12/08  LEANNE RAMSEY                                         */
+/*           CHANGED THE PRINT OF MP660 TO USE NEW PRINT198 FILE/  */
+/*           LOGIC.                                                */
+/*                                                                 */
+/* 03/13/19  Brad Baden   E14631/P387 - Seaboard Energy MP2 to JDE */
+/*           Replaced data area DAMP2EPFL with the MPP108 file for */
+/*           storing the MP2 Edit/Post flag.  The flag in the      */
+/*           MPP108 file is by Company.                            */
+/*                                                                 */
+/*  4/07/2020 ROSE CENTONZE  P16169                       */
+/*                     CHECK FOR LIVE WITH JW/E1 TO CALL ALTERNATE    */
+/*                     E1 FUNCTION  WHICH ARE FROM E1IDEVMDL         */
+/*                     MPJDE304    --> MPJDE304E1  -CRT RUNLOG FILE E1B9CPP */
+/*              AT END, CALL PGM E1LDXFR TO PUSH E1 BATCHES TO Z PROCESSOR */
+/*                FROM RUN LOG WORKFILE QTEMP/E1B9CPP                        */
+/*                                                                 */
+/*  7/27/2020 Brad Baden     P16169   SDN465                       */
+/*                     Call program E1LRXFR to send an email of all*/
+/*                     of the Batch Numbers in the E1B9CPP file    */
+/*                                                                 */
+/*  4/15/2021 Danny Nguyen  S17060 - Get MP2 Payables Company from */
+/*                  Company Values. Passed in the Payables Company */
+/*                  when calling MPJDE304E1 during POST process.   */
+/*                  when calling MPJDE304E1 during POST process.   */
+/*                  Do not call MP651CL if &BATNO is 0 to prevent  */
+/*                  decimal data error.                            */
+/*                                                                 */
+/*******************************************************************/
+
+             PGM
+
+             DCL        VAR(&COMPN)  TYPE(*DEC)  LEN(3 0)
+             DCL        VAR(&PAYCMP) TYPE(*CHAR) LEN(3)         /*S17060*/
+
+             DCL        VAR(&BATNO) TYPE(*DEC) LEN(8)
+             DCL        VAR(&LDEPFL) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&LDACONO) TYPE(*CHAR) LEN(3)
+
+             DCL        VAR(&USER)   TYPE(*CHAR) LEN(10)
+             DCL        VAR(&GRPPRF) TYPE(*CHAR) LEN(10)
+
+             DCL        VAR(&SOURCE)  TYPE(*CHAR) LEN(25) +
+                          VALUE('Purchase Order Post')
+             DCL        VAR(&BCHDSC)  TYPE(*CHAR) LEN(25) +
+                          VALUE('Voucher')
+             DCL        VAR(&RECIP)  TYPE(*CHAR) LEN(30)
+             DCL        VAR(&SUBJECT) TYPE(*CHAR) LEN(40) VALUE('MP2 +
+                          Invoices to JDE')
+
+             DCL        VAR(&LIVEJW) TYPE(*CHAR) LEN(1)  /*    LIVE WITH JW */
+             DCL        VAR(&LIVEE1) TYPE(*CHAR) LEN(1)  /*    LIVE WITH E1 */
+             DCL        VAR(&RETRN) TYPE(*CHAR) LEN(7)
+
+             DCL        VAR(&HOLD) TYPE(*CHAR) LEN(10)
+             DCL        VAR(&COPYS) TYPE(*DEC) LEN(2)
+             DCL        VAR(&OUTQ) TYPE(*CHAR) LEN(10)
+
+             CHGVAR     VAR(&LDEPFL) VALUE(%SST(*LDA 1 1))
+             CHGVAR     VAR(&LDACONO) VALUE(%SST(*LDA 86 3))
+             CHGVAR     VAR(&COMPN) VALUE(&LDACONO)
+
+ /* S17060 - Initialize to 0 */
+             CHGVAR     VAR(&BATNO) VALUE(0)
+
+/*-------------------------------------------------------------------*/
+/* CLEAR WORKFILE THAT WILL HOLD ERROR-FREE RECORDS TO POST TO JDE   */
+/*-------------------------------------------------------------------*/
+
+             CLRPFM     FILE(MPP304)
+
+/*------------------------------------------------------------------*/
+/* SET OVERRIDES FOR PRINT FILES                                    */
+/*------------------------------------------------------------------*/
+
+ HOLD:       IF         COND(%SST(*LDA 411 1) = 'Y') THEN(CHGVAR +
+                          VAR(&HOLD) VALUE(*YES))
+             ELSE       CMD(CHGVAR VAR(&HOLD) VALUE(*NO))
+
+ COPYS:      CHGVAR     VAR(&COPYS) VALUE(%SST(*LDA 412 1))
+             IF         COND(&COPYS = 0) THEN(CHGVAR VAR(&COPYS) +
+                          VALUE(1))
+
+ OUTQ:       CHGVAR     VAR(&OUTQ) VALUE(%SST(*LDA 413 10))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(%SST(*LDA 401 10)))
+             IF         COND(&OUTQ = '          ') THEN(CHGVAR +
+                          VAR(&OUTQ) VALUE(*JOB))
+
+/*-------------------------------------------------------------------*/
+/*  GET E1 LIVE STATUS FROM COMPANY VALUES    P16169                 */
+/*-------------------------------------------------------------------*/
+             CALL       PGM(POMTXFR) PARM(&RETRN &COMPN  'JWLIVE    +
+                          ' &LIVEJW)
+             CALL       PGM(POMTXFR) PARM(&RETRN &COMPN  'E1LIVE    +
+                          ' &LIVEE1)
+/*-------------------------------------------------------------------*/
+/* EDIT INVOICES AND BUILD WORKFILE OF ERROR-FREE RECORDS            */
+/*-------------------------------------------------------------------*/
+
+             OVRPRTF    FILE(QPRINT) TOFILE(PRINT132) OUTQ(&OUTQ) +
+                          COPIES(&COPYS) HOLD(&HOLD) SHARE(*YES)
+
+             CALL       PGM(MP360) PARM(&LDEPFL)
+             DLTOVR     FILE(QPRINT)
+
+/*-------------------------------------------------------------------*/
+/* IF THE USER IS EDITING:                                           */
+/* 1) GENERATE OVERRIDE LISTING FOR ERROR-FREE INVOICES              */
+/*-------------------------------------------------------------------*/
+
+             IF         COND(&LDEPFL *EQ 'E') THEN(DO)
+             CALL       PGM(MP6511CL)
+             ENDDO
+
+/*-------------------------------------------------------------------*/
+/* IF THE USER IS POSTING:                                           */
+/* 1) POST ANY INVOICES THAT ARE ERROR FREE                          */
+/* 2) GENERATE OVERRIDE LISTING FOR THE BATCH                        */
+/*-------------------------------------------------------------------*/
+
+             IF         COND(&LDEPFL *EQ 'P') THEN(DO)
+
+/* S17060 - Get MP2 Payables Company for Company in *LDA */
+             CALL       PGM(POMTXFR) PARM(' ' &COMPN 'MP2PAY' &PAYCMP)
+
+/*-------------------------------------------------------------------*/
+/*  CREATE E1 RUN LOG WORKFILE - TO USER LATER TO PUSH BATCHES TO E1   */
+/*                                                                   */
+             IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1 *EQ 'P') +
+                          THEN(DO )
+             CRTDUPOBJ  OBJ(E1B9CPP) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL0) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+             CRTDUPOBJ  OBJ(E1B9CPL1) FROMLIB(*LIBL) OBJTYPE(*FILE) +
+                          TOLIB(QTEMP)
+                          ENDDO
+/*-------------------------------------------------------------------*/
+/*  CALL FOR JDE WORLD OR E1 IF LIVE OR PARALLEL                  */
+/*-------------------------------------------------------------------*/
+/**********  CALL       PGM(MPJDE304) PARM(&BATNO)                ******/
+
+ PARLLL:     IF         COND(&LIVEJW *EQ 'P') THEN(CALL +
+                          PGM(MPJDE304) PARM(&BATNO &LIVEJW))
+/* S17060 - Passed in &PAYCMP as input Parm. */
+             IF         COND(&LIVEE1 *EQ 'P') THEN(CALL +
+                          PGM(MPJDE304E1) PARM(&BATNO &LIVEE1 &PAYCMP))
+
+ LIVEE1:     IF         COND(&LIVEJW *EQ 'Y') THEN(CALL +
+                          PGM(MPJDE304) PARM(&BATNO &LIVEJW))
+/* S17060 - Passed in &PAYCMP as input Parm. */
+             IF         COND(&LIVEE1 *EQ 'Y') THEN(CALL +
+                          PGM(MPJDE304E1) PARM(&BATNO &LIVEE1 &PAYCMP))
+
+/* S17060 - Do not call MP651CL when &BATNO = 0. */
+             IF         COND(&BATNO *NE 0) THEN(DO)
+
+             CALL       PGM(MP651CL)  PARM(&BATNO)
+
+             ENDDO      /* &BATNO *NE 0 */
+
+             ENDDO
+
+
+/*-------------------------------------------------------------------*/
+/* PRINT A LISTING OF THE INVOICES THAT WERE ERROR-FREE              */
+/*-------------------------------------------------------------------*/
+
+             OVRPRTF    FILE(PRINT198) OUTQ(&OUTQ) COPIES(&COPYS) +
+                          HOLD(&HOLD)
+
+             CALL       PGM(MP660) PARM(&LDEPFL)
+             DLTOVR     FILE(PRINT198)
+
+/**********************************************************************/
+/*  EXECUTE THE PROGRAM TO READ THE QTEMP RUN LOG HEADER         */
+/*      E1B9CPP AND PUSH THE BATCHES TO E1                      */
+/**********************************************************************/
+ LIVEE1P:    IF         COND(&LIVEE1 *EQ 'Y' *OR &LIVEE1 *EQ 'P')  THEN(DO)
+/*                                                                   */
+IFPOST:      IF         COND(&LDEPFL *EQ 'P') THEN(DO)
+             CALL       PGM(E1LDXFR) PARM(&RETRN)
+
+/**********************************************************************/
+/*                                                                   */
+/*  Send message to user that the batch is ready in JDE              */
+             IF         COND(&GRPPRF *EQ 'SBDPGMR') THEN(DO)
+             CHGVAR     VAR(&RECIP) VALUE('MP2 E1 TEST')
+                ENDDO
+             IF         COND(&GRPPRF *NE 'SBDPGMR') THEN(DO)
+             CHGVAR     VAR(&RECIP) VALUE('MP2 E1')
+                ENDDO
+
+             CALL       PGM(E1LRXFR) PARM(&RETRN &SOURCE &BCHDSC +
+                          &RECIP &SUBJECT)
+
+             DLTF       FILE(QTEMP/E1B9CP*)
+             MONMSG     MSGID(CPF2105 CPF2125)
+             ENDDO                              /*          END IFPOST  */
+
+             ENDDO                              /*          END LIVEE1P */
+/**********************************************************************/
+
+/*  SET THE DATA AREA THAT KEEPS THE EDIT/POST FUNCTION FROM BEING      */
+/*  SUBMITTED TWICE SIMULTANEOUSLY                                      */
+
+/*  Replace Data Area update with updating the value in MPP108 file     */
+/*           CHGDTAARA  DTAARA(DAMP2EPFL (1 1)) VALUE(' ')            */
+
+/*  Set the Edit/Post Status to blank for company being processed     */
+             CALL       PGM(MP260) PARM(&COMPN ' ')
+
+EXIT:
+             ENDPGM

@@ -1,0 +1,1704 @@
+      *****************  RPG PROGRAM HEADING  ************************
+      * SYSTEM:      HOG PRODUCTION SYSTEM
+      * PROGRAM:     HP346
+      * TITLE:       BUILD GROUP WORKFILES--CLOSED GROUP ANALYSIS REPORTS
+      * PROGRAMMER:  LEANNE FEDOR
+      * CREATED:     06/30/97
+      *
+      * FUNCTION:   THIS PROGRAM BUILDS THE DATA FOR CLOSED GROUPS IN
+      *             THE TWO CLOSED GROUP WORKFILES.
+      *
+      *             WORKFILE HSP332 HOLDS ONE RECORD PER GROUP.
+      *
+      *             WORKFILE HSP333 HOLDS MULTIPLE RECORDS PER GROUP--
+      *             ONE FOR EACH 'OPERATING COST', 'OTHER COST', AND
+      *             'PREMIUM/DISCOUNT' ASSOCIATED WITH THE GROUP.
+      *
+      *             THE REPORT SELECTIONS ARE IN THE LDA AND QCMDEXC IS
+      *             USED TO SUBMIT THE JOBS.
+      *
+      ****************************************************************
+      * MODIFICATIONS:
+      ****************************************************************
+      * DATE      PROGRAMMER
+      *
+      * 03/04/98  LeAnne Fedor
+      *           Recompile only. Added the following fields to the
+      *           database for sales movement detail, check detail and
+      *           closed hog group files:
+      *                     condemned head and pounds
+      *                     yard dead head and pounds
+      *
+      * 03/23/98  LeAnne Fedor
+      *           Fixed bug reported by Blake Day. When a group did
+      *           not have an 'FHAUL' record, the 'FCONS' dollars
+      *           were not being accumulated into the print field.
+      *
+      * 04/13/98  LeAnne Fedor
+      *           Recompile only. New field 'state' added to farm site file.
+      *
+      * 04/12/00  LeAnne Fedor
+      *           Recompile only. The 'closed group pounds' field in the
+      *           Closed Hog Group file was increased to 11,2.
+      *
+      * 08/17/00  LeAnne Fedor
+      *           Added logic to populate the new workfile fields for 'adjusted
+      *           transferred in' values.
+      *
+      * 06/05/01  LeAnne Fedor
+      *           Recompile only. New field 'multisite' added to Farm Site file.
+      *
+      * 06/28/01  LeAnne Fedor
+      *           Recompile only.
+      *           Three fields (manager/supervisor/multisite) renamed in Farm Site file.
+      *           Manager and supervisor fields removed from Hog Group file.
+      *
+      * 09/04/01  LeAnne Fedor
+      *           Recompile only. New 'square feet' fields added to Farm Site file.
+      *
+      * 04/04/02  LeAnne Fedor
+      *           Per Jeff Sherboundy, removed all special logic for FHAUL/CHAUL.
+      *           They are now treated as the 'expenses' that they are.
+      *
+      * 01/29/03  LeAnne Fedor
+      *           Removed all hardcoded special logic for SHAUL.
+      *
+      * 07/02/09  LeAnne Ramsey
+      *           Recompile only. Added new field 'Continuous Flow Flag' to Hog Group file.
+      *
+      * 10/15/13  LeAnne Ramsey (E2831)
+      *           Recompile only. Added field 'MTech Reference'.
+      *
+      * 01/21/21  ISE            TSN593
+      *           Replaced *loval with *start
+      *
+      /EJECT
+      ****************************************************************
+      * FILE SPECIFICATIONS
+      ****************************************************************
+      *
+     FHSL006B   IF   E           K DISK
+      *    REPORTING CODES
+      *
+     FHSP018    IF   E           K DISK
+      *    FARM SITE
+      *
+     FHSP033    IF   E           K DISK
+      *    CLOSED HOG GROUP
+      *
+     FHSP034    IF   E           K DISK
+      *    HOG GROUP
+      *    (RECORDS SELECTED IN OPEN QUERY)
+      *
+     FHSP044    IF   E           K DISK
+      *    DEDUCTIONS/ADDONS
+      *
+     FHSP045    IF   E           K DISK
+      *    PREMUIM/DISCOUNT
+      *
+     FHSP332    O    E             DISK
+      *    WORKFILE FOR GROUP (ONE RECORD PER GROUP)
+      *
+      *
+     FHSP333    O    E             DISK
+      *    WORKFILE FOR GROUP COSTS
+      *    (MULTIPLE RECORDS PER GROUP)
+      *
+      /EJECT
+      ****************************************************************
+      * INPUT SPECS
+      ****************************************************************
+      *
+      *---------------------------------------------------------------
+      * STANDARD PROGRAM STATUS DATA STRUCTURE
+      *---------------------------------------------------------------
+      *    EXTERNALLY DEFINED AS UTPGFR (RECORD FORMAT: PGMDSR)
+     D PGMDS         ESDS                  EXTNAME(UTPGFR)
+      *
+      *---------------------------------------------------------------
+      *  LDA -  WITH THE REQUESTED PRINT SELECTIONS
+      *---------------------------------------------------------------
+      *
+     D                UDS
+     D  LDFSBO                 1      5
+     D  LDFYMD                 6     13  0
+     D  LDTYMD                14     21  0
+     D  LDPTCD                22     26
+     D  LDPPCD                27     31
+     D  LDFSCD                32     36  0
+     D  LDMVPF                44     44
+     D  LDSLCS                45     45
+      *
+     D  LDFMDY                46     51  0
+     D  LDTMDY                52     57  0
+      *
+     D  LDAFCD                58     58
+     D  LDCELL                59     60  0
+      *
+      *---------------------------------------------------------------
+      *  NAMED CONSTANTS
+      *---------------------------------------------------------------
+      *
+     D YES             C                   CONST('Y')
+     D NO              C                   CONST('N')
+      *
+      * REPORT CATEGORIES
+      *
+     D OPCST           C                   CONST('OPCST')
+     D OTCST           C                   CONST('OTCST')
+     D SALES           C                   CONST('SALES')
+      /EJECT
+      ****************************************************************
+      * MAIN LINE
+      ****************************************************************
+      *
+      * READ EACH HOG GROUP RECORD SELECTED BY THE OPEN QUERY. IF
+      * THE USER SELECTED A SPECIFIC 'CELL', CHECK TO SEE THAT THIS
+      * GROUP IS ON A FARM IN THAT CELL.
+      *
+     C     *IN90         DOUEQ     *ON                                          MAIN DO
+     C                   READ      HSP034                                 90
+     C     *IN90         IFEQ      *OFF                                         IF NOT EOF
+     C                   MOVEL     YES           PROCFL
+      *
+      * DETERMINE IF THE GROUP IS ON A FARM IN THE SELECTED
+      * CELL.
+     C     LDCELL        IFGT      0                                            IF 1 CELL
+     C     HGFSCD        CHAIN     HSP018                             92
+     C     *IN92         IFEQ      *ON
+     C     FSCELL        ORNE      LDCELL
+     C                   MOVEL     NO            PROCFL
+     C                   ENDIF
+     C                   ENDIF                                                  IF 1 CELL
+      *
+     C     PROCFL        IFEQ      YES                                          IF PROCESS
+      *
+      *
+      * SETUP AND FORMAT FIELDS FOR THE HOG GROUP RECORD
+      *
+     C                   EXSR      $SETUP
+      *
+      * RETRIEVE/CALCULATE HOG GROUP INFO:
+      *    MOVEMENTS (INCLUDING SALES)
+      *    PERFORMANCE
+      *    DEDUCTIONS/ADD-ONS
+      *
+     C                   EXSR      $MOVE
+     C                   EXSR      $PERF
+     C                   EXSR      $ADDON
+      *
+      * CALCULATE TOTAL LINES
+      *    TOTAL NET SALES
+      *    OPERATING COSTS (INCLUDING CULL SALES AS COST)
+      *    OTHER COSTS
+      *    TOTAL COST
+      *    COST OF TRANSFERS OUT
+      *    NET PROFIT BEFORE TAXES
+      *
+     C                   EXSR      $TOTN
+     C                   EXSR      $OPCST
+     C                   EXSR      $OTCST
+     C                   EXSR      $TOTC
+     C                   EXSR      $TOCST
+     C                   EXSR      $NETPR
+      *
+      * CALCULATE THE PHASE COSTS. (THIS LOGIC IS PLACED HERE
+      * BECAUSE IT CANNOT BE CALCULATED FOR GROW FINISH GROUPS
+      * UNTIL THE COST OF TRANSFERS OUT IS AVAILABLE.)
+      *
+     C                   EXSR      $PHASE
+      *
+      * WRITE A GROUP RECORD TO THE WORKFILE AND THEN
+      * CLEAR GROUP WORKFILE FIELD
+      *
+     C                   WRITE     GREC
+     C                   EXSR      $CLEAR
+      *
+     C                   ENDIF                                                  IF PROCESS
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  MAIN DO
+      *
+      *--------------------------------------------------------------
+      * EOF PROCESSING
+      *--------------------------------------------------------------
+      *
+     C                   SETON                                        LR
+      /EJECT
+      *----------------------------------------------------------------
+      * SETUP AND FORMAT FIELDS FOR THE HOG GROUP WORKFILES
+      *----------------------------------------------------------------
+      *
+     C     $SETUP        BEGSR
+      *
+      * MOVE GROUPS FIELDS TO THE GROUP WORKFILE RECORDS
+      * AND, SET UP A KEY FIELD FOR THE HOG GROUP
+      *
+     C                   MOVEL     HGPPCD        GPPCD
+     C                   MOVEL     HGPTCD        GPTCD
+     C                   MOVEL     HGFSBO        GFSBO
+     C                   Z-ADD     HGFSCD        GFSCD
+     C                   MOVEL     HGHGCD        GHGCD
+     C                   Z-ADD     HGHGSN        GHGSN
+     C                   MOVEL     HGSXCD        GSXCD
+     C                   MOVEL     HGGNCD        GGNCD
+     C                   Z-ADD     HGCLDT        GCLDT
+     C                   Z-ADD     HGDSDT        GDSDT
+      *
+     C                   MOVEL     HGHGCD        WGHGCD
+     C                   MOVEL     HGPPCD        WGPPCD
+     C                   MOVEL     HGFSBO        WGFSBO
+      *
+     C                   Z-ADD     HGHGSN        KYHGSN
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * MOVEMENTS INFORMATION
+      *----------------------------------------------------------------
+      *
+     C     $MOVE         BEGSR
+      *
+      * TRANSFERS OUT
+     C                   EXSR      $TRANO
+      *
+      * SALES
+     C                   EXSR      $SALES
+      *
+      * TRANSFERS IN
+      *   YOU MUST EXECUTE THE TRANSFER OUT AND SALES SUBROUTINES
+      *   PRIOR TO THE TRANSFER IN SUBROUTINE BECAUSE YOU NEED THE
+      *   MOVED VALUES FOR SOME CALCULATIONS.
+      *
+     C                   EXSR      $TRANI
+      *
+      * TRANSFERS IN ADJUSTED
+      *
+     C                   EXSR      $TRANA
+      *
+      * DAILY DEAD AND DOAS
+      *
+     C                   EXSR      $DEAD
+      *
+      * INVENTORY ADJUSTMENTS
+      *
+     C                   EXSR      $INADJ
+      *
+      * CALCULATE THE 'TOTAL OUT' VALUES
+      *
+     C                   EXSR      $OUT
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $TRANI - TRANSFERS IN
+      *----------------------------------------------------------------
+      *
+     C     $TRANI        BEGSR
+      *
+      *-------------------------------
+      * TRANSFERRED IN -- TOTAL
+      *-------------------------------
+      *
+     C                   MOVEL     'TRANI'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF TRAN IN
+     C                   Z-ADD     CGCGHD        GTIHD
+     C                   Z-ADD     CGCGLB        GTILB
+     C                   Z-ADD     CGCGAM        GTIAM
+      *
+      *
+      * CALCULATE THE AVERAGE POUNDS PLACED =
+      *    TRANI LBS / TRANI HEAD
+      *
+     C     CGCGHD        IFNE      0
+     C     CGCGLB        DIV(H)    CGCGHD        GTIALB
+     C                   ENDIF
+     C                   ENDIF                                                  IF TRAN IN
+      *
+      *
+     C                   SELECT
+      *
+      * FOR NURSERY GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MOVED HEAD
+      * CALCULATE DOLLARS PER CWT BASED ON MOVED CWT
+      *
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GMVHD         IFNE      0
+     C     GTIAM         DIV(H)    GMVHD         GTI$HD
+     C                   ENDIF
+      *
+     C     GMVCW         IFNE      0
+     C     GTIAM         DIV(H)    GMVCW         GTI$CW
+     C                   ENDIF
+      *
+      * FOR GROW FINISH GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MARKET SALES + TRANSFER OUT
+      * CALCULATE DOLLARS PER CWT BASED ON MARKET SALES + TRANSFER OUT
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMTHD         IFNE      0
+     C     GTIAM         DIV(H)    GMTHD         GTI$HD
+     C                   ENDIF
+      *
+     C     GMTCW         IFNE      0
+     C     GTIAM         DIV(H)    GMTCW         GTI$CW
+     C                   ENDIF
+     C                   ENDSL
+      *
+      *
+      *----------------------------------
+      * TRANSFERRED IN -- SAME PHASE
+      *----------------------------------
+      *
+     C                   MOVEL     'TRISP'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF SAME IN
+     C                   Z-ADD     CGCGHD        GISHD
+     C                   Z-ADD     CGCGLB        GISLB
+      *
+      * CALCULATE THE AVERAGE POUNDS PLACED =
+      * TRAN IN POUNDS SAME PHASE / TRAN IN HEAD SAME PHASE
+      *
+     C     CGCGHD        IFNE      0
+     C     CGCGLB        DIV(H)    CGCGHD        GISALB
+     C                   ENDIF
+      *
+     C                   ENDIF                                                  IF SAME IN
+      *
+      *
+      *----------------------------------
+      * TRANSFERRED IN -- DIFFERENT PHASE
+      *----------------------------------
+      *
+     C                   MOVEL     'TRIDP'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF IN DIFF
+     C                   Z-ADD     CGCGHD        GIDHD
+     C                   Z-ADD     CGCGLB        GIDLB
+      *
+      * CALCULATE THE AVERAGE POUNDS PLACED =
+      * TRAN IN POUNDS SAME PHASE / TRAN IN HEAD SAME PHASE
+      *
+     C     CGCGHD        IFNE      0
+     C     CGCGLB        DIV(H)    CGCGHD        GIDALB
+     C                   ENDIF
+     C                   ENDIF                                                  IF IN DIFF
+      *
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $TRANA - TRANSFERS IN ADJUSTED
+      *----------------------------------------------------------------
+      *
+     C     $TRANA        BEGSR
+      *
+      *
+     C                   MOVEL     'TRANA'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF
+     C                   Z-ADD     CGCGHD        GIAJHD
+     C                   Z-ADD     CGCGLB        GIAJLB
+      *
+      * CALCULATE AVERAGE POUNDS
+      *
+     C     CGCGHD        IFNE      0
+     C     CGCGLB        DIV(H)    CGCGHD        GIAJALB
+     C                   ENDIF
+      *
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $TRANO - TRANSFERS OUT
+      *----------------------------------------------------------------
+      *
+     C     $TRANO        BEGSR
+      *
+      *---------------------------------
+      * TRANSFERS OUT -- TOTAL
+      *----------------------------------
+      *
+     C                   MOVEL     'TRANO'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF TRAN OUT
+     C                   Z-ADD     CGCGHD        GTOHD
+     C                   Z-ADD     CGCGLB        GTOLB
+      *
+      * CONVERT POUNDS TO CWT
+      *
+     C     GTOLB         DIV(H)    100           GTOCW
+      *
+      * CALCULATE THE AVERAGE POUNDS OUT = TRANO LBS / TRANO HEAD
+      *
+     C     CGCGHD        IFNE      0
+     C     CGCGLB        DIV(H)    CGCGHD        GTOALB
+     C                   ENDIF
+      *
+     C                   ENDIF                                                  IF TRAN OUT
+      *
+      *
+      *---------------------------------
+      * TRANSFERS OUT -- SAME PHASE
+      *---------------------------------
+      *
+     C                   MOVEL     'TROSP'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF OUT SAME
+     C                   Z-ADD     CGCGHD        GOSHD
+     C                   Z-ADD     CGCGLB        GOSLB
+      *
+      * CALCULATE THE AVERAGE POUNDS OUT =
+      *   TRANS OUT SAME PHASE LBS / TRANS OUT SAME PHASE HEAD
+      *
+     C     CGCGHD        IFNE      0
+     C     CGCGLB        DIV(H)    CGCGHD        GOSALB
+     C                   ENDIF
+      *
+     C                   ENDIF                                                  IF OUT SAME
+      *
+      *---------------------------------
+      * TRANSFERS OUT -- DIFFERENT PHASE
+      *---------------------------------
+      *
+     C                   MOVEL     'TRODP'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF OUT DIFF
+     C                   Z-ADD     CGCGHD        GODHD
+     C                   Z-ADD     CGCGLB        GODLB
+      *
+      * CALCULATE THE AVERAGE POUNDS OUT =
+      *   TRANS OUT SAME PHASE LBS / TRANS OUT SAME PHASE HEAD
+      *
+     C     CGCGHD        IFNE      0
+     C     CGCGLB        DIV(H)    CGCGHD        GODALB
+     C                   ENDIF
+     C                   ENDIF                                                  IF OUT DIFF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $SALES - RETRIEVE SALES INFO
+      *----------------------------------------------------------------
+      *
+     C     $SALES        BEGSR
+      *
+      *
+      *---------------------------
+      * MARKET HOG SALES
+      *---------------------------
+      *
+     C                   MOVEL     'MRKTS'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF MARKET SALE
+     C                   Z-ADD     CGCGHD        GMKHD
+     C                   Z-ADD     CGCGLB        GMKLB
+     C                   Z-ADD     CGSHLB        GMKSLB
+     C                   Z-ADD     CGCGAM        GMKAM
+      *
+      * CALCULATE MARKET SALES CWT
+      *
+     C     GMKLB         DIV(H)    100           GMKCW
+     C                   ENDIF                                                  IF MARKET SALE
+      *
+      *
+      *----------------------------------
+      * MARKET HOG SALES + TRANSFERS OUT
+      *-----------------------------------
+      *
+     C     GMKHD         ADD       GTOHD         GMTHD
+     C     GMKLB         ADD       GTOLB         GMTLB
+     C     GMTLB         DIV(H)    100           GMTCW
+      *
+      *
+      *---------------------------
+      * FEEDER PIG SALES
+      *---------------------------
+      *
+     C                   MOVEL     'FPS  '       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF FEEDER PIG
+     C                   ADD       CGCGHD        GFPHD
+     C                   ADD       CGCGLB        GFPLB
+     C                   ADD       CGCGAM        GFPAM
+      *
+      *
+      * CALCULATE DOLLARS PER HEAD
+      *
+     C     GFPHD         IFNE      0
+     C     GFPAM         DIV(H)    GFPHD         GFP$HD
+     C                   ENDIF
+      *
+      * CALCULATE POUNDS IN CWT AND THEN CALCULATE
+      * DOLLARS PER CWT
+      *
+     C     GFPLB         DIV(H)    100           GFPCW
+     C     GFPCW         IFNE      0
+     C     GFPAM         DIV(H)    GFPCW         GFP$CW
+     C                   ENDIF
+     C                   ENDIF                                                  IF FEEDER PIG
+      *
+      *
+      *------------------------------------------------------
+      * BUTCHER SALES -- MARKET SALES PAID THRU CARCASS MERIT
+      *------------------------------------------------------
+      *
+     C                   MOVEL     'BTCAR'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF BUTCHER CARCASS
+     C                   ADD       CGCGHD        GBUHD
+     C                   ADD       CGCGLB        GBULB
+     C                   ADD       CGCGAM        GBUAM
+      *
+      * CALCULATE DOLLARS PER HEAD
+      *
+     C     GBUHD         IFNE      0
+     C     GBUAM         DIV(H)    GBUHD         GBU$HD
+     C                   ENDIF
+      *
+      * CALCULATE CWT POUNDS AND THEN CALCULATE DOLLARS
+      * PER CWT
+      *
+     C     GBULB         DIV(H)    100           GBUCW
+     C     GBUCW         IFNE      0
+     C     GBUAM         DIV(H)    GBUCW         GBU$CW
+     C                   ENDIF
+     C                   ENDIF                                                  IF BUTCHER CARCASS
+      *
+      *------------------------------------------------------
+      * PREMIUM/DISCOUNTS
+      *------------------------------------------------------
+      *
+     C                   EXSR      $PREM
+      *
+      *------------------------------------------------------
+      * LIVE SALES -- MARKET SALES PAID LIVE
+      *------------------------------------------------------
+      *
+     C                   MOVEL     'BTLIV'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF PAID LIVE
+     C                   ADD       CGCGHD        GLVHD
+     C                   ADD       CGCGLB        GLVLB
+     C                   ADD       CGCGAM        GLVAM
+      *
+      * CALCULATE DOLLARS PER HEAD
+      *
+     C     GLVHD         IFNE      0
+     C     GLVAM         DIV(H)    GLVHD         GLV$HD
+     C                   ENDIF
+      *
+      * CALCULATE CWT EQUIVALENT OF POUNDS AND THEN
+      * CALCULATE DOLLARS PER CWT
+      *
+     C     GLVLB         DIV(H)    100           GLVCW
+     C     GLVCW         IFNE      0
+     C     GLVAM         DIV(H)    GLVCW         GLV$CW
+     C                   ENDIF
+     C                   ENDIF                                                  IF PAID LIVE
+      *
+      *------------------------------------------------------
+      * CALCULATE 'SALES' VALUES
+      *------------------------------------------------------
+      * IN THE MOVEMENT SECTION OF THE REPORT, 'SALES' VALUES
+      * INCLUDE ALL SALES EXCEPT CULL SALES. AND, THE PREMIUM/
+      * DISCOUNT DOLLARS ARE ADDED INTO THE 'SALES' AMOUNT.
+      *
+     C     GMKHD         ADD       GFPHD         GSLHD
+     C     GMKLB         ADD       GFPLB         GSLLB
+      *
+     C     GMKAM         ADD       GFPAM         GSLAM
+     C                   ADD       GPDAM         GSLAM
+      *
+      * CALCULATE DOLLARS PER HEAD
+      *
+     C     GSLHD         IFNE      0
+     C     GSLAM         DIV(H)    GSLHD         GSL$HD
+     C                   ENDIF
+      *
+      * CALCULATE DOLLARS PER CWT
+      *
+     C     GSLLB         DIV(H)    100           GSLCW
+     C     GSLCW         IFNE      0
+     C     GSLAM         DIV(H)    GSLCW         GSL$CW
+     C                   ENDIF
+      *
+      * CALCULATE THE AVERAGE SOLD POUNDS
+      *
+     C     GSLHD         IFNE      0
+     C     GSLLB         DIV(H)    GSLHD         GSLALB
+     C                   ENDIF
+      *
+      *
+      *---------------------------------
+      * CALCULATE THE 'MOVED VALUES'
+      *---------------------------------
+      *    MARKET SALES + FEEDER PIG SALES + TRANSFERS OUT
+      *
+     C     GSLHD         ADD       GTOHD         GMVHD
+     C     GSLLB         ADD       GTOLB         GMVLB
+     C     GMVLB         DIV(H)    100           GMVCW
+      *
+      *
+      *------------------------------------------------------
+      * CULL SALES
+      *------------------------------------------------------
+      *
+     C                   MOVEL     'CULLS'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF CULLS
+     C                   Z-ADD     CGCGHD        GCUHD
+     C                   Z-ADD     CGCGLB        GCULB
+     C                   Z-ADD     CGCGAM        GCUAM
+      *
+      * CALCULATE THE AVERAGE CULL SALE POUNDS
+      *
+     C     CGCGHD        IFNE      0
+     C     CGCGLB        DIV(H)    CGCGHD        GCUALB
+     C                   ENDIF
+      *
+      * (As of 4/4/02, we no longer retrieve Cull Freight dollars to
+      * combine with Sales Dollars...but we still need to do the logic
+      * to print the value as a negative.)
+      * RETRIEVE THE FREIGHT DOLLARS AND COMBINE WITH THE
+      * SALES DOLLARS. THIS COMBINED VALUE WILL BE PRINTED
+      * IN THE COST SECTION AS A NEGATIVE VALUE; SO,
+      * USE SUBTRACT TO START THE CALCULATION.
+      *
+     C                   Z-SUB     GCUAM         GCUHAM
+      *
+      *
+      * FOR NURSERY GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MOVED HEAD
+      * CALCULATE DOLLARS PER CWT BASED ON MOVED CWT
+      *
+     C                   SELECT
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GMVHD         IFNE      0
+     C     GCUHAM        DIV(H)    GMVHD         GCU$HD
+     C                   ENDIF
+      *
+     C     GMVCW         IFNE      0
+     C     GCUHAM        DIV(H)    GMVCW         GCU$CW
+     C                   ENDIF
+      *
+      * FOR GROW FINISH GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MARKET SALES + TRANSFER OUT
+      * CALCULATE DOLLARS PER CWT BASED ON MARKET SALES + TRANSFER OUT
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMTHD         IFNE      0
+     C     GCUHAM        DIV(H)    GMTHD         GCU$HD
+     C                   ENDIF
+      *
+     C     GMTCW         IFNE      0
+     C     GCUHAM        DIV(H)    GMTCW         GCU$CW
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C                   ENDIF                                                  IF CULLS
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $DEAD - DAILY DEAD AND DOAS
+      *----------------------------------------------------------------
+      *
+     C     $DEAD         BEGSR
+      *
+      * RETRIEVE DAILY AND DOA DEAD VALUES
+      *
+     C                   MOVEL     'DEAD '       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF DEAD/DOA
+     C                   ADD       CGCGHD        GDDHD
+     C                   ADD       CGCGLB        GDDLB
+      *
+      * CALCULATE THE AVERAGE DAILY DEAD AND DOA POUNDS
+      *
+     C     CGCGHD        IFNE      0
+     C     CGCGLB        DIV(H)    CGCGHD        GDDALB
+     C                   ENDIF
+      *
+     C                   ENDIF                                                  IF DAILY/DOA
+      *
+      *
+      * RETRIEVE DAILY DEAD ONLY VALUES
+      *
+     C                   MOVEL     'DDEAD'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF DAILY DEAD
+     C                   Z-ADD     CGCGLB        GDLB
+     C                   ENDIF                                                  IF DAILY DEAD
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $INADJ - INVENTORY ADJUSTMENTS
+      *----------------------------------------------------------------
+      *
+     C     $INADJ        BEGSR
+      *
+     C                   MOVEL     'INADJ'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF ADJUST
+     C                   ADD       CGCGHD        GIAHD
+     C                   ENDIF                                                  IF ADJUST
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $OUT - CALCULATE THE 'TOTAL OUT' VALUES FOR MOVEMENTS SECTION
+      *----------------------------------------------------------------
+      *
+     C     $OUT          BEGSR
+      *
+     C     GSLHD         ADD       GCUHD         GOTHD
+     C                   ADD       GTOHD         GOTHD
+      *
+     C     GSLLB         ADD       GCULB         GOTLB
+     C                   ADD       GTOLB         GOTLB
+      *
+      * CALCULATE THE AVERAGE POUNDS OUT
+      *
+     C     GOTHD         IFNE      0
+     C     GOTLB         DIV(H)    GOTHD         GOTALB
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * PERFORMANCE STATISTICS
+      *----------------------------------------------------------------
+      *
+     C     $PERF         BEGSR
+      *
+      * WEIGHT GAINED
+     C                   EXSR      $GAIN
+      *
+      * PIG DAYS
+     C                   EXSR      $PDAYS
+      *
+      * FEED
+     C                   EXSR      $FEED
+      *
+      *
+      * FOR GROW FINISH GROUPS ONLY , RETRIEVE:
+      *        BACKFAT INCHES
+      *        CARCASS YIELD
+      *        LEAN PERCENT
+      *        LOIN EYE DEPTH
+      *
+     C     HGPPCD        IFEQ      'GF   '                                      IF G/F
+     C                   EXSR      $BFIN
+     C                   EXSR      $CYIEL
+     C                   EXSR      $LEAN
+     C                   EXSR      $LOIN
+     C                   ENDIF                                                  IF G/F
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $GAIN - WEIGHT GAIN & MARKET SALES WEIGHT GAIN
+      *----------------------------------------------------------------
+      *
+      * RETRIEVE THE STANDARD WEIGHT GAINED FOR ALL GROUPS.
+      * ALSO, FOR GROW FINISH GROUPS, CALCULATE MARKET SALES WEIGHT
+      * GAIN.
+      *
+     C     $GAIN         BEGSR
+      *
+      *--------------------
+      * ALL GROUPS
+      *--------------------
+     C                   MOVEL     'WGAIN'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF GAIN
+     C                   Z-ADD     CGCGLB        GWGLB
+     C                   ENDIF                                                  IF GAIN
+      *
+      *------------------------
+      * FOR NURSERY GROUPS ONLY
+      *------------------------
+      * CALCULATE THE POUNDS GAINED PER HEAD OUT
+      *
+     C     HGPPCD        IFEQ      'NUR  '                                      IF NURSERY
+     C     GOTHD         ANDNE     0
+     C     GWGLB         DIV(H)    GOTHD         GWGALB
+     C                   ENDIF                                                  IF NURSERY
+      *
+      *
+      *--------------------
+      * GROW FINISH ONLY
+      *--------------------
+      *
+     C     HGPPCD        IFEQ      'GF   '                                      IF GROW FINISH
+      *
+      * CALCULATE AVERAGE RECEIVED POUNDS ON TRANSFERS IN
+      *
+     C     GTIHD         IFNE      0
+     C     GTILB         DIV(H)    GTIHD         WKF152
+     C                   ENDIF
+      *
+      * CALCULATE RECEIVED POUNDS ON MARKET SALES USING AVERAGE
+      * VALUE CALCULATED ABOVE:
+      *    RECEIVED POUNDS = MARKET HEAD * AVERAGE RECEIVED POUNDS
+      *
+     C     GMKHD         MULT(H)   WKF152        WKF152
+      *
+      * CALCULATE WEIGHT GAIN ON MARKET SALES
+      *     GAIN = SHIPPED POUNDS FROM MARKET SALES - RECEIVED POUNDS
+      *
+     C     GMKSLB        SUB       WKF152        GMWGLB
+      *
+      * CALCULATE THE POUNDS GAINED PER MARKET HEAD SOLD
+      *
+     C     GMKHD         IFNE      0
+     C     GMWGLB        DIV       GMKHD         GWGALB
+     C                   ENDIF
+     C                   ENDIF                                                  IF GROW FINISH
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $FEED - FEED
+      *----------------------------------------------------------------
+      *
+     C     $FEED         BEGSR
+      *
+      * FEED CONSUMED
+     C                   MOVEL     'FCONS '      KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF
+     C                   Z-ADD     CGCGLB        GFCLB
+     C                   Z-ADD     CGCGAM        GFCAM
+     C                   ENDIF
+      *
+      * Note: Prior to 4/4/02, we retrieved FHAUL and added FCONS and
+      * FHAUL together to get the value in the field GFCHAM. Now, the
+      * field only contains FCONS.
+      *
+     C                   z-add     gfcam         gfcham
+      *
+      *
+      * RETRIEVE THE OPERATING EXPENSE FOR FEED MANUFACTURING
+      * AND ADD TO THE FEED CONSUMED/HAULING AMOUNT
+      *
+     C                   MOVEL     'FDMFG'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF
+     C     GFCHAM        ADD       CGCGAM        GFHMAM
+     C                   else
+     C                   z-add     gfcham        gfhmam
+     C                   ENDIF
+      *
+      * CALCULATE FEED CONVERSION =
+      *   FEED POUNDS / WEIGHT GAIN
+      *
+     C     GWGLB         IFNE      0
+     C     GFCLB         DIV(H)    GWGLB         GFDCV
+     C                   ENDIF
+      *
+      * CALCULATE ADJUSTED FEED CONVERSION =
+      *    FEED POUNDS / (WEIGHT GAIN + DAILY DEAD POUNDS)
+      *
+     C     GWGLB         ADD       GDLB          WKF152
+     C     WKF152        IFNE      0
+     C     GFCLB         DIV(H)    WKF152        GJFDCV
+     C                   ENDIF
+      *
+      * CALCULATE AVERAGE FEED COST PER TON =
+      *  (FEED DOLLARS + FEED HAUL DOLLARS + FEED MANUFACTURING DOLLARS) /
+      *       (FEED LBS / 2000)
+      *
+     C     GFCLB         DIV       2000          WKF152
+     C     WKF152        IFNE      0
+     C     GFHMAM        DIV(H)    WKF152        GAFC$T
+     C                   ENDIF
+      *
+      *
+      * CALCULATE AVERAGE DAYS FED
+      *
+     C                   SELECT
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GTIHD         IFNE      0
+     C     GPDAYS        DIV(H)    GTIHD         GAFDAY
+     C                   ENDIF
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMKHD         IFNE      0
+     C     GPDAYS        DIV(H)    GMKHD         GAFDAY
+     C                   ENDIF
+     C                   ENDSL
+      *
+      *
+      *
+      * CALCULATE FEED COST PER POUND OF GAIN =
+      *  (FEED DOLLARS + FEED HAUL DOLLARS + FEED MANUFACTURING DOLLARS) /
+      *            WEIGHT GAINED
+      *
+      *  NOTE: WEIGHT GAINED FOR GROW FINISH IS ONLY
+      *        FOR MARKET SALES
+      *
+     C                   SELECT
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GWGLB         IFNE      0
+     C     GFHMAM        DIV(H)    GWGLB         GFC$GN
+     C                   ENDIF
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMWGLB        IFNE      0
+     C     GFHMAM        DIV(H)    GMWGLB        GFC$GN
+     C                   ENDIF
+     C                   ENDSL
+      *
+      * CALCULATE FEED COST PER CWT =
+      *  (FEED CONSUMED AMT) / CWT
+      *
+     C                   SELECT
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GMVCW         ANDNE     0
+     C     GFCHAM        DIV(H)    GMVCW         GFC$CW
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMTCW         ANDNE     0
+     C     GFCHAM        DIV(H)    GMTCW         GFC$CW
+     C                   ENDSL
+      *
+      *
+      * CALCULATE FEED COST PER HEAD =
+      *  (FEED CONSUMED AMT) / HEAD
+      *
+     C                   SELECT
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GMVHD         ANDNE     0
+     C     GFCHAM        DIV(H)    GMVHD         GFC$HD
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMTHD         ANDNE     0
+     C     GFCHAM        DIV(H)    GMTHD         GFC$HD
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $PHASE - PHASE COST
+      *----------------------------------------------------------------
+      *
+     C     $PHASE        BEGSR
+      *
+      *  ACCUMULATE TOTAL COST INTO THE PHASE COST DOLLARS
+      *
+     C                   MOVEL     'COS  '       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF
+     C                   ADD       CGCGAM        GP$AM
+     C                   ENDIF
+      *
+      *
+      * MAKE DEDUCTIONS FROM COST BASED ON PHASE
+      *
+     C                   SELECT
+     C     HGPPCD        WHENEQ    'NUR  '
+     C                   SUB       GTIAM         GP$AM
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C                   SUB       GTIAM         GP$AM
+     C                   SUB       GTOAM         GP$AM
+     C                   ENDSL
+      *
+      *
+      * CALCULATE PHASE COST PER POUND OF GAIN
+      *  NOTE: FOR GROW FINISH GROUPS, USE WEIGHT GAIN FOR
+      *        MARKET SALES ONLY
+      *
+     C                   SELECT
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GWGLB         IFNE      0
+     C     GP$AM         DIV(H)    GWGLB         GP$GN
+     C                   ENDIF
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMWGLB        IFNE      0
+     C     GP$AM         DIV(H)    GMWGLB        GP$GN
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $PDAYS - PIG DAYS
+      *----------------------------------------------------------------
+      *
+     C     $PDAYS        BEGSR
+      *
+      *
+     C                   SELECT
+     C     HGPPCD        WHENEQ    'NUR  '
+     C                   MOVEL     'PDAYS'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF
+     C                   Z-ADD     CGCGQT        GPDAYS
+     C                   ENDIF
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C                   CALL      'HPPMKT'
+     C                   PARM                    HGHGSN
+     C                   PARM                    HGOPDT
+     C                   PARM      0             GPDAYS
+     C                   ENDSL
+      *
+      *
+     C     GPDAYS        IFNE      0                                            IF DAYS
+      *
+      * CALCULATE AVERAGE DAILY GAIN =
+      *     WEIGHT GAIN /  PIG DAYS
+      *
+      * NOTE: FOR GROW FINISH GROUPS, USE THE MARKET SALE
+      *       ONLY WEIGHT GAIN
+      *
+     C                   SELECT
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GWGLB         DIV(H)    GPDAYS        GDGALB
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMWGLB        DIV(H)    GPDAYS        GDGALB
+     C                   ENDSL
+      *
+      *
+      * ADJUSTED AVERAGE DAILY GAIN
+      *
+     C                   SELECT
+      *
+      * FOR NURSERY GROUPS = (WEIGHT GAINED + DAILY DEAD LBS) / PIG DAYS
+      *
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GWGLB         ADD       GDLB          WKF152
+     C     WKF152        DIV(H)    GPDAYS        GDGJLB
+      *
+      * FOR GROW FINISH GROUPS =
+      *  (MARKET SALES WEIGHT GAINED + DAILY DEAD LBS) /
+      *              MARKET SALES PIG DAYS
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMWGLB        ADD       GDLB          WKF152
+     C     WKF152        DIV(H)    GPDAYS        GDGJLB
+     C                   ENDSL
+     C                   ENDIF                                                  IF DAYS
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $BFIN - BACKFAT INCHES
+      *----------------------------------------------------------------
+      *
+     C     $BFIN         BEGSR
+      *
+     C                   MOVEL     'BFIN '       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF BACKFAT
+     C                   Z-ADD     CGCGQT        GBFIN
+     C                   Z-ADD     CGCRLB        GBFLB
+      *
+      * CALCULATE BACKFAT QTY =  BACKFAT INCHES * CARCASS POUNDS
+      *
+     C     CGCGQT        MULT      CGCRLB        GBFQT
+     C                   ENDIF                                                  IF BACKFAT
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CYIEL - CARCASS YIELD
+      *----------------------------------------------------------------
+      *
+     C     $CYIEL        BEGSR
+      *
+     C                   MOVEL     'CYIEL'       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF YIELD
+     C                   Z-ADD     CGCGQT        GYIELD
+     C                   Z-ADD     CGCRLB        GYCRLB
+     C                   Z-ADD     CGCGLB        GYLVLB
+     C                   ENDIF                                                  IF YIELD
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $LEAN - LEAN PERCENT
+      *----------------------------------------------------------------
+      *
+     C     $LEAN         BEGSR
+      *
+     C                   MOVEL     'LEAN '       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF LEAN
+     C                   Z-ADD     CGCGQT        GLNPR
+     C                   Z-ADD     CGCRLB        GLNLB
+      *
+      * CALCULATE LEAN QTY = MULTIPLY LEAN PERCENT * CARCASS POUNDS
+      *
+     C     CGCGQT        MULT      CGCRLB        GLNQT
+     C                   ENDIF                                                  IF LEAN
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $LOIN - LOIN EYE DEPTH
+      *----------------------------------------------------------------
+      *
+     C     $LOIN         BEGSR
+      *
+     C                   MOVEL     'LEYE '       KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF LOIN
+     C                   Z-ADD     CGCGQT        GLOIN
+     C                   Z-ADD     CGCRLB        GLOLB
+      *
+      * CALCULATE LOIN QTY = MULTIPLY LOIN QUANTITY * CARCASS POUNDS
+      *
+     C     CGCGQT        MULT      CGCRLB        GLOQT
+      *
+     C                   ENDIF                                                  IF LOIN
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $PREM - PREMIUMS/DISCOUNTS
+      *----------------------------------------------------------------
+      *
+     C     $PREM         BEGSR
+      *
+593  C*    *LOVAL        SETLL     HSP045
+593  C     *START        SETLL     HSP045
+     C                   SETOFF                                       91
+      *
+     C     *IN91         DOUEQ     *ON                                          DO PREMIUMS
+     C                   READ      HSP045                                 91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+     C                   MOVEL     PDRPCD        KYRPCD
+      *
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF FOUND
+     C                   MOVEL     CGCACD        WGCACD
+     C                   MOVEL     CGRPCD        WGRPCD
+     C                   MOVEL     PDPDDS        WGDS
+     C                   Z-ADD     CGCGAM        WGAM
+     C                   Z-ADD     0             WGSEQ
+     C                   ADD       CGCGAM        GPDAM
+      *
+      * CALCULATE DOLLARS PER HEAD BASED ON MARKET SALES
+      * THAT WERE PAID THROUGH CARCASS MERIT (BUTCHER HOG
+      * SALES).
+      *
+     C     GBUHD         IFNE      0
+     C     WGAM          DIV(H)    GBUHD         WG$HD
+     C                   ENDIF
+      *
+      * CALCULATE DOLLARS PER CWT BASED ON MARKET SALES
+      * THAT WERE PAID THROUGH CARCASS MERIT (BUTCHER HOG
+      * SALES).
+      *
+     C     GBUCW         IFNE      0
+     C     WGAM          DIV(H)    GBUCW         WG$CW
+     C                   ENDIF
+      *
+     C                   WRITE     WGREC
+      *
+     C                   ENDIF                                                  IF FOUND
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO PREMIUMS
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $ADDON - DEDUCTION/ADD-ONS
+      *----------------------------------------------------------------
+      *
+     C     $ADDON        BEGSR
+      *
+593  C*    *LOVAL        SETLL     HSP044
+593  C     *START        SETLL     HSP044
+     C                   SETOFF                                       91
+      *
+     C     *IN91         DOUEQ     *ON                                          DO DEDUCT/ADDON
+     C                   READ      HSP044                                 91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+     C                   MOVEL     DARPCD        KYRPCD
+      *
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF FOUND
+     C                   ADD       CGCGAM        GDAAM
+     C                   ENDIF                                                  IF  FOUND
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO DEDUCT/ADDON
+      *
+      *
+     C                   SELECT
+      *
+      * FOR NURSERY GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON FEEDER PIG SALES
+      * CALCULATE DOLLARS PER CWT BASED ON FEEDER PIG SALES
+      *
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GFPHD         IFNE      0
+     C     GDAAM         DIV(H)    GFPHD         GDA$HD
+     C                   ENDIF
+      *
+     C     GFPCW         IFNE      0
+     C     GDAAM         DIV(H)    GFPCW         GDA$CW
+     C                   ENDIF
+      *
+      * FOR GROW FINISH GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MARKET SALES
+      * CALCULATE DOLLARS PER CWT BASED ON MARKET SALES
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMKHD         IFNE      0
+     C     GDAAM         DIV(H)    GMKHD         GDA$HD
+     C                   ENDIF
+      *
+     C     GMKCW         IFNE      0
+     C     GDAAM         DIV(H)    GMKCW         GDA$CW
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $TOTN - CALCULATE TOTAL NET SALES
+      *----------------------------------------------------------------
+      *
+     C     $TOTN         BEGSR
+      *
+     C                   SELECT
+      *
+      * FOR NURSERY GROUPS,
+      *   TOTAL NET IS THE SUM OF FEEDER PIG SALES AND DEDUCTIONS/ADDONS
+      *
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GFPAM         ADD       GDAAM         GTNAM
+      *
+     C     GFPHD         IFNE      0
+     C     GTNAM         DIV(H)    GFPHD         GTN$HD
+     C                   ENDIF
+      *
+     C     GFPCW         IFNE      0
+     C     GTNAM         DIV(H)    GFPCW         GTN$CW
+     C                   ENDIF
+      *
+      *
+      * FOR GROW FINISH GROUPS,
+      *   TOTAL NET IS THE SUM OF MARKET SALES, FPS, & DEDUCTIONS/ADDONS
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GSLAM         ADD       GDAAM         GTNAM
+      *
+     C     GSLHD         IFNE      0
+     C     GTNAM         DIV(H)    GSLHD         GTN$HD
+     C                   ENDIF
+      *
+     C     GSLCW         IFNE      0
+     C     GTNAM         DIV(H)    GSLCW         GTN$CW
+     C                   ENDIF
+      *
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $OPCST - RETRIEVE OPERATING COSTS
+      *----------------------------------------------------------------
+      *
+     C     $OPCST        BEGSR
+      *
+     C     OPCST         SETLL     HSL006B
+     C                   SETOFF                                       91
+      *
+     C     *IN91         DOUEQ     *ON                                          DO OPER COST
+     C     OPCST         READE     HSL006B                                91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+      *
+     C                   MOVEL     RPRPCD        KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF FOUND
+     C                   ADD       CGCGAM        GOPCAM
+      *
+     C                   MOVEL     CGCACD        WGCACD
+     C                   MOVEL     CGRPCD        WGRPCD
+     C                   MOVEL     RPRLDS        WGDS
+     C                   Z-ADD     RPSEQ         WGSEQ
+     C                   Z-ADD     CGCGAM        WGAM
+      *
+     C                   SELECT
+      *
+      * FOR NURSERY GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MOVED HEAD
+      * CALCULATE DOLLARS PER CWT BASED ON MOVED CWT
+      *
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GMVHD         IFNE      0
+     C     WGAM          DIV(H)    GMVHD         WG$HD
+     C                   ENDIF
+      *
+     C     GMVCW         IFNE      0
+     C     WGAM          DIV(H)    GMVCW         WG$CW
+     C                   ENDIF
+      *
+      * FOR GROW FINISH GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MARKET SALES + TRANSFER OUT
+      * CALCULATE DOLLARS PER CWT BASED ON MARKET SALES + TRANSFER OUT
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMTHD         IFNE      0
+     C     WGAM          DIV(H)    GMTHD         WG$HD
+     C                   ENDIF
+      *
+     C     GMTCW         IFNE      0
+     C     WGAM          DIV(H)    GMTCW         WG$CW
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C                   WRITE     WGREC
+      *
+     C                   ENDIF                                                  IF FOUND
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO OPER COST
+      *
+      *
+      *-------------------------------------------
+      * TOTAL OPERATING COST CALCULATIONS
+      *-------------------------------------------
+      *
+      * THE CULL SALES DOLLARS HAVE BEEN FORCED
+      * NEGATIVE FOR PRINTING. SO, DECREASE THE TOTAL OPERATING COSTS
+      * BY ADDING THIS VALUE IN.
+      *
+     C                   ADD       GCUHAM        GOPCAM
+      *
+      * ADD THE FEED CONSUMED DOLLARS
+      *
+     C                   ADD       GFCHAM        GOPCAM
+      *
+     C                   SELECT
+      *
+      * FOR NURSERY GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MOVED HEAD
+      * CALCULATE DOLLARS PER CWT BASED ON MOVED CWT
+      *
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GMVHD         IFNE      0
+     C     GOPCAM        DIV(H)    GMVHD         GOP$HD
+     C                   ENDIF
+      *
+     C     GMVCW         IFNE      0
+     C     GOPCAM        DIV(H)    GMVCW         GOP$CW
+     C                   ENDIF
+      *
+      * FOR GROW FINISH GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MARKET SALES + TRANSFER OUT
+      * CALCULATE DOLLARS PER CWT BASED ON MARKET SALES + TRANSFER OUT
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMTHD         IFNE      0
+     C     GOPCAM        DIV(H)    GMTHD         GOP$HD
+     C                   ENDIF
+      *
+     C     GMTCW         IFNE      0
+     C     GOPCAM        DIV(H)    GMTCW         GOP$CW
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $OTCST - OTHER COSTS
+      *----------------------------------------------------------------
+      *
+      * DO NOT INCLUDE THE TOTAL COST RECORD IN THIS PROCESSING
+      *
+     C     $OTCST        BEGSR
+      *
+     C     OTCST         SETLL     HSL006B
+     C                   SETOFF                                       91
+      *
+     C     *IN91         DOUEQ     *ON                                          DO OTHER
+     C     OTCST         READE     HSL006B                                91
+     C     *IN91         IFEQ      *OFF                                         IF NOT EOF
+     C     RPRPCD        ANDNE     'COS  '
+      *
+     C                   MOVEL     RPRPCD        KYRPCD
+     C     KP033         CHAIN     HSP033                             92
+     C     *IN92         IFEQ      *OFF                                         IF HIT
+     C                   ADD       CGCGAM        GOTCAM
+      *
+     C                   MOVEL     CGCACD        WGCACD
+     C                   MOVEL     CGRPCD        WGRPCD
+     C                   MOVEL     RPRLDS        WGDS
+     C                   Z-ADD     RPSEQ         WGSEQ
+     C                   Z-ADD     CGCGAM        WGAM
+      *
+      *
+     C                   SELECT
+      *
+      * FOR NURSERY GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MOVED HEAD
+      * CALCULATE DOLLARS PER CWT BASED ON MOVED CWT
+      *
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GMVHD         IFNE      0
+     C     WGAM          DIV(H)    GMVHD         WG$HD
+     C                   ENDIF
+      *
+     C     GMVCW         IFNE      0
+     C     WGAM          DIV(H)    GMVCW         WG$CW
+     C                   ENDIF
+      *
+      * FOR GROW FINISH GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MARKET SALES + TRANSFER OUT
+      * CALCULATE DOLLARS PER CWT BASED ON MARKET SALES + TRANSFER OUT
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMTHD         IFNE      0
+     C     WGAM          DIV(H)    GMTHD         WG$HD
+     C                   ENDIF
+      *
+     C     GMTCW         IFNE      0
+     C     WGAM          DIV(H)    GMTCW         WG$CW
+     C                   ENDIF
+     C                   ENDSL
+      *
+      *
+     C                   WRITE     WGREC
+      *
+     C                   ENDIF                                                  IF HIT
+     C                   ENDIF                                                  IF NOT EOF
+     C                   ENDDO                                                  DO OTHER
+      *
+      *-------------------------------------------
+      * CALCULATIONS FOR THE TOTAL OTHER COST LINE
+      *-------------------------------------------
+      *
+     C                   SELECT
+      *
+      * FOR NURSERY GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MOVED HEAD
+      * CALCULATE DOLLARS PER CWT BASED ON MOVED CWT
+      *
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GMVHD         IFNE      0
+     C     GOTCAM        DIV(H)    GMVHD         GOT$HD
+     C                   ENDIF
+      *
+     C     GMVCW         IFNE      0
+     C     GOTCAM        DIV(H)    GMVCW         GOT$CW
+     C                   ENDIF
+      *
+      * FOR GROW FINISH GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MARKET SALES + TRANSFER OUT
+      * CALCULATE DOLLARS PER CWT BASED ON MARKET SALES + TRANSFER OUT
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMTHD         IFNE      0
+     C     GOTCAM        DIV(H)    GMTHD         GOT$CW
+     C                   ENDIF
+      *
+     C     GMTCW         IFNE      0
+     C     GOTCAM        DIV(H)    GMTCW         GOT$CW
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $TOTC - CALCULATE TOTAL COST LINE
+      *----------------------------------------------------------------
+      *
+     C     $TOTC         BEGSR
+      *
+      *-----------------------------------
+      * CALCULATIONS FOR 'TOTAL COST' LINE
+      *-----------------------------------
+      *
+      * TOTAL COSTS IS THE SUM OF:
+      *     TRANSFER IN DOLLARS
+      *     OPERATING COST
+      *       (NOTE: OPERATING COST INCLUDES FEED CONSUMED $)
+      *     OTHER COST
+      *
+     C                   ADD       GTIAM         GTCAM
+     C                   ADD       GOPCAM        GTCAM
+     C                   ADD       GOTCAM        GTCAM
+      *
+      *
+     C                   SELECT
+      *
+      * FOR NURSERY GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MOVED HEAD
+      * CALCULATE DOLLARS PER CWT BASED ON MOVED CWT
+      *
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GMVHD         IFNE      0
+     C     GTCAM         DIV(H)    GMVHD         GTC$HD
+     C                   ENDIF
+      *
+     C     GMVCW         IFNE      0
+     C     GTCAM         DIV(H)    GMVCW         GTC$CW
+     C                   ENDIF
+      *
+      * FOR GROW FINISH GROUPS,
+      * CALCULATE DOLLARS PER HEAD BASED ON MARKET SALES + TRANSFER OUT
+      * CALCULATE DOLLARS PER CWT BASED ON MARKET SALES + TRANSFER OUT
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMTHD         IFNE      0
+     C     GTCAM         DIV(H)    GMTHD         GTC$HD
+     C                   ENDIF
+      *
+     C     GMTCW         IFNE      0
+     C     GTCAM         DIV(H)    GMTCW         GTC$CW
+     C                   ENDIF
+     C                   ENDSL
+      *
+     C                   ENDSR
+      /EJECT
+      *-----------------------------------------------------------------
+      * $TOCST - COST OF TRANSFERS-OUT
+      *-----------------------------------------------------------------
+      *
+     C     $TOCST        BEGSR
+      *
+      * IF TOTAL NET SALES ARE ZERO, THEN ALL OF THE TOTAL COST WILL BE
+      * CONSIDERED 'TRANSFER OUT' COST. IF NET SALES ARE NOT ZERO,
+      * CALCULATE TRANSFER OUT COSTS AND, ALSO, COST OF SALES.
+      *
+     C     GTNAM         IFEQ      0                                            IF ZERO NET
+     C                   Z-ADD     GTCAM         GTOCAM
+     C                   ELSE
+      *
+      * CALCULATE THE COST OF THE ANIMALS TRANSFERRED OUT BY
+      * MULTIPLYING THE TOTAL COST PER CWT TIMES THE TOTAL POUNDS
+      * TRANSFERRED OUT AND THEN DIVIDING BY 100.
+      *
+     C     GTC$CW        MULT      GTOLB         WKF154
+     C     WKF154        DIV(H)    100           GTOCAM
+      *
+      *
+      * SUBTRACT TRANO COST FROM TOTAL COST TO GET COST OF SALES
+      *
+     C     GTCAM         SUB       GTOCAM        GCSAM
+      *
+      *
+     C                   SELECT
+      *
+      * FOR NURSERY GROUPS,
+      * CALCULATE COST OF SALES DOLLARS PER HEAD BASED ON SOLD HEAD
+      * CALCULATE COST OF SALES DOLLARS PER CWT BASED ON SOLD HEAD
+      *
+     C     HGPPCD        WHENEQ    'NUR  '
+     C     GSLHD         IFNE      0
+     C     GCSAM         DIV(H)    GSLHD         GCS$HD
+     C                   ENDIF
+      *
+     C     GSLCW         IFNE      0
+     C     GCSAM         DIV(H)    GSLCW         GCS$CW
+     C                   ENDIF
+      *
+      * FOR GROW FINISH GROUPS,
+      * CALCULATE COST OF SALES PER HEAD BASED ON MARKET SALES
+      * CALCULATE COST OF SALES PER CWT BASED ON MARKET SALES
+      *
+     C     HGPPCD        WHENEQ    'GF   '
+     C     GMKHD         IFNE      0
+     C     GCSAM         DIV(H)    GMKHD         GCS$HD
+     C                   ENDIF
+      *
+     C     GMKCW         IFNE      0
+     C     GCSAM         DIV(H)    GMKCW         GCS$CW
+     C                   ENDIF
+     C                   ENDSL
+      *
+      *
+     C                   ENDIF                                                  IF ZERO NET
+      *
+      * MOVE THE CALCULATED TRANSFER OUT COST AS A
+      * POSITIVE VALUE TO THE WORKFILE FIELD.
+      *
+     C                   Z-ADD     GTOCAM        GTOAM
+      *
+      * FLIP THE SIGN ON THE TRANSFER OUT DOLLARS. THEY
+      * ARE PRINTED AS A NEGATIVE.
+      *
+     C     -1            MULT      GTOCAM        GTOCAM
+      *
+      * CALCULATE THE TRANSFER OUT COST PER HEAD
+      *
+     C     GTOHD         IFNE      0
+     C     GTOCAM        DIV(H)    GTOHD         GTO$HD
+     C                   ENDIF
+      *
+      * CALCULATE THE TRANSFER OUT COST PER CWT
+      *
+     C     GTOCW         IFNE      0
+     C     GTOCAM        DIV(H)    GTOCW         GTO$CW
+     C                   ENDIF
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $NETPR - NET PROFIT BEFORE TAXES (MARGIN)
+      *----------------------------------------------------------------
+      *
+     C     $NETPR        BEGSR
+      *
+      * CALCULATE NET PROFIT =
+      *    NET SALES - COST OF SALES
+      *
+     C     GTNAM         SUB       GCSAM         GNPAM
+      *
+      * IF NET PROFIT IS NOT ZERO, CALCULATE
+      *   PROFIT PER HEAD = NET SALES PER HEAD - COST OF SALES PER HEAD
+      *   PROFIT PER CWT  = NET SALES PER CWT - COST OF SALES PER CWT
+      *
+     C     GNPAM         IFNE      0
+     C     GTN$HD        SUB       GCS$HD        GNP$HD
+     C     GTN$CW        SUB       GCS$CW        GNP$CW
+     C                   ENDIF
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * $CLEAR - CLEAR WORKFILE RECORDS
+      *----------------------------------------------------------------
+      *
+     C     $CLEAR        BEGSR
+      *
+     C                   CLEAR                   GREC
+     C                   CLEAR                   WGREC
+      *
+     C                   ENDSR
+      /EJECT
+      *----------------------------------------------------------------
+      * *INZSR - INITIALIZATION SUBROUTINE
+      *----------------------------------------------------------------
+      *
+     C     *INZSR        BEGSR
+      *
+      * KEY FIELDS
+      *
+     C     KP033         KLIST
+     C                   KFLD                    KYHGSN
+     C                   KFLD                    KYRPCD
+      *
+     C     *LIKE         DEFINE    HGHGSN        KYHGSN
+     C     *LIKE         DEFINE    RPRPCD        KYRPCD
+      *
+      * FLAG FIELD TO CONTROL PROCESSING
+      *
+     C                   MOVEL     YES           PROCFL            1
+      *
+      * WORKFIELDS FOR INTERIM CALCULATIONS AND ACCUMULATIONS
+      *
+     C                   Z-ADD     0             WKF152           15 2
+     C                   Z-ADD     0             WKF154           15 4
+      *
+     C                   ENDSR
+      /EJECT

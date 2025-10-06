@@ -1,0 +1,337 @@
+/********************************************************************/
+/*             -- COPIED FROM INVENTORY NIGHT RUNS     12/12/08     */
+/*                RUN Guymon, Triumph, and Seaboard Triumph at      */
+/*                  the same time                                   */
+/*                BELLY AND TRIM REPORTS                            */
+/*                                                                  */
+/*                ADD THIS PROGRAM TO THE JOB SCHEDULER             */
+/*                TO RUN IN THE AFTERNOON                           */
+/*                                                                  */
+/*  SYSTEM    - INVENTORY MANAGEMENT                                */
+/*  DATE      - 12/12/08                                            */
+/*                                                                  */
+/*------------------------------------------------------------------*/
+/* MAINTENANCE LOG                                                  */
+/*------------------------------------------------------------------*/
+/*  MODIFIED:   SUSAN MASON       12/15/08                          */
+/*               VERIFY IF THIS IS A PRODUCTION DAY AND IF SO       */
+/*               THEN ALLOW THE REPORTS TO BE CREATED               */
+/*               IF NOT A PRODUCTION DAY THEN SKIP TO THE NEXT      */
+/*               COMPANY TO BE VERIFIED.                            */
+/*  MODIFIED:   SUSAN MASON       12/26/08                          */
+/*               THIS CL WILL BE PLACED IN THE INVENTORY NIGHTLY    */
+/*               RUNS, WHERE WE ONLY WANT TO PROCESS THESE REPORTS  */
+/*               FOR TRIUMPH FOODS OR GUYMON.                       */
+/*               NOW THE AFTERNOON RUN MUST RUN BOTH COMPANIES      */
+/*               WHICH IS PERFORM IN ANOTHER JS RUN BUT OUTSIDE     */
+/*               OF THE INVENTORY NIGHTLY RUNS                      */
+/*               ADD NEW PARM COMPSEL A= ALL COMPANIES              */
+/*               ADD NEW PARM COMPSEL T= TRIUMPH FOODS              */
+/*               ADD NEW PARM COMPSEL G= GUYMON                     */
+/*  MODIFIED:   RMC  FP1054       06/04/09                          */
+/*               GET OUTQ FROM INVNIGHTQ VALUE IN COMPANY VALUE     */
+/*               SO WE CAN RUN IT IN DEV/TEST NOW.                  */
+/*               IT HAS BEEN PRKPRT05                                */
+/*  MODIFIED:   RMC  E01365       02/21/11   TF ONLY:               */
+/*               GET 2ND OUTQ FROM INVNIGHT2 VALUE IN COMPANY VALUE     */
+/*               TO PRINT RPTS ON TF PTR TFPRT03 IN CASE THE PDFS THAT ARE */
+/*               EMAILED ARE BAD/CORRUPT   -PER DAN NORMAN   */
+/* MODIFIED:  RMC 12/05/11 E1819  ADDED PARM TO PDJSUPR - &SUMBOX: PRINT   */
+/*                SUMMARY BOX ON REPORT FOR TRIM- NEW REPORT PBA3PFR */
+/*  S MASON     02/27/12 Pass in selection for the Production      */
+/*              spread sheet, This function will pass this new     */
+/*              parm as blanks to PDJSUPR.                         */
+/*  S MASON     05/10/12 Allow process for Picnic Schedule         */
+/*  S MASON     06/01/12 Belly/Trim/Picnic using same print pgm    */
+/*  S MASON     09/06/12 create work files and remove nightq       */
+/*              Parms changes to program PBD6XFR                   */
+/*  S MASON     09/17/13 Pass in base line for PFS PPA9CPP         */
+/*  S MASON     10/28/13 AT PBD6XFR only send th Order/KNCP        */
+/*              One Time for Guymon and One time for TF.           */
+/*              There is a 2nd time that for TF we perform PD6XFR  */
+/*              to have a 2nd version on the outq for Dan Norman   */
+/*  J HIGH      No logic changes. Recompiled for changed parms     */
+/*              on PBD6XFR.                                        */
+/*  B BADEN     E9064.  Add company 440 processing.  &COMPSEL will */
+/*              be "S" if only 440 to process.  The logic for 440  */
+/*              is modeled after the process for company 960.      */
+/*********************************************************************/
+ PMB2UPC:    PGM        PARM(&COMPSEL &BASELNE)
+
+             DCL        &OUTQ5      *CHAR   10 /* SCHED OUTPUT Q  */
+             DCL        &OUTQ2      *CHAR   10 /* SCHED OUTPUT Q 2 */
+             DCL        &EMAIL      *CHAR   1 /* OVERRIDE TO NOT EMAIL */
+             DCL        &COMPSEL    *CHAR   1
+             DCL        &JOBDATE    *CHAR   6
+             DCL        &JOBDTE     *CHAR   7
+             DCL        &DATE       *CHAR   7
+             DCL        &SUMBOX     *CHAR   1
+             /* BLANKS = READ ALL ITEM CATEGORY                  */
+             DCL        VAR(&ITMCAT) TYPE(*CHAR) LEN(3) VALUE('   ')
+             /* CREATE WORK FILE TO SEND TO CARLISLE             */
+             DCL        VAR(&SNDSPS) TYPE(*CHAR) LEN(1)
+             /* DO NOT CREATE WORK FILE TO SEND TO CARLISLE      */
+             DCL        VAR(&NODSPS) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&TMPNODSPS) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&BASELNE) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&SBDDTA) TYPE(*CHAR) LEN(1)
+             DCL        VAR(&SNDDNO) TYPE(*CHAR) LEN(1)
+/*******     DCL        VAR(&SBDDTA) TYPE(*CHAR) LEN(1) VALUE('Y') */
+/*******     DCL        VAR(&SNDDNO) TYPE(*CHAR) LEN(1) VALUE(' ') */
+
+             DCL        &DATEFRM    *DEC    7 0
+             DCL        &DATETO     *DEC    7 0
+             DCL        VAR(&PRODSTS) TYPE(*CHAR) LEN(1) VALUE(N)
+             DCL        &RUN360     *CHAR   1  VALUE(Y)
+             DCL        &RUN440     *CHAR   1  VALUE(Y)
+             DCL        &RUN960     *CHAR   1  VALUE(Y)
+
+             RTVJOBA    DATE(&JOBDATE)
+             CVTDAT     DATE(&JOBDATE) TOVAR(&JOBDTE) FROMFMT(*MDY) +
+                          TOFMT(*CYMD) TOSEP(*NONE)
+
+ OVRDNO:    CHGVAR     VAR(&EMAIL)     VALUE('E')
+
+             CHGVAR     VAR(&SBDDTA) VALUE(Y)
+             CHGVAR     VAR(&SNDDNO) VALUE(N)
+             CHGVAR     VAR(&SNDSPS)    VALUE(Y)
+             CHGVAR     VAR(&NODSPS)    VALUE(N)
+             CHGVAR     VAR(&TMPNODSPS) VALUE(N)
+
+             CHGVAR     VAR(&DATE) VALUE(&JOBDTE)
+             CHGVAR     VAR(&DATEFRM) VALUE(&JOBDTE)
+             CHGVAR     VAR(&DATETO) VALUE(&JOBDTE)
+
+             /* GUYMON ONLY, SKIP Triumph & Seaboard Triumph REPORTS */
+             IF         COND(&COMPSEL *EQ 'G') THEN(DO)
+             CHGVAR     VAR(&RUN440) VALUE(N)
+             CHGVAR     VAR(&RUN960) VALUE(N)
+             ENDDO
+
+             /* TRIUMPH ONLY, SKIP Guymon & Seaboard Triumph REPORTS */
+             IF         COND(&COMPSEL *EQ 'T') THEN(DO)
+             CHGVAR     VAR(&RUN360) VALUE(N)
+             CHGVAR     VAR(&RUN440) VALUE(N)
+             ENDDO
+
+             /* SEABOARD TRIUMPH ONLY, SKIP Guymon & Triumph REPORTS */
+             IF         COND(&COMPSEL *EQ 'S') THEN(DO)
+             CHGVAR     VAR(&RUN360) VALUE(N)
+             CHGVAR     VAR(&RUN960) VALUE(N)
+             ENDDO
+
+ BEGIN360:   IF         COND(&RUN360 = 'Y') THEN(DO)
+/*-------------------------------------------------------------------*/
+/* VERYIFY FOR A PRODUCTION DATE FOR 360                             */
+/*-------------------------------------------------------------------*/
+
+             CALL PGM(PMB5XFR)  PARM(' ' '360' &JOBDTE &PRODSTS)
+
+             IF         COND(&PRODSTS *EQ 'Y') THEN(DO)
+
+/*-------------------------------------------------------------------*/
+/* PRODUCTION SCHEDULE  BELLY/TRIM/PICNIC AND etc Production         */
+/*                      schedule                                     */
+/*-------------------------------------------------------------------*/
+/*** add new parm  'Y' at the end- holdovers ***/
+/*** added &sumbox parm -- print summary box on report y/n  */
+
+             CHGVAR     VAR(&SUMBOX) VALUE(Y)
+
+/*-------------------------------------------------------------------*/
+/* GET OUTQ -- WHICH IS CURRENTLY PRKPRT05     */
+ OUTQ360:    CALL       PGM(POMTXFR) PARM(' ' X'360F' 'INVNIGHTQ' +
+                          &OUTQ5)
+
+/*-------------------------------------------------------------------*/
+/* PRODUCTION SCHEDULE Generic - Using the Item Category             */
+/*  as the driver will read all ACTIVE records.                      */
+/*  and build the information to create the Box schedules            */
+/*  and build the information to create the Combo Schedules          */
+/*  If the Item Category is INACTIVE then the Production Schedule    */
+/*  will not Print                                                   */
+/*-------------------------------------------------------------------*/
+/*  Guymon - Yes email and outq5 and all Item Category's for 360     */
+/*   9/6/2012 slm                                                    */
+/*   9/24/2012 slm                                                   */
+/*   e02202 Create work file PBAHCPP that will be used for the       */
+/*          interface file to Carlisle                               */
+/*          the inventory nightly run's will send the data one       */
+/*          time by placing the SNDSPS = Y                           */
+/*          the second time this is processed is for the             */
+/*          creation of these repoorts for Triumph Foods for a       */
+/*          specific outq.  and the NODSPS = N                       */
+/*          carlilse the SNDSPS = Y means create the PS Prod Item    */
+/*          schedule summary and then send this data to Carlilse     */
+/*          remove the nightq                                        */
+/*-------------------------------------------------------------------*/
+ PRODSB360:
+             /* ITMCAT = BLANKS READ ALL ITEM CAT FOR COMPANY    */
+             CHGVAR     VAR(&ITMCAT) VALUE('   ')
+
+             CALL       PGM(PBD6XFR) PARM(' ' '01' '360' &OUTQ5 +
+                          '*YES' '*YES' 'P/S' &DATE 'Y' 'GP1' +
+                          &EMAIL 'Y' &SUMBOX &ITMCAT &SNDSPS +
+                          &BASELNE &SBDDTA)
+                          /* Verify if data should be sent */
+
+             /* if compsel = A, as is with the job scheduler */
+             /* then guymon would run first and then triumph foods */
+
+        /* GUYMON ONLY SO SKIP TRIUMPH FOODS REPORTS    */
+        /*   IF         COND(&COMPSEL *EQ 'G') THEN(DO) */
+        /*   GOTO ENDPGM                                */
+        /*   ENDDO                                      */
+
+             ENDDO
+
+             ENDDO   /* &RUN360 = 'Y' */
+
+ BEGIN440:   IF         COND(&RUN440 = 'Y') THEN(DO)
+/*-------------------------------------------------------------------*/
+/* VERYIFY FOR A PRODUCTION DATE FOR 440                             */
+/*-------------------------------------------------------------------*/
+
+             CALL PGM(PMB5XFR)  PARM(' ' '440' &JOBDTE &PRODSTS)
+
+             IF         COND(&PRODSTS *EQ 'Y') THEN(DO)
+
+/*-------------------------------------------------------------------*/
+/* GET OUTQ -- WHICH IS CURRENTLY ISPRT01      */
+/*-------------------------------------------------------------------*/
+ OUTQ440:    CALL       PGM(POMTXFR) PARM(' ' X'440F' 'INVNIGHTQ' +
+                          &OUTQ5)
+
+/*-------------------------------------------------------------------*/
+/*   added &sumbox parm -- print summary box on report y/n           */
+/*-------------------------------------------------------------------*/
+
+             CHGVAR     VAR(&SUMBOX) VALUE(Y)
+/*-------------------------------------------------------------------*/
+/*   Seaboard Triumph Foods Yes do Email and outq5                   */
+/*-------------------------------------------------------------------*/
+ PRODSBJ440:
+
+             /* ITMCAT = BLANKS READ ALL ITEM CAT FOR COMPANY    */
+             CHGVAR     VAR(&ITMCAT) VALUE('   ')
+
+/*   **** Temp Do not send, when Curt says yes then used the         */
+/*   **** SNDSPS, UNTIL then used TMPNODSPS                          */
+/*   APPROVED TO NOW SEND THE TF TO CARLISLE                         */
+/*   WHEN A PRIMAL GROUP REPORT STATES TO DO SO "C" IN THE ITEM      */
+/*   CATEGORY CODE 06OUP REPORT STATES TO DO SO "C" IN THE ITEM      */
+
+
+             CALL       PGM(PBD6XFR) PARM(' ' '01' '440' &OUTQ5 +
+                          '*YES' '*YES' 'P/S' &DATE 'Y' 'ST1' +
+                          &EMAIL 'Y' &SUMBOX &ITMCAT &SNDSPS +
+                          &BASELNE &SBDDTA)
+                          /* Verify if data should be sent */
+
+/*-------------------------------------------------------------------*/
+/* GET 2ND OUTQ -- WHICH IS CURRENTLY QPRINT2                        */
+/*-------------------------------------------------------------------*/
+ OUTQ440_2:  CALL       PGM(POMTXFR) PARM(' ' X'440F' 'INVNIGHT2' +
+                          &OUTQ2)
+             IF         COND(&OUTQ2 > '          ') THEN(DO)
+
+             /* ITMCAT = BLANKS READ ALL ITEM CAT FOR COMPANY    */
+             CHGVAR     VAR(&ITMCAT) VALUE('   ')
+
+             CHGVAR     VAR(&EMAIL) VALUE(' ')
+/*-------------------------------------------------------------------*/
+/*   Seaboard Triumph Foods Do not email, only run again to save     */
+/*   spool files to outq2                                            */
+/*   Do not send the primal group production schedule on this run    */
+/*   AND DO NOT SEND THIS PROTION TO CARLISLE.                       */
+/*   ALREADY EARLIER                                                 */
+/*-------------------------------------------------------------------*/
+ PRODSBJ442:
+
+             CALL       PGM(PBD6XFR) PARM(' ' '01' '440' &OUTQ2 +
+                          '*YES' '*YES' 'P/S' &DATE 'Y' 'ST1' +
+                          &EMAIL 'Y' &SUMBOX &ITMCAT &NODSPS +
+                          &BASELNE &SNDDNO)
+                          /* Do not SEND data to PPS */
+             ENDDO   /* &OUTQ2 = '  ' */
+
+             ENDDO   /* &PRODSTS *EQ 'Y' */
+
+             ENDDO   /* &RUN440 = 'Y' */
+
+ BEGIN960:   IF         COND(&RUN960 = 'Y') THEN(DO)
+/*-------------------------------------------------------------------*/
+/* VERYIFY FOR A PRODUCTION DATE FOR 960                             */
+/*-------------------------------------------------------------------*/
+
+             CALL PGM(PMB5XFR)  PARM(' ' '960' &JOBDTE &PRODSTS)
+
+             IF         COND(&PRODSTS *EQ 'Y') THEN(DO)
+
+/*-------------------------------------------------------------------*/
+/* GET OUTQ -- WHICH IS CURRENTLY PRKPRT05                           */
+/*-------------------------------------------------------------------*/
+ OUTQ960:    CALL       PGM(POMTXFR) PARM(' ' X'960F' 'INVNIGHTQ' +
+                          &OUTQ5)
+
+/*-------------------------------------------------------------------*/
+/*   added &sumbox parm -- print summary box on report y/n           */
+/*-------------------------------------------------------------------*/
+
+             CHGVAR     VAR(&SUMBOX) VALUE(Y)
+/*-------------------------------------------------------------------*/
+/*   Triumph Foods Yes do Email and outq5                            */
+/*-------------------------------------------------------------------*/
+ PRODSBJ960:
+
+             /* ITMCAT = BLANKS READ ALL ITEM CAT FOR COMPANY    */
+             CHGVAR     VAR(&ITMCAT) VALUE('   ')
+
+/*   **** Temp Do not send, when Curt says yes then used the         */
+/*   **** SNDSPS, UNTIL then used TMPNODSPS                          */
+/*   APPROVED TO NOW SEND THE TF TO CARLISLE                         */
+/*   WHEN A PRIMAL GROUP REPORT STATES TO DO SO "C" IN THE ITEM      */
+/*   CATEGORY CODE 06OUP REPORT STATES TO DO SO "C" IN THE ITEM      */
+
+
+             CALL       PGM(PBD6XFR) PARM(' ' '01' '960' &OUTQ5 +
+                          '*YES' '*YES' 'P/S' &DATE 'Y' 'SJ1' +
+                          &EMAIL 'Y' &SUMBOX &ITMCAT &SNDSPS +
+                          &BASELNE &SBDDTA)
+                          /* Verify if data should be sent */
+
+/*-------------------------------------------------------------------*/
+/* E01365 -   GET 2ND OUTQ -- WHICH IS CURRENTLY TFPRT03      */
+/*-------------------------------------------------------------------*/
+ OUTQ960_2:  CALL       PGM(POMTXFR) PARM(' ' X'960F' 'INVNIGHT2' &OUTQ2)
+             IF         COND(&OUTQ2 > '          ') THEN(DO)
+
+             /* ITMCAT = BLANKS READ ALL ITEM CAT FOR COMPANY    */
+             CHGVAR     VAR(&ITMCAT) VALUE('   ')
+
+             CHGVAR     VAR(&EMAIL) VALUE(' ')
+/*-------------------------------------------------------------------*/
+/*   Triumph Foods Do not email, only run again to save spool        */
+/*   files to outq2                                                  */
+/*   Do not send the primal group production schedule on this run    */
+/*   AND DO NOT SEND THIS PROTION TO CARLISLE.                       */
+/*   ALREADY EARLIER                                                 */
+/*-------------------------------------------------------------------*/
+ PRODSBJ962:
+
+             CALL       PGM(PBD6XFR) PARM(' ' '01' '960' &OUTQ2 +
+                          '*YES' '*YES' 'P/S' &DATE 'Y' 'SJ1' +
+                          &EMAIL 'Y' &SUMBOX &ITMCAT &NODSPS +
+                          &BASELNE &SNDDNO)
+                          /* Do not SEND data to PPS */
+             ENDDO
+
+             ENDDO
+
+             ENDDO   /* &RUN960 = 'Y' */
+
+/**********************************************************************/
+/* PROGRAM END                                                        */
+/**********************************************************************/
+ ENDPGM:
+             ENDPGM
