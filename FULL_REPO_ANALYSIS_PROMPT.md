@@ -171,24 +171,33 @@ This analysis generates **THREE CSV files**:
 
 Create a table with the following columns including program index:
 
-| Program Index | Caller | Caller Function | Call Type | Callee Program | Callee Function | File Type | Source File |
-|---------------|--------|----------------|-----------|----------------|-----------------|-----------|-------------|
-| 1 | MAINPGM | MAIN | CALL | CUSTLOOKUP | CUSTLOOKUP | RPG | MAINPGM_RPG.txt |
-| 1 | MAINPGM | CALCPROCESS | EXSR | MAINPGM | CALCAMT | RPG | MAINPGM_RPG.txt |
-| 1 | MAINPGM | DATEPROC | CALLP | DATESRV | GETDATE | RPG | MAINPGM_RPG.txt |
-| 2 | CONTROLPGM | MAIN | CALL PGM | REPORTGEN | REPORTGEN | CL | CONTROLPGM_CL.txt |
-| 3 | ACTIONPGM | PROCESS | CALL PROGRAM | VALIDATE | VALIDATE | AD | ACTIONPGM_AD.txt |
-| 4 | LEAFPGM | MAIN | (none) | (none) | (none) | RPG | LEAFPGM_RPG.txt |
+| Program Index | Caller | Caller Function | Call Type | Callee Program | Callee Function | File Type | Source File | Record Type |
+|---------------|--------|----------------|-----------|----------------|-----------------|-----------|-------------|-------------|
+| 1 | MAINPGM | MAIN | CALL | CUSTLOOKUP | CUSTLOOKUP | RPG | MAINPGM_RPG.txt | CALL |
+| 1 | MAINPGM | CALCPROCESS | EXSR | MAINPGM | CALCAMT | RPG | MAINPGM_RPG.txt | CALL |
+| 1 | MAINPGM | DATEPROC | CALLP | DATESRV | GETDATE | RPG | MAINPGM_RPG.txt | CALL |
+| 1 | MAINPGM | HELPER | (none) | (none) | (none) | RPG | MAINPGM_RPG.txt | LEAF |
+| 2 | CONTROLPGM | MAIN | CALL PGM | REPORTGEN | REPORTGEN | CL | CONTROLPGM_CL.txt | CALL |
+| 2 | CONTROLPGM | CLEANUP | (none) | (none) | (none) | CL | CONTROLPGM_CL.txt | LEAF |
+| 3 | ACTIONPGM | MAIN | CALL PROGRAM | VALIDATE | VALIDATE | AD | ACTIONPGM_AD.txt | CALL |
+| 4 | LEAFPGM | MAIN | (none) | (none) | (none) | RPG | LEAFPGM_RPG.txt | LEAF |
 
-**IMPORTANT - Leaf Node Handling:**
-- **Every executable file (RPG, CL, AD) must appear in the output at least once**
-- If a program makes NO calls to other programs, it is logged as a **leaf node** with:
+**IMPORTANT - Function-Level Leaf Node Handling:**
+- **Every function (BEGSR, SUBR, PROC) in every executable file (RPG, CL, AD) must appear in the output at least once**
+- **Record Type** column distinguishes between:
+  - **`CALL`**: Function/subroutine makes at least one call to another program or routine
+  - **`LEAF`**: Function/subroutine makes NO calls - it's a terminal node in the call graph
+- If a function makes NO calls to other programs or subroutines, it is logged as a **leaf node** with:
   - **Call Type**: `(none)`
   - **Callee Program**: `(none)`
   - **Callee Function**: `(none)`
-- This ensures **complete call hierarchy** including terminal nodes
-- **Why this matters**: Without leaf nodes, the call tree is incomplete. If Program A calls Program B, and Program B doesn't call anything, Program B would be invisible as a Caller in the output
-- **Benefit**: Enables complete program inventory and proper dependency analysis
+  - **Record Type**: `LEAF`
+- This ensures **complete call hierarchy** at function granularity, including all terminal nodes
+- **Why this matters**: Without function-level leaf tracking, the call tree is incomplete. Example:
+  - Program MAINPGM has 3 subroutines: CALCPROCESS (calls CALCAMT), DATEPROC (calls GETDATE), HELPER (calls nothing)
+  - Without leaf tracking: Only CALCPROCESS and DATEPROC appear as Callers
+  - With leaf tracking: All 3 subroutines appear - HELPER gets a LEAF record
+- **Benefit**: Enables complete function inventory, proper dependency analysis, and accurate impact assessment at subroutine level
 
 ### 2. DDS Dependency CSV (Program → File References)
 
@@ -621,10 +630,11 @@ Processing Status: Complete - Found 4 Level 1 calls
 
 ### **CSV Output Format:**
 ```
-Caller,Caller Function,Call Type,Callee Program,Callee Function,File Type,Source File
-CUSTPGM,MAIN,CALL,CUSTMAINT,CUSTMAINT,RPG,CUSTPGM_RPG.txt
-CUSTPGM,CALCAMT,EXSR,CUSTPGM,CALCAMT,RPG,CUSTPGM_RPG.txt  
-CTRLPGM,MAIN,CALL PGM,REPORTGEN,REPORTGEN,CL,CTRLPGM_CL.txt
+Caller,Caller Function,Call Type,Callee Program,Callee Function,File Type,Source File,Record Type
+CUSTPGM,MAIN,CALL,CUSTMAINT,CUSTMAINT,RPG,CUSTPGM_RPG.txt,CALL
+CUSTPGM,CALCAMT,EXSR,CUSTPGM,CALCAMT,RPG,CUSTPGM_RPG.txt,CALL
+CUSTPGM,HELPER,(none),(none),(none),RPG,CUSTPGM_RPG.txt,LEAF
+CTRLPGM,MAIN,CALL PGM,REPORTGEN,REPORTGEN,CL,CTRLPGM_CL.txt,CALL
 ```
 
 ---
@@ -662,12 +672,13 @@ Processing Status: Complete - Found 1 Level 1 calls
 
 ### **Sample CSV Output (Alphabetical Order with Program Indexing):**
 ```csv
-Program Index,Caller,Caller Function,Call Type,Callee Program,Callee Function,File Type
-1,ABCABP030,MAIN,SELECT,PRDSOMF,ABP030,SQL
-2,ACTBAL,MAIN,CALL,ACTBALS,ACTBALS,RPG
-3,ACTSEL,MAIN,CALL,CUSTLOOKUP,CUSTLOOKUP,RPG
-3,ACTSEL,VALIDATION,EXSR,ACTSEL,VALIDATECUST,RPG
-4,AMBWORKCL,MAIN,CALL PGM,REPORTGEN,REPORTGEN,CL
+Program Index,Caller,Caller Function,Call Type,Callee Program,Callee Function,File Type,Record Type
+1,ABCABP030,MAIN,SELECT,PRDSOMF,ABP030,SQL,CALL
+2,ACTBAL,MAIN,CALL,ACTBALS,ACTBALS,RPG,CALL
+3,ACTSEL,MAIN,CALL,CUSTLOOKUP,CUSTLOOKUP,RPG,CALL
+3,ACTSEL,VALIDATION,EXSR,ACTSEL,VALIDATECUST,RPG,CALL
+3,ACTSEL,HELPER,(none),(none),(none),RPG,LEAF
+4,AMBWORKCL,MAIN,CALL PGM,REPORTGEN,REPORTGEN,CL,CALL
 ```
 
 ### **Dynamic Repository Statistics (Generated at Runtime):**

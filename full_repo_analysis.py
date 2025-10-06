@@ -268,7 +268,8 @@ class RPGAnalyzer:
 
     @staticmethod
     def analyze(file_path: str, caller: str, program_index: int) -> Tuple[List[CallRecord], List[DDSReference], List[ErrorRecord]]:
-        """Analyze RPG file with context-aware caller function detection AND F-spec extraction"""
+        """Analyze RPG file with context-aware caller function detection AND F-spec extraction
+        Implements function-level leaf node tracking (write-before-check logic)"""
         calls = []
         dds_refs = []
         errors = []
@@ -297,6 +298,12 @@ class RPGAnalyzer:
             # Build context map for caller function detection
             context_map = RPGAnalyzer.build_context_map(lines)
 
+            # Get all unique functions from context map
+            all_functions = set(context_map.values())
+
+            # Track calls per function
+            function_calls = {func: [] for func in all_functions}
+
             # Extract both calls and F-specs in one pass
             for line_num, line in enumerate(lines, 1):
                 # Skip comments
@@ -312,9 +319,9 @@ class RPGAnalyzer:
                 if match:
                     callee = match.group(1).strip()
                     if RPGAnalyzer.is_valid_name(callee):
-                        calls.append(CallRecord(
+                        function_calls[caller_function].append(CallRecord(
                             program_index, caller, caller_function, 'CALL',
-                            callee, callee, 'RPG', os.path.basename(file_path)
+                            callee, callee, 'RPG', os.path.basename(file_path), 'CALL'
                         ))
 
                 # EXSR (internal subroutine call)
@@ -322,9 +329,9 @@ class RPGAnalyzer:
                 if match:
                     subroutine = match.group(1).strip()
                     if RPGAnalyzer.is_valid_name(subroutine):
-                        calls.append(CallRecord(
+                        function_calls[caller_function].append(CallRecord(
                             program_index, caller, caller_function, 'EXSR',
-                            caller, subroutine, 'RPG', os.path.basename(file_path)
+                            caller, subroutine, 'RPG', os.path.basename(file_path), 'CALL'
                         ))
 
                 # CALLP (procedure call)
@@ -332,9 +339,9 @@ class RPGAnalyzer:
                 if match:
                     procedure = match.group(1).strip()
                     if RPGAnalyzer.is_valid_name(procedure):
-                        calls.append(CallRecord(
+                        function_calls[caller_function].append(CallRecord(
                             program_index, caller, caller_function, 'CALLP',
-                            procedure, procedure, 'RPG', os.path.basename(file_path)
+                            procedure, procedure, 'RPG', os.path.basename(file_path), 'CALL'
                         ))
 
                 # CALLB (bound call)
@@ -342,9 +349,9 @@ class RPGAnalyzer:
                 if match:
                     callee = match.group(1).strip()
                     if RPGAnalyzer.is_valid_name(callee):
-                        calls.append(CallRecord(
+                        function_calls[caller_function].append(CallRecord(
                             program_index, caller, caller_function, 'CALLB',
-                            callee, callee, 'RPG', os.path.basename(file_path)
+                            callee, callee, 'RPG', os.path.basename(file_path), 'CALL'
                         ))
 
                 # Free-format calls
@@ -358,14 +365,14 @@ class RPGAnalyzer:
                             callee = match.group(1).strip()
                             if RPGAnalyzer.is_valid_name(callee):
                                 if call_type == 'EXSR':
-                                    calls.append(CallRecord(
+                                    function_calls[caller_function].append(CallRecord(
                                         program_index, caller, caller_function, call_type,
-                                        caller, callee, 'RPG', os.path.basename(file_path)
+                                        caller, callee, 'RPG', os.path.basename(file_path), 'CALL'
                                     ))
                                 else:
-                                    calls.append(CallRecord(
+                                    function_calls[caller_function].append(CallRecord(
                                         program_index, caller, caller_function, call_type,
-                                        callee, callee, 'RPG', os.path.basename(file_path)
+                                        callee, callee, 'RPG', os.path.basename(file_path), 'CALL'
                                     ))
 
                 # ===== EXTRACT F-SPECS (DDS FILE REFERENCES) =====
@@ -461,6 +468,18 @@ class RPGAnalyzer:
                                 os.path.basename(file_path)
                             ))
 
+            # Generate LEAF records for functions with no calls
+            for func in all_functions:
+                if len(function_calls[func]) == 0:
+                    # This is a leaf function - it doesn't call anything
+                    calls.append(CallRecord(
+                        program_index, caller, func, '(none)',
+                        '(none)', '(none)', 'RPG', os.path.basename(file_path), 'LEAF'
+                    ))
+                else:
+                    # This function has calls - add them all to the main list
+                    calls.extend(function_calls[func])
+
         except Exception as e:
             errors.append(ErrorRecord(
                 program_index, os.path.basename(file_path), 'PARSE_ERROR',
@@ -535,6 +554,12 @@ class CLAnalyzer:
             # Build context map
             context_map = CLAnalyzer.build_context_map(lines)
 
+            # Get all unique functions from context map
+            all_functions = set(context_map.values())
+
+            # Track calls per function for leaf node detection
+            function_calls = {func: [] for func in all_functions}
+
             # Extract both calls and DCLF in one pass
             for line_num, line in enumerate(lines, 1):
                 caller_function = context_map.get(line_num, "MAIN")
@@ -545,18 +570,18 @@ class CLAnalyzer:
                 for match in CLAnalyzer.CALL_PGM_PATTERN.finditer(line):
                     callee = match.group(1).strip()
                     if RPGAnalyzer.is_valid_name(callee):
-                        calls.append(CallRecord(
+                        function_calls[caller_function].append(CallRecord(
                             program_index, caller, caller_function, 'CALL PGM',
-                            callee, callee, 'CL', os.path.basename(file_path)
+                            callee, callee, 'CL', os.path.basename(file_path), 'CALL'
                         ))
 
                 # SBMJOB CMD(CALL PGM
                 for match in CLAnalyzer.SBMJOB_PATTERN.finditer(line):
                     callee = match.group(1).strip()
                     if RPGAnalyzer.is_valid_name(callee):
-                        calls.append(CallRecord(
+                        function_calls[caller_function].append(CallRecord(
                             program_index, caller, caller_function, 'SBMJOB',
-                            callee, callee, 'CL', os.path.basename(file_path)
+                            callee, callee, 'CL', os.path.basename(file_path), 'CALL'
                         ))
 
                 # ===== EXTRACT DCLF (FILE DECLARATIONS) =====
@@ -583,6 +608,18 @@ class CLAnalyzer:
                             file_name, file_usage, access_type, device_type,
                             os.path.basename(file_path)
                         ))
+
+            # Generate LEAF records for functions with no calls
+            for func in all_functions:
+                if len(function_calls[func]) == 0:
+                    # This is a leaf function - it doesn't call anything
+                    calls.append(CallRecord(
+                        program_index, caller, func, '(none)',
+                        '(none)', '(none)', 'CL', os.path.basename(file_path), 'LEAF'
+                    ))
+                else:
+                    # This function has calls - add them all to the main list
+                    calls.extend(function_calls[func])
 
         except Exception as e:
             errors.append(ErrorRecord(
@@ -628,24 +665,36 @@ class ActionDiagramAnalyzer:
 
             lines = content.split('\n')
 
+            # Track calls for leaf node detection
+            found_calls = []
+
             for line in lines:
                 # CALL PROGRAM
                 for match in ActionDiagramAnalyzer.CALL_PROGRAM_PATTERN.finditer(line):
                     callee = match.group(1).strip()
                     if RPGAnalyzer.is_valid_name(callee):
-                        calls.append(CallRecord(
+                        found_calls.append(CallRecord(
                             program_index, caller, 'MAIN', 'CALL PROGRAM',
-                            callee, callee, 'AD', os.path.basename(file_path)
+                            callee, callee, 'AD', os.path.basename(file_path), 'CALL'
                         ))
 
                 # EXECUTE FUNCTION
                 for match in ActionDiagramAnalyzer.EXECUTE_PATTERN.finditer(line):
                     callee = match.group(1).strip()
                     if RPGAnalyzer.is_valid_name(callee):
-                        calls.append(CallRecord(
+                        found_calls.append(CallRecord(
                             program_index, caller, 'MAIN', 'EXECUTE',
-                            callee, callee, 'AD', os.path.basename(file_path)
+                            callee, callee, 'AD', os.path.basename(file_path), 'CALL'
                         ))
+
+            # Generate LEAF record if no calls found
+            if len(found_calls) == 0:
+                calls.append(CallRecord(
+                    program_index, caller, 'MAIN', '(none)',
+                    '(none)', '(none)', 'AD', os.path.basename(file_path), 'LEAF'
+                ))
+            else:
+                calls.extend(found_calls)
 
         except Exception as e:
             errors.append(ErrorRecord(
@@ -825,7 +874,7 @@ class RepositoryAnalyzer:
         with open(call_csv, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=[
                 'Program Index', 'Caller', 'Caller Function', 'Call Type',
-                'Callee Program', 'Callee Function', 'File Type', 'Source File'
+                'Callee Program', 'Callee Function', 'File Type', 'Source File', 'Record Type'
             ])
             writer.writeheader()
 
@@ -890,21 +939,12 @@ class RepositoryAnalyzer:
                 with open(call_csv, 'a', newline='', encoding='utf-8') as f:
                     writer = csv.DictWriter(f, fieldnames=[
                         'Program Index', 'Caller', 'Caller Function', 'Call Type',
-                        'Callee Program', 'Callee Function', 'File Type', 'Source File'
+                        'Callee Program', 'Callee Function', 'File Type', 'Source File', 'Record Type'
                     ])
 
-                    # If there are calls, write them
-                    if unique_calls:
-                        for call in unique_calls:
-                            writer.writerow(call.to_dict())
-                    # If no calls but file is executable (RPG, CL, AD), write leaf node record
-                    elif file_type in ('RPG', 'CL', 'AD'):
-                        program_name = self.extract_caller_name(file_path)
-                        leaf_record = CallRecord(
-                            idx, program_name, 'MAIN', '(none)',
-                            '(none)', '(none)', file_type, file_name
-                        )
-                        writer.writerow(leaf_record.to_dict())
+                    # Write all calls (including LEAF records generated by analyzers)
+                    for call in unique_calls:
+                        writer.writerow(call.to_dict())
 
                 # Write DDS refs to CSV
                 with open(dds_csv, 'a', newline='', encoding='utf-8') as f:
