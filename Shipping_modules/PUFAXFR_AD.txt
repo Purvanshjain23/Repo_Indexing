@@ -1,0 +1,1878 @@
+// ?------------------------------------------------------------------------------------------------
+// ?Synon action diagram for PUFAXFR
+// ?Date: 14.08.2025 Time: 03:50:13
+// ?------------------------------------------------------------------------------------------------
+
+//?Execute user function
+
+//?T11041 RMC 10/05/17 After EDI 944 is received, if there are diffs
+//? between what was shipped and what was received, then adjust the
+//? Inventory on the TO warehouse for FG Items only with To whs/To whs shpCo
+//? ** may not get serial numbers back from whse, so compare at pallet level
+//? 1. CAB7CPP Create TW -/+ transactions
+//? 2. CAB0REP Update Item Balance - on hand
+//? 3. CAB1CPP Adjust Item Balance detail - on hand
+//?For expected product they receive ---
+//?whs will send oldest production date if there are more than 1 on a pallet
+//?For UNexpected product they receive ---
+//?whs will send correct production date
+//?if item is not on the shipped order, then create the detail with seq>50
+//?Check for Sent Box (in omfncpp) that wasnt received (not in puaocpp)
+EXECUTE FUNCTION(Val Serials exist/Ord  RT) TYPE(RTVOBJ) FILE(ECP166)           AC2154015;
+PARAMETER(PAR.EDI_SURROGATE_NUMBER);
+{
+ //?USER: Processing if Data record not found
+
+ // PGM.*Return code = CND.*Record does not exist
+ PGM.*Return_code = 'Y2U0005';
+
+ //?USER: Process Data record
+
+ // PGM.*Return code = CND.*Normal
+ PGM.*Return_code = *BLANK;
+
+ QUIT;
+
+}
+
+
+//?If serial nos. were sent back , then validate at box level
+CASE;
+
+// IF PGM.*Return code is *Normal
+IF PGM.*Return_code = *BLANK;
+
+//?WI517 DN 10/05/23-Added Parms 'Called From Program' &
+//?  'Send Email f/Failed API U'.
+EXECUTE FUNCTION(RTV Adjust To Whs Inv RT) TYPE(RTVOBJ) FILE(OMFNCPP)           AC2144231;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(PAR.Called_From_Program);
+PARAMETER(LCL.Send_Email_f_Failed_API_U);
+{
+ //?USER: Initialize routine
+
+ //?WI517 DN 10/05/23-Initialize Flags.
+ // PAR.Send Email f/Failed API U = CND.No
+ PAR.Send_Email_f_Failed_API_U = 'N';
+
+ // LCL.First Time Through USR = CND.Yes
+ LCL.First_Time_Through_USR = 'Y';
+
+ //?USER: Processing if Data record not found
+
+ // PGM.*Return code = CND.*Record does not exist
+ PGM.*Return_code = 'Y2U0005';
+
+ QUIT;
+
+ //?USER: Process Data record
+
+ CASE;
+
+ // IF DB1.Case Quantity is NE *ZERO
+ IF DB1.Case_Quantity <> *ZERO;
+
+ EXECUTE FUNCTION(Rtv to Adj To Whs Inv RT) TYPE(RTVOBJ) FILE(PUAOCPP)           AC2144232;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(DB1.Manifest_Pallet_Number);
+ PARAMETER(DB1.PT_Serial_Number);
+ {
+  //?USER: Processing if Data record not found
+
+  //?If not found  -- then adjust inventory
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  QUIT;
+
+  //?USER: Process Data record
+
+  //?If found  -- no change to inventory
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+ }
+
+ //?If Sent Box was not Recieved
+ CASE;
+
+ // IF PGM.*Return code is *Record does not exist
+ IF PGM.*Return_code = 'Y2U0005';
+
+ //?Get to warehouse
+ EXECUTE FUNCTION(RTV Ship Cust,Bill Typ RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1393140;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Billing_Activity_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ EXECUTE FUNCTION(Rtv Default WHS/OutWhs RT) TYPE(RTVOBJ) FILE(CAEOREP)          AC1937488;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(NLL.Outside_Warehouse_Flag);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?RMC 8/14/19 use shipping co on TO warehouse to upd inventory with
+ EXECUTE FUNCTION(RTV Shipping Co        RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1695057;
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(LCL.Shipping_Company_USR);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // LCL.Order Number Alpha = CVTVAR(DB1.Order Number)
+ LCL.Order_Number_Alpha = CVTVAR(DB1.Order_Number);
+
+ // LCL.Description = CONCAT(CON.Adjust Order,LCL.Order Number Alpha,CON.1)
+ LCL.Description = 'Adjust Order' + LCL.Order_Number_Alpha (1);
+
+ //? WI517 DN 10/05/23-Added Parms 'Called From Program' &
+ //?  'Send Email f/Failed API U'.
+ // Call program Upd Balances Tran-ToWh XF.
+ CALL PROGRAM(Upd Balances Tran-ToWh XF) ('PUFDXFR');
+ PARAMETER(LCL.Shipping_Company_USR);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER('T');
+ PARAMETER('TW');
+ PARAMETER(JOB.*Job_date);
+ PARAMETER(DB1.Production_Date);
+ PARAMETER('IC');
+ PARAMETER(LCL.Description);
+ PARAMETER(*BLANK);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER('1');
+ PARAMETER(DB1.Label_Date);
+ PARAMETER(DB1.Warehouse_Code);
+ PARAMETER(DB1.Case_Weight);
+ PARAMETER(DB1.Case_Quantity);
+ PARAMETER(*BLANK);
+ PARAMETER('Y');
+ PARAMETER(PAR.Called_From_Program);
+ PARAMETER(LCL.Send_Email_f_Failed_API_U);
+
+ //?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+ CASE;
+
+ // IF LCL.First Time Through USR is Yes
+ IF LCL.First_Time_Through_USR = 'Y';
+
+ // AND LCL.Send Email f/Failed API U is Yes
+ AND LCL.Send_Email_f_Failed_API_U = 'Y';
+
+ // LCL.First Time Through USR = CND.No
+ LCL.First_Time_Through_USR = 'N';
+
+ // PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+ PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ ENDIF;
+
+ ENDIF;
+
+ ENDIF;
+
+}
+
+
+//?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+CASE;
+
+// IF LCL.Send Email f/Failed API U is Yes
+IF LCL.Send_Email_f_Failed_API_U = 'Y';
+
+// PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ENDIF;
+
+//?Check for Received Box (in puaocpp) that wasnt sent (not in omfncpp)
+//?  Skip Item codes: for Pallets and Spacers
+//?WI517 DN 10/05/23-Added Parms 'Called From Program' &
+//?  'Send Email f/Failed API U'.
+EXECUTE FUNCTION(RTV Adjust To Whs Inv RT) TYPE(RTVOBJ) FILE(PUAOCPP)           AC2144336;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(PAR.Called_From_Program);
+PARAMETER(LCL.Send_Email_f_Failed_API_U);
+{
+ //?USER: Initialize routine
+
+ //?WI517 DN 10/05/23-Initialize Flags.
+ // PAR.Send Email f/Failed API U = CND.No
+ PAR.Send_Email_f_Failed_API_U = 'N';
+
+ // LCL.First Time Through USR = CND.Yes
+ LCL.First_Time_Through_USR = 'Y';
+
+ //?USER: Process Data record
+
+ //?Only check item type = FG (pallets and spacers are sent as items, type PS
+ EXECUTE FUNCTION(Rtv Item Type Code     RT) TYPE(RTVOBJ) FILE(OMBYREP)          AC1704065;
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(LCL.Item_Type_Code);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+ }
+
+ CASE;
+
+ // IF LCL.Item Type Code is Finished Good
+ IF LCL.Item_Type_Code = 'FG';
+
+ EXECUTE FUNCTION(Rtv to Adj To Whs Inv RT) TYPE(RTVOBJ) FILE(OMFNCPP)           AC2144337;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(DB1.Manifest_Pallet_Number);
+ PARAMETER(DB1.PT_Serial_Number);
+ {
+  //?USER: Processing if Data record not found
+
+  //?If not found  -- then adjust inventory
+  // PGM.*Return code = CND.*Record does not exist
+  PGM.*Return_code = 'Y2U0005';
+
+  QUIT;
+
+  //?USER: Process Data record
+
+  //?If found  -- no change to inventory
+  // PGM.*Return code = CND.*Normal
+  PGM.*Return_code = *BLANK;
+
+ }
+
+ //?If Received Box was not Sent (not in omfncpp)
+ CASE;
+
+ // IF PGM.*Return code is *Record does not exist
+ IF PGM.*Return_code = 'Y2U0005';
+
+ //?If item doesnt exist on the order, create OD with next seq>50
+ // LCL.Order Sequence Number = CON.*ZERO
+ LCL.Order_Sequence_Number = *ZERO;
+
+ EXECUTE FUNCTION(Rtv Chk Item ord twice RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC2148389;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Order_Sequence_Number);
+ PARAMETER(DB1.Item_Code);
+ {
+  //?USER: Process Data record
+
+  CASE;
+
+  // IF DB1.Item Code EQ PAR.Item Code
+  IF DB1.Item_Code = PAR.Item_Code;
+
+  CASE;
+
+  // IF PAR.Order Sequence Number is Equal to zero
+  IF PAR.Order_Sequence_Number = *ZERO;
+
+  // PAR.Order Sequence Number = DB1.Order Sequence Number
+  PAR.Order_Sequence_Number = DB1.Order_Sequence_Number;
+
+  QUIT;
+
+  ENDIF;
+
+  ENDIF;
+
+ }
+
+ CASE;
+
+ // IF LCL.Order Sequence Number is Equal to zero
+ IF LCL.Order_Sequence_Number = *ZERO;
+
+ //?create detail if item not found on order
+ EXECUTE FUNCTION(RTV 1st WHS f/EDI Crt RT) TYPE(RTVOBJ) FILE(OPBGWKP)           AC2148558;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(1);
+ PARAMETER(1);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Detail_Line_Status);
+ PARAMETER(LCL.Actual_Shipped_Date);
+ PARAMETER(LCL.Event_Code);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  QUIT;
+
+ }
+
+ // LCL.Order Sequence Number = CON.50
+ LCL.Order_Sequence_Number = 50;
+
+ EXECUTE FUNCTION(RTV Next Sequence #    RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC1312105;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Order_Sequence_Number);
+ {
+  //?USER: Processing if Data record not found
+
+  // PAR.Order Sequence Number = PAR.Order Sequence Number + CON.1
+  PAR.Order_Sequence_Number = PAR.Order_Sequence_Number + 1;
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // LCL.Order Sequence Number = LCL.Order Sequence Number + CON.1
+ LCL.Order_Sequence_Number = LCL.Order_Sequence_Number + 1;
+
+ // LCL.Order Secondary Line Seq = CON.1
+ LCL.Order_Secondary_Line_Seq = 1;
+
+ // Call program EDI Crt Order Detail  XF.
+ CALL PROGRAM(EDI Crt Order Detail  XF) ('PUGMXFR');
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Order_Sequence_Number);
+ PARAMETER(LCL.Order_Secondary_Line_Seq);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Detail_Line_Status);
+ PARAMETER('O');
+ PARAMETER(*ZERO);
+ PARAMETER(*ZERO);
+ PARAMETER(LCL.Actual_Shipped_Date);
+ PARAMETER(LCL.Event_Code);
+ PARAMETER(*ZERO);
+
+ ENDIF;
+
+ //?Get to warehouse
+ EXECUTE FUNCTION(RTV Ship Cust,Bill Typ RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1393140;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Billing_Activity_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ EXECUTE FUNCTION(Rtv Default WHS/OutWhs RT) TYPE(RTVOBJ) FILE(CAEOREP)          AC1937488;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(NLL.Outside_Warehouse_Flag);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?RMC 8/14/19 use shipping co on TO warehouse to upd inventory with
+ EXECUTE FUNCTION(RTV Shipping Co        RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1695057;
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(LCL.Shipping_Company_USR);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // LCL.Order Number Alpha = CVTVAR(DB1.Order Number)
+ LCL.Order_Number_Alpha = CVTVAR(DB1.Order_Number);
+
+ // LCL.Description = CONCAT(CON.Adjust Order,LCL.Order Number Alpha,CON.1)
+ LCL.Description = 'Adjust Order' + LCL.Order_Number_Alpha (1);
+
+ // LCL.Case Quantity = DB1.Quantity Received * CON.-1 *
+ LCL.Case_Quantity = DB1.Quantity_Received * -1;
+
+ // LCL.Case Weight = DB1.Weight Received * CON.-1 *
+ LCL.Case_Weight = DB1.Weight_Received * -1;
+
+ // LCL.Inventory Trans. Type = CND.Transfer Warehouse
+ LCL.Inventory_Trans_Type = 'TW';
+
+ // LCL.Description = Condition name of LCL.Inventory Trans. Type
+ LCL.Description = RTVCND(LCL.Inventory_Trans_Type);
+
+ //? WI517 DN 10/05/23-Added Parms 'Called From Program' &
+ //?  'Send Email f/Failed API U'.
+ // Call program Upd Balances Tran-ToWh XF.
+ CALL PROGRAM(Upd Balances Tran-ToWh XF) ('PUFDXFR');
+ PARAMETER(LCL.Shipping_Company_USR);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER('T');
+ PARAMETER('TW');
+ PARAMETER(JOB.*Job_date);
+ PARAMETER(DB1.MDER_Production_Date);
+ PARAMETER('IC');
+ PARAMETER(LCL.Description);
+ PARAMETER(*BLANK);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER('1');
+ PARAMETER(DB1.MDER_Production_Date);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Case_Weight);
+ PARAMETER(LCL.Case_Quantity);
+ PARAMETER(*BLANK);
+ PARAMETER('Y');
+ PARAMETER(PAR.Called_From_Program);
+ PARAMETER(LCL.Send_Email_f_Failed_API_U);
+
+ //?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+ CASE;
+
+ // IF LCL.First Time Through USR is Yes
+ IF LCL.First_Time_Through_USR = 'Y';
+
+ // AND LCL.Send Email f/Failed API U is Yes
+ AND LCL.Send_Email_f_Failed_API_U = 'Y';
+
+ // LCL.First Time Through USR = CND.No
+ LCL.First_Time_Through_USR = 'N';
+
+ // PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+ PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ ENDIF;
+
+ ENDIF;
+
+ ENDIF;
+
+}
+
+
+//?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+CASE;
+
+// IF LCL.Send Email f/Failed API U is Yes
+IF LCL.Send_Email_f_Failed_API_U = 'Y';
+
+// PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ENDIF;
+
+ENDIF;
+
+//?If serial nos. were NOT sent back , then validate at item total
+CASE;
+
+// IF PGM.*Return code is *Record does not exist
+IF PGM.*Return_code = 'Y2U0005';
+
+//?WI517 DN 10/05/23-Added Parms 'Called From Program' &
+//?  'Send Email f/Failed API U'.
+EXECUTE FUNCTION(RTV Chk Rcvd/Adj EDI  RT) TYPE(RTVOBJ) FILE(OPBGWKP)           AC2154016;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(PAR.Called_From_Program);
+PARAMETER(LCL.Send_Email_f_Failed_API_U);
+{
+ //?USER: Initialize routine
+
+ // PAR.First Time Flag = CND.Yes
+ PAR.First_Time_Flag = 'Y';
+
+ //?WI517 DN 10/05/23-Initialize Flags.
+ // PAR.Send Email f/Failed API U = CND.No
+ PAR.Send_Email_f_Failed_API_U = 'N';
+
+ // LCL.First Time Through USR = CND.Yes
+ LCL.First_Time_Through_USR = 'Y';
+
+ //?USER: Process Data record
+
+ CASE;
+
+ // IF LCL.First Time Flag is Yes
+ IF LCL.First_Time_Flag = 'Y';
+
+ // PAR.Item Code = DB1.Item Code
+ PAR.Item_Code = DB1.Item_Code;
+
+ // PAR.Quantity Shipped Total = CON.*ZERO
+ PAR.Quantity_Shipped_Total = *ZERO;
+
+ // PAR.First Time Flag = CND.NO
+ PAR.First_Time_Flag = 'N';
+
+ ENDIF;
+
+ //?At item break, see how may were recvd per item, adj inv if difference
+ CASE;
+
+ // IF PAR.Item Code NE DB1.Item Code
+ IF PAR.Item_Code <> DB1.Item_Code;
+
+ CASE;
+
+ // IF PAR.Quantity Shipped Total is Greater than zero
+ IF PAR.Quantity_Shipped_Total > *ZERO;
+
+ //?See how many were received. adjust inventory accordingly
+ EXECUTE FUNCTION(RTV Sum Qty Rcvd-Item  RT) TYPE(RTVOBJ) FILE(PUAOCPP)          AC2139396;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Quantity_Received_Total);
+ PARAMETER(LCL.Weight_received_total);
+ {
+  //?USER: Initialize routine
+
+  // PAR.Quantity Received Total = CON.*ZERO
+  PAR.Quantity_Received_Total = *ZERO;
+
+  // PAR.Weight received total = CON.*ZERO
+  PAR.Weight_received_total = *ZERO;
+
+  //?USER: Process Data record
+
+  // PAR.Quantity Received Total = PAR.Quantity Received Total + DB1.Quantity Received
+  PAR.Quantity_Received_Total = PAR.Quantity_Received_Total + DB1.Quantity_Received;
+
+  // PAR.Weight received total = PAR.Weight received total + DB1.Weight Received
+  PAR.Weight_received_total = PAR.Weight_received_total + DB1.Weight_Received;
+
+ }
+
+ //?If less was received than was sent, then decrease dest warehouse inventory
+ CASE;
+
+ // IF LCL.Quantity Received Total LT PAR.Quantity Shipped Total
+ IF LCL.Quantity_Received_Total < PAR.Quantity_Shipped_Total;
+
+ //?Get unit weight
+ EXECUTE FUNCTION(RTV Unit Weight/UM Prm RT) TYPE(RTVOBJ) FILE(CABZREP)          AC2154000;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.UOM_Primary);
+ PARAMETER(LCL.Unit_Weight);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?Get oldest prod date sent
+ EXECUTE FUNCTION(RTV Oldest Prod Date   RT) TYPE(RTVOBJ) FILE(OMFNCPP)          AC2154017;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Production_Date);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  CASE;
+
+  // IF DB1.Case Quantity is GT *ZERO
+  IF DB1.Case_Quantity > *ZERO;
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  QUIT;
+
+  ENDIF;
+
+ }
+
+ //?Get to warehouse
+ EXECUTE FUNCTION(RTV Ship Cust,Bill Typ RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1393140;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Billing_Activity_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ EXECUTE FUNCTION(Rtv Default WHS/OutWhs RT) TYPE(RTVOBJ) FILE(CAEOREP)          AC1937488;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(NLL.Outside_Warehouse_Flag);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?RMC 8/14/19 use shipping co on TO warehouse to upd inventory with
+ EXECUTE FUNCTION(RTV Shipping Co        RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1695057;
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(LCL.Shipping_Company_USR);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // LCL.Order Number Alpha = CVTVAR(DB1.Order Number)
+ LCL.Order_Number_Alpha = CVTVAR(DB1.Order_Number);
+
+ // LCL.Description = CONCAT(CON.Adjust Order,LCL.Order Number Alpha,CON.1)
+ LCL.Description = 'Adjust Order' + LCL.Order_Number_Alpha (1);
+
+ // LCL.Case Quantity = PAR.Quantity Shipped Total - LCL.Quantity Received Total
+ LCL.Case_Quantity = PAR.Quantity_Shipped_Total - LCL.Quantity_Received_Total;
+
+ // LCL.Case Weight = LCL.Case Quantity * LCL.Unit Weight *
+ LCL.Case_Weight = LCL.Case_Quantity * LCL.Unit_Weight;
+
+ //? WI517 DN 10/05/23-Added Parms 'Called From Program' &
+ //?  'Send Email f/Failed API U'.
+ // Call program Upd Balances Tran-ToWh XF.
+ CALL PROGRAM(Upd Balances Tran-ToWh XF) ('PUFDXFR');
+ PARAMETER(LCL.Shipping_Company_USR);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER('T');
+ PARAMETER('TW');
+ PARAMETER(JOB.*Job_date);
+ PARAMETER(LCL.Production_Date);
+ PARAMETER('IC');
+ PARAMETER(LCL.Description);
+ PARAMETER(*BLANK);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER('1');
+ PARAMETER(LCL.Production_Date);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Case_Weight);
+ PARAMETER(LCL.Case_Quantity);
+ PARAMETER(*BLANK);
+ PARAMETER('Y');
+ PARAMETER(PAR.Called_From_Program);
+ PARAMETER(LCL.Send_Email_f_Failed_API_U);
+
+ //?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+ CASE;
+
+ // IF LCL.First Time Through USR is Yes
+ IF LCL.First_Time_Through_USR = 'Y';
+
+ // AND LCL.Send Email f/Failed API U is Yes
+ AND LCL.Send_Email_f_Failed_API_U = 'Y';
+
+ // LCL.First Time Through USR = CND.No
+ LCL.First_Time_Through_USR = 'N';
+
+ // PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+ PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ ENDIF;
+
+ ENDIF;
+
+ //?If more was received than was sent, then increase dest warehouse inventory
+ CASE;
+
+ // IF LCL.Quantity Received Total GT PAR.Quantity Shipped Total
+ IF LCL.Quantity_Received_Total > PAR.Quantity_Shipped_Total;
+
+ //?Get unit weight
+ EXECUTE FUNCTION(RTV Unit Weight/UM Prm RT) TYPE(RTVOBJ) FILE(CABZREP)          AC2154000;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.UOM_Primary);
+ PARAMETER(LCL.Unit_Weight);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?Get oldest prod date sent
+ EXECUTE FUNCTION(RTV Oldest Prod Date   RT) TYPE(RTVOBJ) FILE(OMFNCPP)          AC2154017;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Production_Date);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  CASE;
+
+  // IF DB1.Case Quantity is GT *ZERO
+  IF DB1.Case_Quantity > *ZERO;
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  QUIT;
+
+  ENDIF;
+
+ }
+
+ //?Get to warehouse
+ EXECUTE FUNCTION(RTV Ship Cust,Bill Typ RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1393140;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Billing_Activity_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ EXECUTE FUNCTION(Rtv Default WHS/OutWhs RT) TYPE(RTVOBJ) FILE(CAEOREP)          AC1937488;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(NLL.Outside_Warehouse_Flag);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?RMC 8/14/19 use shipping co on TO warehouse to upd inventory with
+ EXECUTE FUNCTION(RTV Shipping Co        RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1695057;
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(LCL.Shipping_Company_USR);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // LCL.Order Number Alpha = CVTVAR(DB1.Order Number)
+ LCL.Order_Number_Alpha = CVTVAR(DB1.Order_Number);
+
+ // LCL.Description = CONCAT(CON.Adjust Order,LCL.Order Number Alpha,CON.1)
+ LCL.Description = 'Adjust Order' + LCL.Order_Number_Alpha (1);
+
+ // LCL.Case Quantity = PAR.Quantity Shipped Total - LCL.Quantity Received Total
+ LCL.Case_Quantity = PAR.Quantity_Shipped_Total - LCL.Quantity_Received_Total;
+
+ // LCL.Case Weight = LCL.Case Quantity * LCL.Unit Weight *
+ LCL.Case_Weight = LCL.Case_Quantity * LCL.Unit_Weight;
+
+ //? WI517 DN 10/05/23-Added Parms 'Called From Program' &
+ //?  'Send Email f/Failed API U'.
+ // Call program Upd Balances Tran-ToWh XF.
+ CALL PROGRAM(Upd Balances Tran-ToWh XF) ('PUFDXFR');
+ PARAMETER(LCL.Shipping_Company_USR);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER('T');
+ PARAMETER('TW');
+ PARAMETER(JOB.*Job_date);
+ PARAMETER(LCL.Production_Date);
+ PARAMETER('IC');
+ PARAMETER(LCL.Description);
+ PARAMETER(*BLANK);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER('1');
+ PARAMETER(LCL.Production_Date);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Case_Weight);
+ PARAMETER(LCL.Case_Quantity);
+ PARAMETER(*BLANK);
+ PARAMETER('Y');
+ PARAMETER(PAR.Called_From_Program);
+ PARAMETER(LCL.Send_Email_f_Failed_API_U);
+
+ //?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+ CASE;
+
+ // IF LCL.First Time Through USR is Yes
+ IF LCL.First_Time_Through_USR = 'Y';
+
+ // AND LCL.Send Email f/Failed API U is Yes
+ AND LCL.Send_Email_f_Failed_API_U = 'Y';
+
+ // LCL.First Time Through USR = CND.No
+ LCL.First_Time_Through_USR = 'N';
+
+ // PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+ PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ ENDIF;
+
+ ENDIF;
+
+ ENDIF;
+
+ // PAR.Item Code = DB1.Item Code
+ PAR.Item_Code = DB1.Item_Code;
+
+ // PAR.Quantity Shipped Total = CON.*ZERO
+ PAR.Quantity_Shipped_Total = 0;
+
+ ENDIF;
+
+ // PAR.Quantity Shipped Total = PAR.Quantity Shipped Total + DB1.Quantity Shipped Total
+ PAR.Quantity_Shipped_Total = PAR.Quantity_Shipped_Total + DB1.Quantity_Shipped_Total;
+
+ //?USER: Exit processing
+
+ //?Last item ---
+ CASE;
+
+ // IF PAR.Quantity Shipped Total is Greater than zero
+ IF PAR.Quantity_Shipped_Total > *ZERO;
+
+ //?See how many were received. adjust inventory accordingly
+ EXECUTE FUNCTION(RTV Sum Qty Rcvd-Item  RT) TYPE(RTVOBJ) FILE(PUAOCPP)          AC2139396;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Order_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Quantity_Received_Total);
+ PARAMETER(LCL.Weight_received_total);
+ {
+  //?USER: Initialize routine
+
+  // PAR.Quantity Received Total = CON.*ZERO
+  PAR.Quantity_Received_Total = *ZERO;
+
+  // PAR.Weight received total = CON.*ZERO
+  PAR.Weight_received_total = *ZERO;
+
+  //?USER: Process Data record
+
+  // PAR.Quantity Received Total = PAR.Quantity Received Total + DB1.Quantity Received
+  PAR.Quantity_Received_Total = PAR.Quantity_Received_Total + DB1.Quantity_Received;
+
+  // PAR.Weight received total = PAR.Weight received total + DB1.Weight Received
+  PAR.Weight_received_total = PAR.Weight_received_total + DB1.Weight_Received;
+
+ }
+
+ //?If less was received than was sent, then decrease dest warehouse inventory
+ CASE;
+
+ // IF LCL.Quantity Received Total LT PAR.Quantity Shipped Total
+ IF LCL.Quantity_Received_Total < PAR.Quantity_Shipped_Total;
+
+ //?Get unit weight
+ EXECUTE FUNCTION(RTV Unit Weight/UM Prm RT) TYPE(RTVOBJ) FILE(CABZREP)          AC2154000;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.UOM_Primary);
+ PARAMETER(LCL.Unit_Weight);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?Get oldest prod date sent
+ EXECUTE FUNCTION(RTV Oldest Prod Date   RT) TYPE(RTVOBJ) FILE(OMFNCPP)          AC2154017;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Order_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Production_Date);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  CASE;
+
+  // IF DB1.Case Quantity is GT *ZERO
+  IF DB1.Case_Quantity > *ZERO;
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  QUIT;
+
+  ENDIF;
+
+ }
+
+ //?Get to warehouse
+ EXECUTE FUNCTION(RTV Ship Cust,Bill Typ RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1393140;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(PAR.Order_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Billing_Activity_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ EXECUTE FUNCTION(Rtv Default WHS/OutWhs RT) TYPE(RTVOBJ) FILE(CAEOREP)          AC1937488;
+ PARAMETER(PAR.Company_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(NLL.Outside_Warehouse_Flag);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?RMC 8/14/19 use shipping co on TO warehouse to upd inventory with
+ EXECUTE FUNCTION(RTV Shipping Co        RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1695057;
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(LCL.Shipping_Company_USR);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // LCL.Order Number Alpha = CVTVAR(DB1.Order Number)
+ LCL.Order_Number_Alpha = CVTVAR(DB1.Order_Number);
+
+ // LCL.Description = CONCAT(CON.Adjust Order,LCL.Order Number Alpha,CON.1)
+ LCL.Description = 'Adjust Order' + LCL.Order_Number_Alpha (1);
+
+ // LCL.Case Quantity = PAR.Quantity Shipped Total - LCL.Quantity Received Total
+ LCL.Case_Quantity = PAR.Quantity_Shipped_Total - LCL.Quantity_Received_Total;
+
+ // LCL.Case Weight = LCL.Case Quantity * LCL.Unit Weight *
+ LCL.Case_Weight = LCL.Case_Quantity * LCL.Unit_Weight;
+
+ //? WI517 DN 10/05/23-Added Parms 'Called From Program' &
+ //?  'Send Email f/Failed API U'.
+ // Call program Upd Balances Tran-ToWh XF.
+ CALL PROGRAM(Upd Balances Tran-ToWh XF) ('PUFDXFR');
+ PARAMETER(LCL.Shipping_Company_USR);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER('T');
+ PARAMETER('TW');
+ PARAMETER(JOB.*Job_date);
+ PARAMETER(LCL.Production_Date);
+ PARAMETER('IC');
+ PARAMETER(LCL.Description);
+ PARAMETER(*BLANK);
+ PARAMETER(PAR.Order_Number);
+ PARAMETER('1');
+ PARAMETER(LCL.Production_Date);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Case_Weight);
+ PARAMETER(LCL.Case_Quantity);
+ PARAMETER(*BLANK);
+ PARAMETER('Y');
+ PARAMETER(PAR.Called_From_Program);
+ PARAMETER(LCL.Send_Email_f_Failed_API_U);
+
+ //?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+ CASE;
+
+ // IF LCL.First Time Through USR is Yes
+ IF LCL.First_Time_Through_USR = 'Y';
+
+ // AND LCL.Send Email f/Failed API U is Yes
+ AND LCL.Send_Email_f_Failed_API_U = 'Y';
+
+ // LCL.First Time Through USR = CND.No
+ LCL.First_Time_Through_USR = 'N';
+
+ // PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+ PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ ENDIF;
+
+ ENDIF;
+
+ //?If more was received than was sent, then increase dest warehouse inventory
+ CASE;
+
+ // IF LCL.Quantity Received Total GT PAR.Quantity Shipped Total
+ IF LCL.Quantity_Received_Total > PAR.Quantity_Shipped_Total;
+
+ //?Get unit weight
+ EXECUTE FUNCTION(RTV Unit Weight/UM Prm RT) TYPE(RTVOBJ) FILE(CABZREP)          AC2154000;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(LCL.UOM_Primary);
+ PARAMETER(LCL.Unit_Weight);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?Get oldest prod date sent
+ EXECUTE FUNCTION(RTV Oldest Prod Date   RT) TYPE(RTVOBJ) FILE(OMFNCPP)          AC2154017;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(LCL.Production_Date);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  CASE;
+
+  // IF DB1.Case Quantity is GT *ZERO
+  IF DB1.Case_Quantity > *ZERO;
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  QUIT;
+
+  ENDIF;
+
+ }
+
+ //?Get to warehouse
+ EXECUTE FUNCTION(RTV Ship Cust,Bill Typ RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1393140;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Billing_Activity_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ EXECUTE FUNCTION(Rtv Default WHS/OutWhs RT) TYPE(RTVOBJ) FILE(CAEOREP)          AC1937488;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(NLL.Outside_Warehouse_Flag);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?RMC 8/14/19 use shipping co on TO warehouse to upd inventory with
+ EXECUTE FUNCTION(RTV Shipping Co        RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1695057;
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(LCL.Shipping_Company_USR);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // LCL.Order Number Alpha = CVTVAR(DB1.Order Number)
+ LCL.Order_Number_Alpha = CVTVAR(DB1.Order_Number);
+
+ // LCL.Description = CONCAT(CON.Adjust Order,LCL.Order Number Alpha,CON.1)
+ LCL.Description = 'Adjust Order' + LCL.Order_Number_Alpha (1);
+
+ // LCL.Case Quantity = PAR.Quantity Shipped Total - LCL.Quantity Received Total
+ LCL.Case_Quantity = PAR.Quantity_Shipped_Total - LCL.Quantity_Received_Total;
+
+ // LCL.Case Weight = LCL.Case Quantity * LCL.Unit Weight *
+ LCL.Case_Weight = LCL.Case_Quantity * LCL.Unit_Weight;
+
+ //? WI517 DN 10/05/23-Added Parms 'Called From Program' &
+ //?  'Send Email f/Failed API U'.
+ // Call program Upd Balances Tran-ToWh XF.
+ CALL PROGRAM(Upd Balances Tran-ToWh XF) ('PUFDXFR');
+ PARAMETER(LCL.Shipping_Company_USR);
+ PARAMETER(DB1.Item_Code);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER('T');
+ PARAMETER('TW');
+ PARAMETER(JOB.*Job_date);
+ PARAMETER(LCL.Production_Date);
+ PARAMETER('IC');
+ PARAMETER(LCL.Description);
+ PARAMETER(*BLANK);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER('1');
+ PARAMETER(LCL.Production_Date);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Case_Weight);
+ PARAMETER(LCL.Case_Quantity);
+ PARAMETER(*BLANK);
+ PARAMETER('Y');
+ PARAMETER(PAR.Called_From_Program);
+ PARAMETER(LCL.Send_Email_f_Failed_API_U);
+
+ //?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+ CASE;
+
+ // IF LCL.First Time Through USR is Yes
+ IF LCL.First_Time_Through_USR = 'Y';
+
+ // AND LCL.Send Email f/Failed API U is Yes
+ AND LCL.Send_Email_f_Failed_API_U = 'Y';
+
+ // LCL.First Time Through USR = CND.No
+ LCL.First_Time_Through_USR = 'N';
+
+ // PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+ PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ ENDIF;
+
+ ENDIF;
+
+ ENDIF;
+
+}
+
+
+//?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+CASE;
+
+// IF LCL.Send Email f/Failed API U is Yes
+IF LCL.Send_Email_f_Failed_API_U = 'Y';
+
+// PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ENDIF;
+
+//?Check for Received Item(in puaocpp) that wasnt sent (not in order detail)
+//?WI517 DN 10/05/23-Added Parms 'Called From Program' &
+//?  'Send Email f/Failed API U'.
+EXECUTE FUNCTION(RTV Adj To Whs Inv/Itm RT) TYPE(RTVOBJ) FILE(PUAOCPP)          AC2154018;
+PARAMETER(PAR.Company_Number);
+PARAMETER(PAR.Order_Number);
+PARAMETER(PAR.Called_From_Program);
+PARAMETER(LCL.Send_Email_f_Failed_API_U);
+{
+ //?USER: Initialize routine
+
+ // PAR.First Time Flag = CND.Yes
+ PAR.First_Time_Flag = 'Y';
+
+ //?WI517 DN 10/05/23-Initialize Flags.
+ // PAR.Send Email f/Failed API U = CND.No
+ PAR.Send_Email_f_Failed_API_U = 'N';
+
+ // LCL.First Time Through USR = CND.Yes
+ LCL.First_Time_Through_USR = 'Y';
+
+ //?USER: Process Data record
+
+ CASE;
+
+ // IF PAR.First Time Flag is Yes
+ IF PAR.First_Time_Flag = 'Y';
+
+ // PAR.Item Code = DB1.Item Code
+ PAR.Item_Code = DB1.Item_Code;
+
+ // PAR.First Time Flag = CND.NO
+ PAR.First_Time_Flag = 'N';
+
+ ENDIF;
+
+ //?At item code break, check for shipped item, if not found, adj inventory
+ CASE;
+
+ // IF DB1.Item Code NE PAR.Item Code
+ IF DB1.Item_Code <> PAR.Item_Code;
+
+ CASE;
+
+ // IF PAR.Quantity Received Total is Greater than zero
+ IF PAR.Quantity_Received_Total > *ZERO;
+
+ EXECUTE FUNCTION(RTV Shp qty wgt p/item RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC2148427;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Quantity_Shipped_Total);
+ {
+  //?USER: Initialize routine
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  // PAR.Quantity Shipped Total = PAR.Quantity Shipped Total + DB1.Quantity Shipped Total
+  PAR.Quantity_Shipped_Total = PAR.Quantity_Shipped_Total + DB1.Quantity_Shipped_Total;
+
+ }
+
+ CASE;
+
+ // IF LCL.Quantity Shipped Total is Equal to zero
+ IF LCL.Quantity_Shipped_Total = *ZERO;
+
+ //?If item doesnt exist on the order, create OD with next seq>50
+ // LCL.Order Sequence Number = CON.*ZERO
+ LCL.Order_Sequence_Number = *ZERO;
+
+ EXECUTE FUNCTION(Rtv Chk Item ord twice RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC2148389;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Order_Sequence_Number);
+ PARAMETER(PAR.Item_Code);
+ {
+  //?USER: Process Data record
+
+  CASE;
+
+  // IF DB1.Item Code EQ PAR.Item Code
+  IF DB1.Item_Code = PAR.Item_Code;
+
+  CASE;
+
+  // IF PAR.Order Sequence Number is Equal to zero
+  IF PAR.Order_Sequence_Number = *ZERO;
+
+  // PAR.Order Sequence Number = DB1.Order Sequence Number
+  PAR.Order_Sequence_Number = DB1.Order_Sequence_Number;
+
+  QUIT;
+
+  ENDIF;
+
+  ENDIF;
+
+ }
+
+ CASE;
+
+ // IF LCL.Order Sequence Number is Equal to zero
+ IF LCL.Order_Sequence_Number = *ZERO;
+
+ //?create detail if item not found on order
+ EXECUTE FUNCTION(RTV 1st WHS f/EDI Crt RT) TYPE(RTVOBJ) FILE(OPBGWKP)           AC2148558;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(1);
+ PARAMETER(1);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Detail_Line_Status);
+ PARAMETER(LCL.Actual_Shipped_Date);
+ PARAMETER(LCL.Event_Code);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  QUIT;
+
+ }
+
+ // LCL.Order Sequence Number = CON.50
+ LCL.Order_Sequence_Number = 50;
+
+ EXECUTE FUNCTION(RTV Next Sequence #    RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC1312105;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Order_Sequence_Number);
+ {
+  //?USER: Processing if Data record not found
+
+  // PAR.Order Sequence Number = PAR.Order Sequence Number + CON.1
+  PAR.Order_Sequence_Number = PAR.Order_Sequence_Number + 1;
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // LCL.Order Sequence Number = LCL.Order Sequence Number + CON.1
+ LCL.Order_Sequence_Number = LCL.Order_Sequence_Number + 1;
+
+ // LCL.Order Secondary Line Seq = CON.1
+ LCL.Order_Secondary_Line_Seq = 1;
+
+ // Call program EDI Crt Order Detail  XF.
+ CALL PROGRAM(EDI Crt Order Detail  XF) ('PUGMXFR');
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Order_Sequence_Number);
+ PARAMETER(LCL.Order_Secondary_Line_Seq);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Detail_Line_Status);
+ PARAMETER('O');
+ PARAMETER(*ZERO);
+ PARAMETER(*ZERO);
+ PARAMETER(LCL.Actual_Shipped_Date);
+ PARAMETER(LCL.Event_Code);
+ PARAMETER(*ZERO);
+
+ ENDIF;
+
+ //?Get to warehouse
+ EXECUTE FUNCTION(RTV Ship Cust,Bill Typ RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1393140;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Billing_Activity_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ EXECUTE FUNCTION(Rtv Default WHS/OutWhs RT) TYPE(RTVOBJ) FILE(CAEOREP)          AC1937488;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(NLL.Outside_Warehouse_Flag);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?RMC 8/14/19 use shipping co on TO warehouse to upd inventory with
+ EXECUTE FUNCTION(RTV Shipping Co        RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1695057;
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(LCL.Shipping_Company_USR);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?Get unit weight
+ EXECUTE FUNCTION(RTV Unit Weight/UM Prm RT) TYPE(RTVOBJ) FILE(CABZREP)          AC2154000;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.UOM_Primary);
+ PARAMETER(LCL.Unit_Weight);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // LCL.Order Number Alpha = CVTVAR(DB1.Order Number)
+ LCL.Order_Number_Alpha = CVTVAR(DB1.Order_Number);
+
+ // LCL.Description = CONCAT(CON.Adjust Order,LCL.Order Number Alpha,CON.1)
+ LCL.Description = 'Adjust Order' + LCL.Order_Number_Alpha (1);
+
+ // LCL.Case Quantity = PAR.Quantity Received Total * CON.-1 *
+ LCL.Case_Quantity = PAR.Quantity_Received_Total * -1;
+
+ // LCL.Case Weight = LCL.Case Quantity * LCL.Unit Weight *
+ LCL.Case_Weight = LCL.Case_Quantity * LCL.Unit_Weight;
+
+ // LCL.Inventory Trans. Type = CND.Transfer Warehouse
+ LCL.Inventory_Trans_Type = 'TW';
+
+ // LCL.Description = Condition name of LCL.Inventory Trans. Type
+ LCL.Description = RTVCND(LCL.Inventory_Trans_Type);
+
+ //? WI517 DN 10/05/23-Added Parms 'Called From Program' &
+ //?  'Send Email f/Failed API U'.
+ // Call program Upd Balances Tran-ToWh XF.
+ CALL PROGRAM(Upd Balances Tran-ToWh XF) ('PUFDXFR');
+ PARAMETER(LCL.Shipping_Company_USR);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER('T');
+ PARAMETER('TW');
+ PARAMETER(JOB.*Job_date);
+ PARAMETER(DB1.MDER_Production_Date);
+ PARAMETER('IC');
+ PARAMETER(LCL.Description);
+ PARAMETER(*BLANK);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER('1');
+ PARAMETER(DB1.MDER_Production_Date);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Case_Weight);
+ PARAMETER(LCL.Case_Quantity);
+ PARAMETER(*BLANK);
+ PARAMETER('Y');
+ PARAMETER(PAR.Called_From_Program);
+ PARAMETER(LCL.Send_Email_f_Failed_API_U);
+
+ //?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+ CASE;
+
+ // IF LCL.First Time Through USR is Yes
+ IF LCL.First_Time_Through_USR = 'Y';
+
+ // AND LCL.Send Email f/Failed API U is Yes
+ AND LCL.Send_Email_f_Failed_API_U = 'Y';
+
+ // LCL.First Time Through USR = CND.No
+ LCL.First_Time_Through_USR = 'N';
+
+ // PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+ PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ ENDIF;
+
+ ENDIF;
+
+ ENDIF;
+
+ // PAR.Item Code = DB1.Item Code
+ PAR.Item_Code = DB1.Item_Code;
+
+ // PAR.MDER Production Date = DB1.MDER Production Date
+ PAR.MDER_Production_Date = DB1.MDER_Production_Date;
+
+ // PAR.Quantity Received Total = CON.*ZERO
+ PAR.Quantity_Received_Total = *ZERO;
+
+ ENDIF;
+
+ // PAR.Quantity Received Total = PAR.Quantity Received Total + DB1.Quantity Received
+ PAR.Quantity_Received_Total = PAR.Quantity_Received_Total + DB1.Quantity_Received;
+
+ //?USER: Exit processing
+
+ //?Last item ---
+ CASE;
+
+ // IF PAR.Quantity Received Total is Greater than zero
+ IF PAR.Quantity_Received_Total > *ZERO;
+
+ EXECUTE FUNCTION(RTV Shp qty wgt p/item RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC2148427;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Quantity_Shipped_Total);
+ {
+  //?USER: Initialize routine
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  // PAR.Quantity Shipped Total = PAR.Quantity Shipped Total + DB1.Quantity Shipped Total
+  PAR.Quantity_Shipped_Total = PAR.Quantity_Shipped_Total + DB1.Quantity_Shipped_Total;
+
+ }
+
+ CASE;
+
+ // IF LCL.Quantity Shipped Total is Equal to zero
+ IF LCL.Quantity_Shipped_Total = *ZERO;
+
+ //?If item doesnt exist on the order, create OD with next seq>50
+ // LCL.Order Sequence Number = CON.*ZERO
+ LCL.Order_Sequence_Number = *ZERO;
+
+ EXECUTE FUNCTION(Rtv Chk Item ord twice RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC2148389;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Order_Sequence_Number);
+ PARAMETER(PAR.Item_Code);
+ {
+  //?USER: Process Data record
+
+  CASE;
+
+  // IF DB1.Item Code EQ PAR.Item Code
+  IF DB1.Item_Code = PAR.Item_Code;
+
+  CASE;
+
+  // IF PAR.Order Sequence Number is Equal to zero
+  IF PAR.Order_Sequence_Number = *ZERO;
+
+  // PAR.Order Sequence Number = DB1.Order Sequence Number
+  PAR.Order_Sequence_Number = DB1.Order_Sequence_Number;
+
+  QUIT;
+
+  ENDIF;
+
+  ENDIF;
+
+ }
+
+ CASE;
+
+ // IF LCL.Order Sequence Number is Equal to zero
+ IF LCL.Order_Sequence_Number = *ZERO;
+
+ //?create detail if item not found on order
+ EXECUTE FUNCTION(RTV 1st WHS f/EDI Crt RT) TYPE(RTVOBJ) FILE(OPBGWKP)           AC2148558;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(1);
+ PARAMETER(1);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Detail_Line_Status);
+ PARAMETER(LCL.Actual_Shipped_Date);
+ PARAMETER(LCL.Event_Code);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+  QUIT;
+
+ }
+
+ // LCL.Order Sequence Number = CON.50
+ LCL.Order_Sequence_Number = 50;
+
+ EXECUTE FUNCTION(RTV Next Sequence #    RT) TYPE(RTVOBJ) FILE(OPBGWKP)          AC1312105;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Order_Sequence_Number);
+ {
+  //?USER: Processing if Data record not found
+
+  // PAR.Order Sequence Number = PAR.Order Sequence Number + CON.1
+  PAR.Order_Sequence_Number = PAR.Order_Sequence_Number + 1;
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ // LCL.Order Sequence Number = LCL.Order Sequence Number + CON.1
+ LCL.Order_Sequence_Number = LCL.Order_Sequence_Number + 1;
+
+ // LCL.Order Secondary Line Seq = CON.1
+ LCL.Order_Secondary_Line_Seq = 1;
+
+ // Call program EDI Crt Order Detail  XF.
+ CALL PROGRAM(EDI Crt Order Detail  XF) ('PUGMXFR');
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Order_Sequence_Number);
+ PARAMETER(LCL.Order_Secondary_Line_Seq);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Detail_Line_Status);
+ PARAMETER('O');
+ PARAMETER(*ZERO);
+ PARAMETER(*ZERO);
+ PARAMETER(LCL.Actual_Shipped_Date);
+ PARAMETER(LCL.Event_Code);
+ PARAMETER(*ZERO);
+
+ ENDIF;
+
+ //?Get to warehouse
+ EXECUTE FUNCTION(RTV Ship Cust,Bill Typ RT) TYPE(RTVOBJ) FILE(OPBFCPP)          AC1393140;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Billing_Activity_Type);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ EXECUTE FUNCTION(Rtv Default WHS/OutWhs RT) TYPE(RTVOBJ) FILE(CAEOREP)          AC1937488;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(LCL.Ship_To_Customer);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(NLL.Outside_Warehouse_Flag);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?RMC 8/14/19 use shipping co on TO warehouse to upd inventory with
+ EXECUTE FUNCTION(RTV Shipping Co        RT) TYPE(RTVOBJ) FILE(CAADREP)          AC1695057;
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER(LCL.Shipping_Company_USR);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?Get unit weight
+ EXECUTE FUNCTION(RTV Unit Weight/UM Prm RT) TYPE(RTVOBJ) FILE(CABZREP)          AC2154000;
+ PARAMETER(DB1.Company_Number);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.UOM_Primary);
+ PARAMETER(LCL.Unit_Weight);
+ {
+  //?USER: Processing if Data record not found
+
+  MOVE *ALL (To: PAR From: CON);
+
+  //?USER: Process Data record
+
+  MOVE *ALL (To: PAR From: DB1);
+
+ }
+
+ //?Format date from mmddyy to cyymmdd
+ // LCL.Order Number Alpha = CVTVAR(DB1.Order Number)
+ LCL.Order_Number_Alpha = CVTVAR(DB1.Order_Number);
+
+ // LCL.Description = CONCAT(CON.Adjust Order,LCL.Order Number Alpha,CON.1)
+ LCL.Description = 'Adjust Order' + LCL.Order_Number_Alpha (1);
+
+ // LCL.Case Quantity = PAR.Quantity Received Total * CON.-1 *
+ LCL.Case_Quantity = PAR.Quantity_Received_Total * -1;
+
+ // LCL.Case Weight = LCL.Case Quantity * LCL.Unit Weight *
+ LCL.Case_Weight = LCL.Case_Quantity * LCL.Unit_Weight;
+
+ // LCL.Inventory Trans. Type = CND.Transfer Warehouse
+ LCL.Inventory_Trans_Type = 'TW';
+
+ // LCL.Description = Condition name of LCL.Inventory Trans. Type
+ LCL.Description = RTVCND(LCL.Inventory_Trans_Type);
+
+ //? WI517 DN 10/05/23-Added Parms 'Called From Program' &
+ //?  'Send Email f/Failed API U'.
+ // Call program Upd Balances Tran-ToWh XF.
+ CALL PROGRAM(Upd Balances Tran-ToWh XF) ('PUFDXFR');
+ PARAMETER(LCL.Shipping_Company_USR);
+ PARAMETER(PAR.Item_Code);
+ PARAMETER(LCL.Warehouse_Code_Transfer);
+ PARAMETER('T');
+ PARAMETER('TW');
+ PARAMETER(JOB.*Job_date);
+ PARAMETER(PAR.MDER_Production_Date);
+ PARAMETER('IC');
+ PARAMETER(LCL.Description);
+ PARAMETER(*BLANK);
+ PARAMETER(DB1.Order_Number);
+ PARAMETER('1');
+ PARAMETER(PAR.MDER_Production_Date);
+ PARAMETER(LCL.Warehouse_Code);
+ PARAMETER(LCL.Case_Weight);
+ PARAMETER(LCL.Case_Quantity);
+ PARAMETER(*BLANK);
+ PARAMETER('Y');
+ PARAMETER(PAR.Called_From_Program);
+ PARAMETER(LCL.Send_Email_f_Failed_API_U);
+
+ //?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+ CASE;
+
+ // IF LCL.First Time Through USR is Yes
+ IF LCL.First_Time_Through_USR = 'Y';
+
+ // AND LCL.Send Email f/Failed API U is Yes
+ AND LCL.Send_Email_f_Failed_API_U = 'Y';
+
+ // LCL.First Time Through USR = CND.No
+ LCL.First_Time_Through_USR = 'N';
+
+ // PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+ PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ ENDIF;
+
+ ENDIF;
+
+ ENDIF;
+
+}
+
+
+//?WI517 DN 10/05/23-Set 'Send Email f/Failed API U' for Failed API Call.
+CASE;
+
+// IF LCL.Send Email f/Failed API U is Yes
+IF LCL.Send_Email_f_Failed_API_U = 'Y';
+
+// PAR.Send Email f/Failed API U = LCL.Send Email f/Failed API U
+PAR.Send_Email_f_Failed_API_U = LCL.Send_Email_f_Failed_API_U;
+
+ENDIF;
+
+ENDIF;
+

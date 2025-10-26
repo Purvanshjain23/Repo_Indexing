@@ -1,0 +1,188 @@
+     H/TITLE API WIM Inv Shipping   UP Execute user program
+     H Option(*NoDebugIO:*SrcStmt:*NoUnref) AlwNull(*UsrCtl) dftactgrp(*No)
+     H Debug(*Yes)
+      *
+     H****************** ILE RPG PROGRAM ***********************************************************
+     H* SYSTEM:      Seaboard Foods
+     H* PROGRAM:     PVAYUPR
+     H* PROGRAM DSC: API WIM Inv Shipping   UP Execute user program
+     H* PROGRAMMER:  Danny Nguyen
+     H* CREATED:     09/28/2023
+     H* PROJECT:     WI517 - Warehouse Inventory Management (WIM)
+     H* PURPOSE:     This is a wrapper program to call Eradani's WIMINVSHP program to send
+     H*              the inventory transaction to a JavaScript application which will then
+     H*              call the Outbound WIM API (wim.ordershipping.inventory) to update the
+     H*              WIM tables:
+     H*                PUCGCPP - WIM Item Balance
+     H*                PUCHCPP - WIM Item Balance Detail
+     H*                PUCICPP - WIM Item Trans Detail
+     H*
+     H*‚NOTE:        All Eradani's program source codes are maintain within GIT and we will
+     H*‚             use Visual Studio Code to maintain the programs.
+     H*
+     H**********************************************************************************************
+     H* MODIFICATIONS:
+     H**********************************************************************************************
+     H* DATE      INT  PROJECT  DESCRIPTION
+     H* --------  ---  -------  --------------------------------------------------------------------
+     H* 01/04/24  DN   SR08283  SR# 3008283; Added 'API Request Key U' as output parm &
+     H*                         'API Mode U' as input parm.
+     H*                         Externalize 'Mode' variable & set it with 'API Mode U' instead.
+     H*                         Set 'ReqKey' based on 'Mode' variable.
+     H*                         This will help with confirming 'timeout' WIM Outbound Shipping API
+     H*                         calls & to verify those transactions were 'successful' or not.
+     H*                         JS 'WIMUPIVVRF' will validate/process them.
+     H* 01/03/24  DN   SR08140  SR# 3008140; Added prototype to use QCMDEXC to override QSYSPRT to
+     H*                         hold (*YES) spooled file.
+     H**********************************************************************************************
+      *
+      * CopyBooks
+     D/Copy qrpglesrc,jwpishp_h
+     D/Copy qrpglesrc,ecnctc
+      *
+      * Prototypes
+     DWIMINVSHP        PR                  ExtPgm('WIMINVSHP')
+     D  Mode                         10A   const
+     D  WaitTm                        5P 0 const
+     D  ReqKey                       10A   const
+     D  JwpisReq                           const likeDS(JwpisReq)
+     D  EccRes                             likeDS(EccResult)
+     D  JwpisResult                        likeDS(JwpisRes)
+      *
+      *
+      * SR08140 - Added QCMDEXC Prototype.
+     D Exc_Cmd         PR                  Extpgm('QCMDEXC')
+     D  CmdStr                      200A   Options(*VarSize) Const
+     D  CmdLen                       15  5 Const
+      *
+      *
+      * Standalone Variables
+     D Mode            S             10A
+     D WaitTm          S              5P 0
+     D ReqKey          S             10A
+     D request         DS                  likeDS(JwpisReq) inz
+     D EccRes          DS                  likeDS(EccResult) inz
+     D response        DS                  likeDS(JwpisRes) inz
+      *
+      * SR08140 - Added for QCMDEXC Prototype.
+     D command         S            512A
+      *
+      *
+      * Parameter declarations
+     D P1PARM          DS
+      * I :  API Wait Time U
+     D  P1H0NZ                 1      3P 0
+      *** SR08283 - Changed Parameter DS length.
+     D** P2PARM          DS           137
+     D P2PARM          DS           157
+      * RCD: PAR API WIM Inv Shipping2
+      * I :  Company Number
+     D  P2AIC3                 1      2P 0
+      * I :  Item Code
+     D  P2HGCD                 3      6P 0
+      * I :  Ship From Warehouse
+     D  P2VPCD                 7      9
+      * I :  WIM Inventory Trans ID
+     D  P2NOSC                10     12
+      * I :  WIM Inventory Trans Type
+     D  P2NPSC                13     15
+      * I :  Transaction Date
+     D  P2A9DT                16     19P 0
+      * I :  Production Date
+     D  P2ELDT                20     23P 0
+      * I :  Item Transaction Source
+     D  P2F1ST                24     25
+      * I :  Transaction Description
+     D  P2VQNA                26     55
+      * I :  Transaction Reason Code
+     D  P2A1AB                56     58
+      * I :  Order Number
+     D  P2C4NB                59     62P 0
+      * I :  Shift Number
+     D  P2XLCD                63     63
+      * I :  Ship To Warehouse
+     D  P2L9AA                64     66
+      * I :  Transaction Weight
+     D  P2AHWG                67     72P 2
+      * I :  Transaction Quantity
+     D  P2A5QT                73     78P 2
+      * I :  USR Unship Flag
+     D  P2USST                79     79
+      * I :  Inter-Plant Transfer USR
+     D  P2A5TX                80     80
+      * O :  API EccResult-MsgId U
+     D  P2CLAB                81     87
+      * O :  API EccResult-MsgDesc U
+     D  P2VGU1                88    137
+      *** SR08283 - Added API Request Key U & API Mode U.
+      * B :  API Request Key U
+     D  P2CKAB               138    147
+      * I :  API Mode U
+     D  P2CJAB               148    157
+      *
+      *
+      *************************************************************************
+      * Entry parameters
+     C     *ENTRY        PLIST
+     C                   PARM                    P1PARM                         API Wait Time U
+     C                   PARM                    P2PARM                         RCD: *Arrays
+      *************************************************************************
+      *
+      // Mainline Processing
+      /free
+        // SR08283 - Set 'Mode' from Parameter 'P2CJAB' Variable.
+        // Mode = '*SNDRCV';
+        Mode = P2CJAB;
+        WaitTm = P1H0NZ;
+
+        // SR08283 - Set 'ReqKey' Based on Mode.
+        if Mode = '*SNDRCV';
+          ReqKey = '0         ';
+        else;
+          ReqKey = P2CKAB;
+        endif;
+
+        request.inputs(1).cmp_nbr = P2AIC3;
+        request.inputs(1).item_code = P2HGCD;
+        request.inputs(1).whs_cde = P2VPCD;
+        request.inputs(1).trans_id = P2NOSC;
+        request.inputs(1).trans_type = P2NPSC;
+        request.inputs(1).trans_date = P2A9DT;
+        request.inputs(1).prod_date = P2ELDT;
+        request.inputs(1).trans_source = P2F1ST;
+        request.inputs(1).trans_desc = P2VQNA;
+        request.inputs(1).rsn_cde = P2A1AB;
+        request.inputs(1).ord_nbr = P2C4NB;
+        request.inputs(1).shft_nbr = P2XLCD;
+        request.inputs(1).to_whs_cde = P2L9AA;
+        request.inputs(1).trans_wgt = P2AHWG;
+        request.inputs(1).trans_qty = P2A5QT;
+        request.inputs(1).unship_flag = P2USST;
+        if P2A5TX = 'Y';
+          request.inputs(1).plt_trsfr = 'YES';
+        elseif P2A5TX = 'N';
+          request.inputs(1).plt_trsfr = 'NO';
+        else;
+          request.inputs(1).plt_trsfr = *blank;
+        endif;
+
+        EccRes = '';
+        response = '';
+
+        // SR08140 - Added Override to QSYSPRT.
+        command = 'OVRPRTF FILE(QSYSPRT) HOLD(*YES) SAVE(*YES)';
+        Exc_Cmd(%trim(command): %len(%trim(command)));
+
+        // Send Message to Eradani JavaScript Program to Call Order Shipping API.
+        WIMINVSHP(Mode: WaitTm: ReqKey: request: EccRes: response);
+
+        // Output EccResult Response MsgId & MsgDesc.
+        P2CLAB = EccRes.MsgId;
+        P2VGU1 = EccRes.MsgDesc;
+
+        // SR08283 - Output API Request Key.
+        P2CKAB = ReqKey;
+
+        *InLr = '1';
+        Return;
+

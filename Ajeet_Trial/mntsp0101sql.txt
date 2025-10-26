@@ -1,0 +1,379 @@
+**FREE
+//------------------------------------------------------------------------------------- //
+//Modification Log:                                                                     //
+//------------------------------------------------------------------------------------- //
+//Date    | Mod_ID | Developer  | Case and Description                                  //
+//--------|--------|------------|------------------------------------------------------ //
+//13/10/25|0001    |KAPIL B     | Add logic to validate Customer ID (CUSTID)            //
+//------------------------------------------------------------------------------------- //
+        ctl-opt debug option(*nodebugio:*srcstmt) datfmt(*iso-) timfmt(*iso.) ;
+
+        dcl-f SUPMNTDSP workstn sfile(SFL01:rrn) indDs(dspf);
+
+        dcl-s p_Indicators pointer inz(%addr(*in));
+
+        dcl-ds dspf qualified based(p_Indicators);
+            help ind pos(01);
+            exit ind pos(03);
+            refresh ind pos(05);
+            ADDREC  ind pos(06);
+            previous ind pos(12);
+            // pageup ind pos(25);
+            // pagedown ind pos(26);
+            sflclr ind pos(32);
+            sfldsp ind pos(30);
+            sflctl ind pos(31);
+            sflEnd ind pos(35);
+            sflnxtchg ind pos(36);
+            opterror  ind pos(37);
+            itemDescAddError ind pos(38);
+            itemQtyAddError ind pos(39);
+            itemPriceAddError ind pos(40);
+            itemDescUpdError ind pos(41);
+            itemQtyUpdError ind pos(42);
+            itemPriceUpdError ind pos(43);
+            itemDescCpyError ind pos(44);
+            itemQtyCpyError ind pos(45);
+            itemPriceCpyError ind pos(46);
+            helpCust ind pos(47); // <<-- new: F4 on CUSTID sets this
+        end-ds;
+
+
+        dcl-ds dsp_fields extname('SUP0101') end-ds;
+
+        DCL-DS pgm_stat PSDS;
+             user1 CHAR(10) POS(254);
+             pgm    *proc;
+        END-DS;
+
+        DCL-S  closeCursor ind INZ(*OFF);
+        DCL-C  True const(*ON);
+        DCL-C  False const(*OFF);
+
+        dcl-s rrn like(sflrrn);
+        dcl-s SUPPLIERID CHAR(10);
+        dcl-s CONTACTPERSON CHAR(30);
+        dcl-s SUPPLIERNAME CHAR(30);
+        dcl-s EMAIL        CHAR(30);
+        dcl-s previousPosition like(position);
+        dcl-s pagesize zoned(2) inz(5);
+        dcl-s position char(10);
+        dcl-s wk_query CHAR(200);
+        dcl-s searchPattern CHAR(100);
+        dcl-s WK_MaxSupplierID  like(SUPID);
+        dcl-s WK_SupplierID      like(SUPID);
+        Dcl-S Wk_Date Char(10);
+
+        // Start of program logic
+        exec sql set option commit = *none, closqlcsr = *endmod;
+
+        // Switch on display file refresh for initial load
+        dspf.refresh = True;
+        closeCursor  = False;
+
+        dou dspf.exit or dspf.previous;
+
+            Select;
+            When dspf.refresh;
+
+                clearSubfile();
+                loadSubfile();
+                dspf.refresh = false;
+
+            When   dspf.addrec;
+              LoadAddScreen();
+              dspf.refresh = True;
+            Other;
+
+              // Loop for validation of subfile options
+              READC  SFL01;
+              Dow not %eof();
+                dspf.opterror = False;
+                If Opt <> '2' and  Opt <> ' ' and Opt <> '3' and Opt <> '4'
+                and Opt <> '5';
+                  ERRORMSG = 'Option not valid';
+                  dspf.opterror = True;
+                Endif;
+
+                dspf.sflnxtchg = True;
+                Update SFL01;
+                READC  SFL01;
+
+              Enddo;
+
+              // Process subfile options
+
+              READC  SFL01;
+              Dow not %eof();
+                // handle subfile options
+                If Opt = '2';
+                  // Edit selected record
+                  LoadEditScreen();
+                  dspf.refresh = True;
+                ElseIf Opt = '4';
+                  // Delete selected supplier
+                  Exec SQL
+                    delete from SUP0101
+                    where SUPID = :SUPPLIERID;
+                  If sqlcod = 0;
+                    ERRORMSG = 'Record deleted';
+                  Else;
+                    ERRORMSG = 'Error deleting record';
+                  Endif;
+                  // close cursor and request a refresh so subfile reloads
+                  dspf.refresh = True;
+                  // stop processing remaining readc entries this pass
+                  leave;
+                Else;
+                  // other options (existing behaviour)
+                  Update SFL01;
+                Endif;
+
+                READC  SFL01;
+              Enddo;
+
+            Endsl;
+
+            showSubfile();
+
+        enddo;
+
+        *inlr = True;
+
+        // Clear Subfile procedure...
+        dcl-proc clearSubfile;
+
+            dspf.sflEnd = False;
+            dspf.sflclr = True;
+            write ctl01;
+            dspf.sflclr = False;
+
+        end-proc;
+        // Build Subfile procedure...
+        dcl-proc loadSubfile;
+
+            dspf.sflEnd = False;
+            rrn = 0;
+            OPT=*BLANKS;
+            Clear wk_query;
+            Wk_Query = 'select * from SUP0101 ';
+            EXEC SQL PREPARE S1 FROM :wk_query;
+            EXEC sql declare mycursor scroll cursor for S1;
+            exec sql open mycursor;
+            exec sql fetch next from mycursor into :dsp_fields;
+
+
+            dow sqlcode >= 0 and sqlcode < 100;
+                rrn += 1;
+                write SFL01;
+                if rrn = pagesize;
+                    leave;
+                endif;
+
+                exec sql fetch next from mycursor into :dsp_fields;
+            enddo;
+            // if we didnt load a full page then set END OF SUBFILE
+            if rrn < pagesize;
+                dspf.sflEnd = True;
+            endif;
+            exec sql close mycursor;
+
+        end-proc;
+        // Display Subfile procedure...
+        dcl-proc showSubfile;
+
+            if rrn > 0;
+                dspf.sfldsp = True;
+            else;
+                dspf.sfldsp = False;
+                errormsg = 'No data Available!';
+            endif;
+
+            dspf.sflctl = True;
+
+            write FOOTER;
+            write HEADER;
+            exfmt ctl01;
+
+            clear ERRORMSG;
+
+        end-proc;
+
+
+        // Page up procedure...
+        dcl-proc pageUp;
+
+            // set start cursor RRN at first row of previous page
+            if rrn = pagesize;
+                position = previousPosition;
+            else;
+                clear position;
+            endif;
+
+            // Build the subfile starting at *position*
+            clearSubfile();
+            loadSubfile();
+
+            // If the cursor already in the top the list
+            if rrn <= pagesize;
+                errormsg = 'Start of the list reached';
+            endif;
+        end-proc;
+
+        // Page down procedure...
+        dcl-proc pageDown;
+
+            // Build the subfile starting at *position*
+            clearSubfile();
+            loadSubfile();
+
+            // If more to read then show sflend
+            if rrn < pagesize;
+                errormsg = 'Bottom of the list reached.';
+            endif;
+
+        end-proc;
+
+        // Load Add screen (for suppliers)
+        dcl-proc LoadAddScreen;
+            dcl-s supplierFound int(5) inz(0);
+
+            dou dspf.exit or dspf.previous;
+              clear SUPPLIERID;
+              clear SUPPLIERNAME;
+              clear CONTACTPERSON;
+              clear EMAIL;
+              write footer1;
+              write header;
+              exfmt ITMADDR; // record format in SUPMNTDSP that gathers supplier details
+
+
+              If dspf.exit or dspf.previous;
+                Return;
+              EndIf;
+
+              Clear Errormsg1;
+              dspf.itemDescAddError = False;
+              dspf.itemQtyAddError  = False;
+              dspf.itemPriceAddError = False;
+
+              If SUPLID =*BLANKS;
+                Errormsg1 = 'Please enter Supplier ID';
+                dspf.itemDescAddError = True;
+              Endif;
+
+              If SUPLNAM      = *Blanks;
+                Errormsg1 = 'Please enter Supplier name';
+                dspf.itemQtyAddError = True;
+              Endif;
+
+              If CONTPER      = *Blanks;
+                Errormsg1 = 'Please enter Supplier name';
+                dspf.itemQtyAddError = True;
+              Endif;
+
+              If SEMAIL       = *Blanks;
+                Errormsg1 = 'Please enter Supplier name';
+                dspf.itemQtyAddError = True;
+              Endif;
+
+              // check supplier id does not already exist
+              If Errormsg1 = *Blanks;
+                 supplierFound = 0;
+                 Exec SQL
+                   select 1
+                   into :supplierFound
+                   from SUP0101
+                   where SUPID = :SUPPLIERID
+                   fetch first 1 rows only;
+
+                 if sqlcod = 0;
+                    Errormsg1 = 'Supplier ID already exists';
+                    dspf.itemDescAddError = True;
+                 endif;
+              Endif;
+
+              // Add record if no errors
+              If Errormsg1 = *Blanks;
+                   Exec sql Insert into SUP0101
+                      (SUPID, SUPNAME, SUPCONT, SUPEMAIL)
+                    Values( :SUPLID, :SUPLNAM, :CONTPER, :SEMAIL);
+
+                    If sqlcod = 0;
+                      Errormsg1 ='Inserted successfully';
+                    Else;
+                      Errormsg1 ='Unexpected error. Inform IT team';
+                    Endif;
+              Endif;
+            Enddo;
+        end-proc;
+
+        // Load and edit a selected record
+        dcl-proc LoadEditScreen;
+
+            // Load current selection's details from DB into display fields
+            clear ERRORMsg1;
+            dspf.itemPriceUpdError = False;
+            dspf.itemDescUpdError  = False;
+            dspf.itemQtyUpdError   = False;
+
+            // SUPPLIERID from the current subfile record is already available
+            exec sql
+              select SUPID, SUPNAME, SUPCONT, SUPEMAIL
+              into :SUPLID_E, :SUPLNAM_E   , :CONTPER_E    , :SEMAIL_E
+              from SUP0101
+              where SUPID = :SUPID;
+
+            if sqlcod <> 0;
+               ERRORMsg1 = 'Record not found for edit';
+               return;
+            endif;
+
+            // Present edit screen (re-uses ITMADDR overlay)
+            write footer1;
+            write header;
+            exfmt EDITADDR;
+
+            // If user cancelled/pressed exit then return
+            If dspf.exit or dspf.previous;
+              Return;
+            Endif;
+
+            // Clear previous errors
+            Clear Errormsg1;
+            dspf.itemPriceUpdError = False;
+            dspf.itemDescUpdError  = False;
+            dspf.itemQtyUpdError   = False;
+
+            // Basic validation (mirror Add validations)
+            If SUPLID_E    = *Blanks;
+              Errormsg1='Please enter Supplier ID';
+              dspf.itemDescUpdError = True;
+            Endif;
+
+            If SUPLNAM_E    = *Blanks;
+              Errormsg1='Please enter supplier name';
+              dspf.itemQtyUpdError = True;
+            Endif;
+
+            // Perform update if no validation errors
+            If Errormsg1 = *Blanks;
+                 Exec sql
+                   Update SUP0101
+                   Set SUPNAME = :SUPLNAM_E,
+                       SUPCONT = : CONTPER_E,
+                       SUPEMAIL = :SEMAIL_E
+                   Where SUPID = :SUPID;
+
+                 If sqlcod = 0;
+                    Errormsg1 ='Updated successfully';
+                 Else;
+                    Errormsg1 ='Unexpected error updating record';
+                 Endif;
+
+            Endif;
+
+        end-proc;
+
+
+        // -- end of Program --
