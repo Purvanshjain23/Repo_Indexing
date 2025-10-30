@@ -491,7 +491,7 @@ Invoke-RestMethod -Uri "http://localhost:3000/api/v1/pbgrefr/USA/2/IA/50001" -Me
 
 The project analyzes legacy IBM i components:
 
-- **Programs**: RPG business logic transformation
+- **Programs**: RPG business logic transformation with line-by-line traceability
 - **Files**: DDS to modern database schema conversion
 - **Jobs**: CL script to modern automation conversion
 - **Dependencies**: Cross-program call analysis
@@ -502,9 +502,94 @@ Target architecture includes:
 
 - **Microservices**: Decomposed business functions
 - **REST APIs**: Modern integration patterns
-- **Cloud Database**: Managed database services
+- **Cloud Database**: Managed database services (PostgreSQL)
 - **Container Deployment**: Docker and Kubernetes ready
 - **CI/CD Pipeline**: Automated testing and deployment
+- **Code Quality**: ESLint, Prettier, Jest integration
+- **Transaction Support**: Atomic operations with rollback
+- **Audit Trail**: Legacy program metadata preservation
+
+### Infrastructure Utilities
+
+The modernized code includes enhanced infrastructure patterns:
+
+#### **1. Transaction Support**
+```typescript
+// src/_shared/database/transaction.ts
+import { withTransaction } from './_shared/database/transaction';
+
+// Atomic database operations with automatic rollback on error
+await withTransaction(pool, async (client) => {
+  await client.query('INSERT INTO table1...');
+  await client.query('UPDATE table2...');
+  // Auto-commits if successful, auto-rollbacks if error
+});
+```
+
+#### **2. Program Metadata Constants**
+```typescript
+// src/_shared/constants/metadata.ts
+export const PROGRAM_METADATA = {
+  PBGREFR_PROGRAM: 'PBGREFR',
+  // Maps modern modules to legacy IBM i program names
+};
+
+// Usage in audit trails
+const record = {
+  ...data,
+  create_program: PROGRAM_METADATA.PBGREFR_PROGRAM,
+  create_timestamp: new Date().toISOString()
+};
+```
+
+#### **3. Enhanced Validation Utilities**
+```typescript
+// src/_shared/utils/validation.ts
+import { validateDate, validateRequired } from './_shared/utils/validation';
+
+// Date validation with business rules (no future dates, etc.)
+const dateCheck = validateDate('20251028');
+if (!dateCheck.valid) {
+  throw new Error(dateCheck.error);
+}
+```
+
+#### **4. Legacy Traceability**
+Every service method includes:
+- **JSDoc with legacy source**: `@legacySource {filename}:{line_start}-{line_end}`
+- **Inline comments**: Reference specific legacy lines
+- **Exact error messages**: Match legacy messages precisely
+- **Business logic flows**: Numbered steps matching legacy sequence
+
+Example:
+```typescript
+/**
+ * Create freight rate record
+ * LEGACY SOURCE: pbgrefr.txt:170-212 (AddRate subroutine)
+ *
+ * Business Logic Flow:
+ * 1. Validate required fields
+ * 2. Trim key ID (pbgrefr.txt:96)
+ * 3. Check for duplicates (pbgrefr.txt:262-267)
+ * 4. Create audit trail (pbgrefr.txt:308-309)
+ */
+async createRate(data: IFreightRateCreate): Promise<IFreightRate> {
+  // LEGACY BUSINESS RULE: Trim key ID
+  // Source: pbgrefr.txt:96 (KEYID = %trim(KEYID))
+  const trimmedKey = data.key_id.trim();
+  
+  // LEGACY BUSINESS RULE: Check for duplicate
+  // Source: pbgrefr.txt:262-267
+  const exists = await this.repository.exists(trimmedKey);
+  if (exists) {
+    // Exact legacy message (line 265)
+    throw new Error(`ID ${trimmedKey} already exists.`);
+  }
+  
+  // Create with audit trail
+  return await this.repository.create(record);
+}
+```
 
 ## Legacy Code Transformation
 

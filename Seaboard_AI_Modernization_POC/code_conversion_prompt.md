@@ -1,5 +1,60 @@
 # 🎯 Universal IBM i to Full-Stack TypeScript/React Modernization Prompt
 
+## ⚠️ CRITICAL TRACEABILITY REQUIREMENTS - READ FIRST ⚠️
+
+**MANDATORY LEGACY TRACEABILITY FOR ALL GENERATED CODE:**
+
+**❌ UNACCEPTABLE OUTPUT:**
+- Controllers without file-level JSDoc or RPG command key mappings
+- Services without Business Logic Flow documentation
+- Repository methods without RPG operation comments (CHAIN, WRITE, UPDATE, DELETE)
+- Models without DDS line references on every Joi field
+- ANY code missing legacy source line numbers
+
+**✅ ACCEPTABLE OUTPUT - EVERY FILE MUST HAVE:**
+
+1. **Controllers**: 
+   - File-level JSDoc with `@legacySource {file}:1-50 (Command Key Processing)`
+   - RPG command key mappings (F3, F6, F9, F11, F12, F15, Enter)
+   - Method-level JSDoc for every endpoint
+
+2. **Services**:
+   - JSDoc with `@legacySource {file}:{lines} ({subroutine})`
+   - Numbered Business Logic Flow (1. Step - line X, 2. Step - line Y, etc.)
+   - Inline comments with line numbers: `// Line 180: Trim ID (%trim(FIELD))`
+
+3. **Repositories**:
+   - JSDoc with RPG operation: `@legacySource {file}:{lines} ({subroutine})`
+   - Inline RPG mapping: `// Line 322: CHAIN {FILE} (Primary key lookup)`
+   - %found indicator comments: `// Matches RPG *INLr indicator (line 325)`
+
+4. **Models**:
+   - Class-level JSDoc: `@legacySource {DDS_file}.txt:15-80 (DDS field definitions)`
+   - Every Joi field: `// Line 20: {FIELD} - 7A (7 characters, alphanumeric)`
+   - Validation methods with numbered Business Logic Flow
+
+**🛑 ENFORCEMENT RULE:**
+**IF you generate ANY file without the above traceability, STOP immediately and regenerate with proper legacy source references. NO EXCEPTIONS.**
+
+Use CustomerService.ts as the gold standard pattern - EVERY module must have same detail level.
+
+## 📚 COMPREHENSIVE TRACEABILITY PATTERNS - DETAILED EXAMPLES
+
+See the complete traceability patterns in the **Enterprise Platform Conversion** documentation for detailed examples of:
+- Controller file-level and method-level JSDoc patterns
+- Service Business Logic Flow documentation with line references
+- Repository RPG operation mapping patterns (CHAIN, WRITE, UPDATE, DELETE, SETLL/READ)
+- Model DDS field line references in Joi schemas
+- Validation method documentation with numbered Business Logic Flow
+- PROGRAM_METADATA usage pattern (Services use, Models receive as parameter)
+
+**Reference File:** `Enterprise_Platform_Conversion/Legacy Source Files/Conversion_prompt.md`
+**Section:** "COMPREHENSIVE TRACEABILITY PATTERNS (NEW - MANDATORY)"
+
+These patterns ensure complete traceability from modern TypeScript code back to legacy IBM i source files.
+
+---
+
 ## Quick Setup - Just Paste and Go!
 1. Replace `{PROGRAM_NAME}` with your program (e.g., PBGREFR, CUSTMAST, INVCTL)
 2. Replace `{program_name_lowercase}` with lowercase version (e.g., pbgrefr, custmast, invctl)
@@ -51,9 +106,15 @@ Convert {PROGRAM_NAME} module from RPG/AD/DDS to TypeScript/Node.js following en
 6. src/routes/{PROGRAM_NAME}Routes.ts - Express routing
 7. src/index.ts - Main server with database mode switching
 
+### **🎯 INFRASTRUCTURE FILES (Always Generated):**
+8. src/_shared/database/transaction.ts - Transaction wrapper utility
+9. src/_shared/constants/metadata.ts - Program metadata constants  
+10. src/_shared/utils/validation.ts - Reusable validation functions
+11. src/_shared/utils/stringUtils.ts - String manipulation utilities
+
 ### **🎯 MOCK DATABASE SYSTEM (Always Generated):**
-8. src/_shared/local/{PROGRAM_NAME}MockDB.ts - In-memory mock database
-9. src/database/connection.ts - PostgreSQL connection pool
+12. src/_shared/local/{PROGRAM_NAME}MockDB.ts - In-memory mock database
+13. src/database/connection.ts - PostgreSQL connection pool
 
 ### **⚡ REACT FRONTEND (Generated ONLY if DDS file is provided):**
 10. src/ui/{PROGRAM_NAME}View.tsx - React component replacing green-screen
@@ -119,6 +180,397 @@ const modernizationScope = {
 ```
 
 ## CRITICAL REQUIREMENTS (Must Follow Exactly):
+
+### **LEGACY BUSINESS RULE PRESERVATION** (Enterprise-Level Traceability)
+
+**MANDATORY - Legacy Source Traceability**: Every service method MUST include:
+1. **JSDoc with legacy source reference**: `@legacySource {filename}:{line_start}-{line_end} ({subroutine_name})`
+2. **Numbered business logic flow**: Document exact sequence from legacy
+3. **Inline comments with line numbers**: Reference specific legacy lines for each operation
+4. **Exact error messages**: Match legacy error messages precisely (including punctuation)
+
+**⚠️ CRITICAL ENFORCEMENT RULES**:
+- **EVERY Controller function** → MUST have file-level JSDoc + RPG command key mappings + method-level JSDoc
+- **EVERY Service method** → MUST have comprehensive JSDoc with Business Logic Flow + inline line number comments
+- **EVERY Repository method** → MUST have JSDoc with RPG operation mapping + inline RPG file operation comments
+- **EVERY Model field in Joi schema** → MUST have inline DDS line reference comment
+- **EVERY Model validation method** → MUST have JSDoc with Business Logic Flow
+- **IF you generate code WITHOUT the above** → **STOP and regenerate with proper traceability**
+
+**Example Pattern - SERVICE METHOD**:
+```typescript
+/**
+ * Create new {PROGRAM_NAME} record with comprehensive validation
+ * @legacySource {program_name}.txt:170-212 (Add{PROGRAM_NAME} subroutine)
+ * @description Create new {program_name} with comprehensive validation
+ *
+ * Business Logic Flow (from RPG lines 170-212):
+ * 1. Validate required fields (ID, Name, Date) - line 175
+ * 2. Trim key ID ({program_name}.txt:180)
+ * 3. Check for duplicate ID via database lookup ({program_name}.txt:185-190)
+ * 4. Validate date format ({program_name}.txt:195-200)
+ * 5. Validate business rules (status, category, etc.) ({program_name}.txt:202-205)
+ * 6. Create audit trail with timestamp and program name ({program_name}.txt:208-209)
+ * 7. Write to database ({program_name}.txt:210)
+ */
+async create{PROGRAM_NAME}(data: I{PROGRAM_NAME}Create): Promise<I{PROGRAM_NAME}Record> {
+  try {
+    logger.info('Creating new {program_name}', { id: data.{id_field} });
+
+    // Line 175: Validate input data (Validate{PROGRAM_NAME}Fields subroutine)
+    const validation = {PROGRAM_NAME}Model.validateCreate(data);
+    if (validation.error) {
+      const errorMessage = validation.error.details.map(d => d.message).join(', ');
+      logger.error('Validation error:', { error: errorMessage });
+      throw new Error(errorMessage);
+    }
+
+    // Line 180: Trim key ID (%trim(KEYID))
+    const trimmedKey = data.key_id.trim();
+
+    // Line 185-190: Check for duplicate ID (Chain AKEYID {FILE}; If %found...)
+    const exists = await this.repository.exists(trimmedKey);
+    if (exists) {
+      const errorMessage = `ID ${trimmedKey} already exists.`;  // Exact legacy message (line 188)
+      logger.error(errorMessage);
+      throw new Error(errorMessage);
+    }
+
+    // Line 195-200: Validate date format (monitor; DateVal = %date(ADATE: *ISO))
+    const dateValidation = {PROGRAM_NAME}Model.validateDate(data.date_field);
+    if (!dateValidation.valid) {
+      const errorMessage = dateValidation.error || 'Invalid Date.';
+      logger.error('Date validation failed:', { error: errorMessage });
+      throw new Error(errorMessage);
+    }
+
+    // Line 202-205: Validate business rules
+    // Add specific business rule validations here with line comments
+
+    // Line 208-209: Create audit trail
+    // Fields: {CREATE_TS} = %char(%timestamp()), {CREATE_PGM} = PgmDS.PgmName
+    const record = {PROGRAM_NAME}Model.toRecord(
+      { ...data, key_id: trimmedKey },
+      PROGRAM_METADATA.{PROGRAM_NAME}_PROGRAM
+    );
+
+    // Line 210: Write to database
+    const new{PROGRAM_NAME} = await this.repository.create(record);
+
+    // Success message matches {program_name}.txt:211
+    logger.info(`{PROGRAM_NAME} ${trimmedKey} added successfully.`);
+
+    return new{PROGRAM_NAME};
+  } catch (error) {
+    logger.error('Error creating {program_name}:', error);
+    throw error;
+  }
+}
+```
+
+**Example Pattern - CONTROLLER FILE-LEVEL**:
+```typescript
+/**
+ * @legacySource {program_name}.txt:1-50 (Command Key Processing section)
+ * @description {PROGRAM_NAME} maintenance controller
+ * 
+ * RPG Command Key Mappings (from {program_name}.txt):
+ * - F3 (Exit) → Client-side navigation (line 25)
+ * - F6 (Add) → POST endpoint (line 28)
+ * - F9 (Change) → PUT endpoint (line 32)
+ * - F11 (Display Names) → Query parameter toggle (line 35)
+ * - F12 (Cancel) → Client-side cancel (line 38)
+ * - F15 (Batch Update) → POST /batch-update endpoint (line 42)
+ * - Enter (Process) → Submit form to appropriate endpoint (line 45)
+ */
+export function create{PROGRAM_NAME}Controller(pool: Pool) {
+  const service = new {PROGRAM_NAME}Service(pool);
+
+  return {
+    /**
+     * @legacySource {program_name}.txt:60-95 (Display subfile list - DspSfl subroutine)
+     * @description Retrieve all records with filtering/pagination
+     * Maps to RPG subfile display logic (SFLPAG/SFLSIZ operations)
+     */
+    async getAll{PROGRAM_NAME}s(req: Request, res: Response): Promise<void> {
+      // Implementation...
+    },
+    // ... more methods with JSDoc
+  };
+}
+```
+
+**Example Pattern - REPOSITORY METHOD**:
+```typescript
+/**
+ * @legacySource {program_name}.txt:320-335 (Get{PROGRAM_NAME} subroutine)
+ * @description Retrieve {program_name} by ID (CHAIN operation from line 322)
+ */
+async findById(id: string): Promise<I{PROGRAM_NAME}Record | null> {
+  if (this.useMockDB) {
+    return this.mockDB.get{PROGRAM_NAME}ById(id) || null;
+  }
+
+  // Line 322: CHAIN {KEY_FIELD} {FILE_NAME} (Primary key lookup)
+  const query = 'SELECT * FROM {table} WHERE {key_field} = $1 AND record_status = $2';
+  const result: QueryResult<any> = await this.pool.query(query, [id, 'A']);
+
+  // Line 324: Check if record found (%found indicator)
+  if (result.rows.length === 0 || !result.rows[0]) {
+    logger.warn(`{PROGRAM_NAME} not found`, { id });
+    return null;  // Matches RPG *INLr indicator (line 325)
+  }
+
+  return this.mapRowTo{PROGRAM_NAME}(result.rows[0]);
+}
+```
+
+**Example Pattern - MODEL JOI SCHEMA**:
+```typescript
+/**
+ * @legacySource {DDS_FILE}.txt:15-80 (DDS field definitions)
+ * @description {PROGRAM_NAME} data validation matching DDS specifications
+ */
+export class {PROGRAM_NAME}Model {
+  private static createSchema = Joi.object({
+    // Line 20: {FIELD1} field - 7A (7 characters, alphanumeric)
+    {field1}: Joi.string().length(7).required().messages({
+      'string.length': '{Field1} must be 7 characters',  // DDS length check (line 21)
+      'string.empty': '{Field1} cannot be blank.',       // DDS DSPATR(*PR) (line 22)
+      'any.required': '{Field1} cannot be blank.'
+    }),
+    
+    // Line 25: {FIELD2} field - 30A
+    {field2}: Joi.string().max(30).required().messages({
+      'string.max': '{Field2} cannot exceed 30 characters',  // DDS length (line 26)
+      'any.required': '{Field2} is required'
+    }),
+    
+    // Line 30: {STATUS} field - 1A (values: A=Active, I=Inactive)
+    {status}: Joi.string().valid('A', 'I').required().messages({
+      'any.only': 'Status must be A or I',  // DDS VALUES keyword (line 31)
+      'any.required': 'Status required'
+    })
+  });
+
+  /**
+   * @legacySource {program_name}.txt:277-295 (Validate{DATE} subroutine)
+   * @description Validate {date} field with business rules
+   * 
+   * Validation Rules (from RPG lines 277-295):
+   * 1. Check format YYYYMMDD - line 280
+   * 2. Check calendar validity - line 285
+   * 3. Check not future date - line 290
+   */
+  public static validate{DATE}(dateStr: string): { valid: boolean; error?: string } {
+    // Line 280: Format check
+    if (!/^\d{8}$/.test(dateStr)) {
+      return { valid: false, error: 'Invalid Date. Must be YYYYMMDD format' };  // Exact RPG error (line 281)
+    }
+
+    // Line 285: Calendar validity check
+    // ... implementation
+
+    // Line 290: No future dates
+    // ... implementation
+
+    return { valid: true };
+  }
+}
+```
+
+### **INFRASTRUCTURE UTILITIES** (Enhanced Patterns)
+
+**MANDATORY - Generate these utilities**:
+
+#### 1. Transaction Support (`src/_shared/database/transaction.ts`)
+```typescript
+import { Pool, PoolClient } from 'pg';
+import winston from 'winston';
+
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.json(),
+  transports: [new winston.transports.Console()]
+});
+
+/**
+ * Transaction wrapper for database operations requiring atomicity
+ * LEGACY CONTEXT: IBM i had implicit commitment control - operations were atomic
+ */
+export async function withTransaction<T>(
+  pool: Pool,
+  callback: (client: PoolClient) => Promise<T>
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    logger.info('Transaction started');
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    logger.info('Transaction committed successfully');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    logger.error('Transaction rolled back due to error:', {
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+```
+
+#### 2. Program Metadata Constants (`src/_shared/constants/metadata.ts`)
+```typescript
+/**
+ * Centralized program metadata for audit trail consistency
+ * Maps modern modules to legacy IBM i program names
+ */
+export const PROGRAM_METADATA = {
+  {PROGRAM_NAME}_PROGRAM: '{PROGRAM_NAME}',
+  UNKNOWN: 'MODERNAPI'
+} as const;
+
+export const getCurrentTimestamp = (): string => new Date().toISOString();
+export const getCurrentUser = (): string => process.env.USER || 'SYSTEM';
+```
+
+#### 3. Enhanced Validation Utils (`src/_shared/utils/validation.ts`)
+```typescript
+/**
+ * Date validation with business rules
+ * Pattern from RPG: monitor; DateVal = %date(FIELD: *ISO); on-error; endmon;
+ */
+export function validateDate(dateStr: string): { valid: boolean; error?: string } {
+  // Format check (YYYYMMDD)
+  if (!/^\d{8}$/.test(dateStr)) {
+    return { valid: false, error: 'Invalid Date. Must be YYYYMMDD format' };
+  }
+
+  // Calendar validity check
+  const year = parseInt(dateStr.substring(0, 4));
+  const month = parseInt(dateStr.substring(4, 6));
+  const day = parseInt(dateStr.substring(6, 8));
+  const date = new Date(year, month - 1, day);
+
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+    return { valid: false, error: 'Invalid Date.' };
+  }
+
+  // Business rule: No future dates
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (date > today) {
+    return { valid: false, error: 'Date cannot be in the future.' };
+  }
+
+  return { valid: true };
+}
+
+export function validateRequired(value: any, fieldName: string): { valid: boolean; error?: string } {
+  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) {
+    return { valid: false, error: `${fieldName} cannot be blank.` };
+  }
+  return { valid: true };
+}
+```
+
+#### 4. String Utils (`src/_shared/utils/stringUtils.ts`)
+```typescript
+/**
+ * String manipulation utilities matching RPG built-in functions
+ */
+
+// RPG: %trim(field)
+export function trim(str: string): string {
+  return str.trim();
+}
+
+// RPG: %char(value)
+export function toChar(value: any): string {
+  return String(value);
+}
+
+// RPG: %subst(string: start: length)
+export function substr(str: string, start: number, length?: number): string {
+  return str.substring(start - 1, length ? start - 1 + length : undefined);
+}
+
+// RPG: %xlate(from: to: string)
+export function translate(str: string, from: string, to: string): string {
+  let result = str;
+  for (let i = 0; i < from.length; i++) {
+    result = result.replace(new RegExp(from[i], 'g'), to[i] || '');
+  }
+  return result;
+}
+```
+
+### **CRITICAL FIXES** (Prevent Common Issues)
+
+**MANDATORY - Apply these fixes in generated code**:
+
+#### Fix 1: Vite Environment Variables (CRITICAL)
+```typescript
+// ❌ WRONG - Causes "process is not defined" in browser
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL;
+
+// ✅ CORRECT - Use import.meta.env for Vite projects
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api/v1';
+```
+
+#### Fix 2: API Endpoint Consistency (HIGH Priority)
+```typescript
+// Backend routes: MUST use /api/v1/ prefix
+app.use('/api/v1/{program_name_lowercase}', {PROGRAM_NAME}Routes);
+
+// Frontend API calls: MUST match backend prefix
+const response = await fetch(`${API_BASE_URL}/{program_name_lowercase}`);
+
+// Vite proxy configuration
+server: {
+  proxy: {
+    '/api': {
+      target: 'http://localhost:3000',
+      rewrite: (path) => path.replace(/^\/api/, '/api/v1')
+    }
+  }
+}
+```
+
+#### Fix 3: Cross-Platform Scripts (HIGH Priority)
+```json
+{
+  "scripts": {
+    "dev:fullstack:mock": "cross-env USE_MOCK_DB=true concurrently \"npm run dev\" \"npm run dev:frontend\""
+  }
+}
+```
+
+#### Fix 4: Enhanced Null Safety in Repository
+```typescript
+// ALWAYS check both conditions
+if (result.rows.length === 0 || !result.rows[0]) {
+  logger.warn(`Operation returned no rows for ${id}`);
+  return null;
+}
+return this.mapRowToRecord(result.rows[0]);
+```
+
+#### Fix 5: Audit Trail Initialization
+```typescript
+// Initialize BOTH create and update fields on record creation
+const timestamp = new Date().toISOString();
+return {
+  ...data,
+  create_timestamp: timestamp,
+  create_program: PROGRAM_METADATA.{PROGRAM_NAME}_PROGRAM,
+  update_timestamp: timestamp,  // Initialize update fields too
+  update_program: PROGRAM_METADATA.{PROGRAM_NAME}_PROGRAM
+};
+```
 
 ## 🔧 CONDITIONAL LOGIC FOR FILE-SPECIFIC GENERATION
 
